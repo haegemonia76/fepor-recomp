@@ -14,9 +14,11 @@ pub fn run(opts: &Options, report: Option<PathBuf>) -> Result<(), Fail> {
     };
     if let Some(path) = path {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| Fail::Other(format!("{}: {e}", dir.display())))?;
+            std::fs::create_dir_all(dir)
+                .map_err(|e| Fail::Other(format!("{}: {e}", dir.display())))?;
         }
-        std::fs::write(&path, analysis.report()).map_err(|e| Fail::Other(format!("{}: {e}", path.display())))?;
+        std::fs::write(&path, analysis.report())
+            .map_err(|e| Fail::Other(format!("{}: {e}", path.display())))?;
         eprintln!("report written to {}", path.display());
     }
     Ok(())

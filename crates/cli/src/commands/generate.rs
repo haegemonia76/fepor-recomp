@@ -40,7 +40,12 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)
 }
 
-fn generate(opts: &Options, args: &GenerateArgs, session: &Session, out: &Path) -> Result<PathBuf, Fail> {
+fn generate(
+    opts: &Options,
+    args: &GenerateArgs,
+    session: &Session,
+    out: &Path,
+) -> Result<PathBuf, Fail> {
     let analysis = analyze(&session.dol, &session.analysis_cfg);
     eprintln!("{}", analysis.summary());
 
@@ -49,19 +54,32 @@ fn generate(opts: &Options, args: &GenerateArgs, session: &Session, out: &Path) 
         .clone()
         .or(opts.cfg.generate.runtime_dir.clone())
         .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime")));
-    let runtime_dir = std::fs::canonicalize(&runtime_dir).map_err(|e| Fail::Usage(format!("runtime dir {}: {e}", runtime_dir.display())))?;
+    let runtime_dir = std::fs::canonicalize(&runtime_dir)
+        .map_err(|e| Fail::Usage(format!("runtime dir {}: {e}", runtime_dir.display())))?;
     let gen_dir = out.join("generated");
-    std::fs::create_dir_all(&gen_dir).map_err(|e| Fail::Other(format!("{}: {e}", gen_dir.display())))?;
+    std::fs::create_dir_all(&gen_dir)
+        .map_err(|e| Fail::Other(format!("{}: {e}", gen_dir.display())))?;
 
     let lift_opts = fepor_ppc_lift::Options {
-        functions_per_unit: args.functions_per_unit.unwrap_or(opts.cfg.generate.functions_per_unit),
+        functions_per_unit: args
+            .functions_per_unit
+            .unwrap_or(opts.cfg.generate.functions_per_unit),
         runtime_dir: runtime_dir.display().to_string(),
         trace_calls: args.trace_calls || opts.cfg.generate.trace_calls,
         hle: session.analysis_cfg.hle.clone(),
     };
-    let stats = fepor_ppc_lift::generate(&session.dol, &analysis, &lift_opts, &mut |name, content| write_if_changed(&gen_dir.join(name), content))
+    let stats =
+        fepor_ppc_lift::generate(&session.dol, &analysis, &lift_opts, &mut |name, content| {
+            write_if_changed(&gen_dir.join(name), content)
+        })
         .map_err(|e| Fail::Other(e.to_string()))?;
-    eprintln!("generated {} functions ({} instructions) in {} units under {}", stats.functions, stats.instructions, stats.units, gen_dir.display());
+    eprintln!(
+        "generated {} functions ({} instructions) in {} units under {}",
+        stats.functions,
+        stats.instructions,
+        stats.units,
+        gen_dir.display()
+    );
     let total: usize = stats.unimplemented.values().sum();
     eprintln!("{total} instructions emitted as runtime traps");
     for (op, n) in &stats.unimplemented {
@@ -71,9 +89,16 @@ fn generate(opts: &Options, args: &GenerateArgs, session: &Session, out: &Path) 
 }
 
 fn require_tool(tool: &str) -> Result<(), Fail> {
-    match Command::new(tool).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status() {
+    match Command::new(tool)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
         Ok(_) => Ok(()),
-        Err(_) => Err(Fail::Toolchain(format!("{tool} was not found on PATH; install clang, cmake and ninja to build the game"))),
+        Err(_) => Err(Fail::Toolchain(format!(
+            "{tool} was not found on PATH; install clang, cmake and ninja to build the game"
+        ))),
     }
 }
 
@@ -85,7 +110,10 @@ fn run_tool(cmd: &mut Command, what: &str, mut on_line: impl FnMut(&str)) -> Res
         .spawn()
         .map_err(|e| Fail::Toolchain(format!("cannot start {what}: {e}")))?;
     let mut tail: Vec<String> = Vec::new();
-    for line in BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok) {
+    for line in BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .map_while(Result::ok)
+    {
         eprintln!("{line}");
         on_line(&line);
         tail.push(line);
@@ -93,11 +121,16 @@ fn run_tool(cmd: &mut Command, what: &str, mut on_line: impl FnMut(&str)) -> Res
             tail.remove(0);
         }
     }
-    let status = child.wait().map_err(|e| Fail::Build(format!("{what}: {e}")))?;
+    let status = child
+        .wait()
+        .map_err(|e| Fail::Build(format!("{what}: {e}")))?;
     if status.success() {
         Ok(())
     } else {
-        Err(Fail::Build(format!("{what} failed ({status}); last output:\n{}", tail.join("\n"))))
+        Err(Fail::Build(format!(
+            "{what} failed ({status}); last output:\n{}",
+            tail.join("\n")
+        )))
     }
 }
 
@@ -142,11 +175,18 @@ pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fai
         |_| {},
     )?;
     progress(0.35, "Building the game");
-    run_tool(Command::new("cmake").arg("--build").arg(&build_dir), "cmake build", |line| {
-        if let Some((done, total)) = parse_ninja_progress(line).filter(|&(_, t)| t > 0) {
-            progress(0.35 + 0.63 * done as f32 / total as f32, &format!("Building the game ({done}/{total})"));
-        }
-    })?;
+    run_tool(
+        Command::new("cmake").arg("--build").arg(&build_dir),
+        "cmake build",
+        |line| {
+            if let Some((done, total)) = parse_ninja_progress(line).filter(|&(_, t)| t > 0) {
+                progress(
+                    0.35 + 0.63 * done as f32 / total as f32,
+                    &format!("Building the game ({done}/{total})"),
+                );
+            }
+        },
+    )?;
     // Marker for RecompLauncher's `prepare.done`: written last, so its presence means the build finished.
     let marker = format!(
         "{{\n  \"tool\": \"{}\",\n  \"game_id\": \"{}\",\n  \"build_type\": \"{}\"\n}}\n",
@@ -154,7 +194,8 @@ pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fai
         session.disc.game_id(),
         args.build_type
     );
-    std::fs::write(out.join("prepared.json"), marker).map_err(|e| Fail::Other(format!("prepared.json: {e}")))?;
+    std::fs::write(out.join("prepared.json"), marker)
+        .map_err(|e| Fail::Other(format!("prepared.json: {e}")))?;
     progress(1.0, "Done");
     Ok(())
 }
@@ -165,7 +206,10 @@ mod tests {
 
     #[test]
     fn ninja_progress_lines() {
-        assert_eq!(parse_ninja_progress("[12/43] Building CXX object x.o"), Some((12, 43)));
+        assert_eq!(
+            parse_ninja_progress("[12/43] Building CXX object x.o"),
+            Some((12, 43))
+        );
         assert_eq!(parse_ninja_progress("[ 3/9] Linking"), Some((3, 9)));
         assert_eq!(parse_ninja_progress("warning: x"), None);
     }

@@ -1,0 +1,12 @@
+[package]
+name = "fepor-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fepor-gx.workspace = true
+wgpu = "26"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.17"

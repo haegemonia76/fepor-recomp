@@ -86,7 +86,10 @@ fn rejects_non_gcm_and_unknown_version() {
     std::fs::write(&bad, vec![0u8; 0x1000]).unwrap();
     assert!(open_disc(&bad).is_err());
 
-    assert_eq!(version::check("GXXX01", b"").unwrap_err(), version::VersionError::Unsupported("GXXX01".into()));
+    assert_eq!(
+        version::check("GXXX01", b"").unwrap_err(),
+        version::VersionError::Unsupported("GXXX01".into())
+    );
     assert!(matches!(
         version::check("GFEP01", b"not the dol"),
         Err(version::VersionError::HashMismatch { .. })
@@ -97,7 +100,11 @@ fn rejects_non_gcm_and_unknown_version() {
 fn config_roundtrip_and_unknown_keys() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("c.toml");
-    let c = Config { disc: Some("a.iso".into()), output: Some("out".into()), ..Config::default() };
+    let c = Config {
+        disc: Some("a.iso".into()),
+        output: Some("out".into()),
+        ..Config::default()
+    };
     c.save(&p).unwrap();
     assert_eq!(Config::load(&p).unwrap(), c);
     std::fs::write(&p, "bogus = 1").unwrap();

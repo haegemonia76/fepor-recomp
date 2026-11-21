@@ -5,7 +5,8 @@ use crate::machine::machine;
 
 pub type HostFn = unsafe extern "C" fn(*mut Context);
 
-static CURRENT: std::sync::atomic::AtomicPtr<Context> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static CURRENT: std::sync::atomic::AtomicPtr<Context> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Register the context of the running guest thread (used for crash reports).
 pub fn set_current(c: *mut Context) {
@@ -15,7 +16,12 @@ pub fn set_current(c: *mut Context) {
 /// `FEPOR_WATCHDOG=<seconds>`: after that long, print where the guest is (recent calls, registers) and
 /// exit with status 124. Meant for finding spin loops while bringing the boot up.
 pub fn start_watchdog() {
-    let Some(secs) = std::env::var("FEPOR_WATCHDOG").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+    let Some(secs) = std::env::var("FEPOR_WATCHDOG")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return;
+    };
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(secs));
         eprintln!("fepor: watchdog: guest still running after {secs}s");
@@ -24,10 +30,56 @@ pub fn start_watchdog() {
         if !c.is_null() {
             // SAFETY: set_current stores a context that outlives the guest run.
             let c = unsafe { &*c };
-            eprintln!("  r1={:#010x} lr={:#010x} ctr={:#010x} r3={:#010x} msr={:#06x}", c.r[1], c.lr, c.ctr, c.r[3], c.msr);
+            eprintln!(
+                "  r1={:#010x} lr={:#010x} ctr={:#010x} r3={:#010x} msr={:#06x}",
+                c.r[1], c.lr, c.ctr, c.r[3], c.msr
+            );
         }
         let recent = machine().trace.recent(32);
-        eprintln!("  recent calls (oldest first): {}", recent.iter().map(|a| format!("{a:08x}")).collect::<Vec<_>>().join(" "));
+        eprintln!(
+            "  recent calls (oldest first): {}",
+            recent
+                .iter()
+                .map(|a| format!("{a:08x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        // OS threads: __OSActiveThreadQueue head at 0x800000DC, linkActive at +0x2FC.
+        let m = machine();
+        if !c.is_null() {
+            // SAFETY: as above.
+            let r13 = unsafe { &*c }.r[13];
+            eprintln!(
+                "  r13={r13:#010x} [r13-0x65a8]={:#010x} (draw-done flag in the high byte)",
+                m.read_u32(r13.wrapping_sub(0x65a8))
+            );
+        }
+        let mut t = m.read_u32(0x8000_00DC);
+        for _ in 0..32 {
+            if t == 0 {
+                break;
+            }
+            let st = m.read_u32(t + 0x2C8) >> 16;
+            eprintln!(
+                "  thread {t:08x} state={st} prio={} srr0={:08x} lr={:08x} wait-queue={:08x}",
+                m.read_u32(t + 0x2D0) as i32,
+                m.read_u32(t + 0x198),
+                m.read_u32(t + 0x84),
+                m.read_u32(t + 0x2DC)
+            );
+            let mut sp = m.read_u32(t + 4);
+            let mut bt = String::new();
+            for _ in 0..8 {
+                if !(0x8000_0000..0x8180_0000).contains(&sp) {
+                    break;
+                }
+                let back = m.read_u32(sp);
+                bt += &format!(" {:08x}", m.read_u32(back.wrapping_add(4)));
+                sp = back;
+            }
+            eprintln!("    backtrace:{bt}");
+            t = m.read_u32(t + 0x2FC);
+        }
         std::process::exit(124);
     });
 }
@@ -39,24 +91,41 @@ pub fn die_str(msg: &str) -> ! {
     if !c.is_null() {
         // SAFETY: set_current stores a context that outlives the guest run.
         let c = unsafe { &*c };
-        eprintln!("  r1={:#010x} lr={:#010x} ctr={:#010x}", c.r[1], c.lr, c.ctr);
-        eprintln!("  r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x}", c.r[3], c.r[4], c.r[5], c.r[6]);
+        eprintln!(
+            "  r1={:#010x} lr={:#010x} ctr={:#010x}",
+            c.r[1], c.lr, c.ctr
+        );
+        eprintln!(
+            "  r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x}",
+            c.r[3], c.r[4], c.r[5], c.r[6]
+        );
     }
     let recent = machine().trace.recent(32);
     if !recent.is_empty() {
-        eprintln!("  recent calls (oldest first): {}", recent.iter().map(|a| format!("{a:08x}")).collect::<Vec<_>>().join(" "));
+        eprintln!(
+            "  recent calls (oldest first): {}",
+            recent
+                .iter()
+                .map(|a| format!("{a:08x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
     std::process::exit(70);
 }
 
 #[no_mangle]
 pub extern "C" fn fepor_unimplemented(_c: *mut Context, addr: u32, code: u32) -> ! {
-    die_str(&format!("unimplemented instruction {code:08x} at {addr:08x}"))
+    die_str(&format!(
+        "unimplemented instruction {code:08x} at {addr:08x}"
+    ))
 }
 
 #[no_mangle]
 pub extern "C" fn fepor_unresolved(_c: *mut Context, from: u32, target: u32) -> ! {
-    die_str(&format!("control flow from {from:08x} to {target:08x} has no generated function"))
+    die_str(&format!(
+        "control flow from {from:08x} to {target:08x} has no generated function"
+    ))
 }
 
 #[no_mangle]
@@ -87,7 +156,9 @@ pub extern "C" fn fepor_rfi(c: *mut Context, addr: u32) {
     match guest_function(target) {
         // SAFETY: generated functions take the guest context.
         Some(f) => unsafe { f(c) },
-        None => die_str(&format!("rfi at {addr:08x} to {srr0:#010x}: no generated function")),
+        None => die_str(&format!(
+            "rfi at {addr:08x} to {srr0:#010x}: no generated function"
+        )),
     }
 }
 
@@ -115,13 +186,17 @@ pub extern "C" fn fepor_mftb(tbr: u32) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn fepor_hw_read(ea: u32, size: i32) -> u32 {
-    machine().hw.read(ea, size as u32).unwrap_or_else(|e| die_str(&e))
+    machine()
+        .hw
+        .read(ea, size as u32)
+        .unwrap_or_else(|e| die_str(&e))
 }
 
 #[no_mangle]
 pub extern "C" fn fepor_hw_write(ea: u32, value: u32, size: i32) {
     let m = machine();
-    m.hw.write(ea, value, size as u32, &mut m.ram).unwrap_or_else(|e| die_str(&e))
+    m.hw.write(ea, value, size as u32, &mut m.ram)
+        .unwrap_or_else(|e| die_str(&e))
 }
 
 #[no_mangle]
@@ -169,13 +244,22 @@ mod dispatch {
     /// Guest address to generated function.
     pub fn find(target: u32) -> Option<HostFn> {
         // SAFETY: the generated dispatch.cpp defines a sorted table of `fepor_dispatch_count` entries.
-        let table = unsafe { std::slice::from_raw_parts(fepor_dispatch_table.as_ptr(), fepor_dispatch_count) };
-        table.binary_search_by_key(&target, |e| e.addr).ok().map(|i| table[i].func)
+        let table = unsafe {
+            std::slice::from_raw_parts(fepor_dispatch_table.as_ptr(), fepor_dispatch_count)
+        };
+        table
+            .binary_search_by_key(&target, |e| e.addr)
+            .ok()
+            .map(|i| table[i].func)
     }
 
     #[no_mangle]
     pub extern "C" fn fepor_lookup(from: u32, target: u32) -> HostFn {
-        find(target).unwrap_or_else(|| die_str(&format!("indirect branch at {from:08x} to {target:08x}: not in dispatch table")))
+        find(target).unwrap_or_else(|| {
+            die_str(&format!(
+                "indirect branch at {from:08x} to {target:08x}: not in dispatch table"
+            ))
+        })
     }
 }
 

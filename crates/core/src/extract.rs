@@ -21,7 +21,11 @@ pub struct ExtractReport {
 
 /// Extract `sys/` and `files/` (Dolphin folder layout) into `out`.
 /// `on_file` is called with each file's relative path before it is written.
-pub fn extract(disc: &mut dyn Disc, out: &Path, mut on_file: impl FnMut(&str)) -> Result<ExtractReport, ExtractError> {
+pub fn extract(
+    disc: &mut dyn Disc,
+    out: &Path,
+    mut on_file: impl FnMut(&str),
+) -> Result<ExtractReport, ExtractError> {
     let io = |p: &Path| {
         let p = p.to_path_buf();
         move |e| ExtractError::Io(p, e)

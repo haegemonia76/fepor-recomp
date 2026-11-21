@@ -77,11 +77,19 @@ pub fn parse_fst(fst: &[u8]) -> Result<Vec<FileEntry>, DiscError> {
         return Err(bad("missing root directory"));
     }
     let count = be32(fst, 8) as usize;
-    let table = count.checked_mul(12).filter(|&t| t <= fst.len()).ok_or_else(|| bad("truncated"))?;
+    let table = count
+        .checked_mul(12)
+        .filter(|&t| t <= fst.len())
+        .ok_or_else(|| bad("truncated"))?;
     let names = &fst[table..];
     let name_at = |off: usize| -> Result<String, DiscError> {
-        let tail = names.get(off..).ok_or_else(|| bad("name offset out of range"))?;
-        let end = tail.iter().position(|&b| b == 0).ok_or_else(|| bad("unterminated name"))?;
+        let tail = names
+            .get(off..)
+            .ok_or_else(|| bad("name offset out of range"))?;
+        let end = tail
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| bad("unterminated name"))?;
         let name: String = tail[..end].iter().map(|&b| b as char).collect(); // Latin-1
         if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
             return Err(DiscError::BadName(name));
@@ -111,7 +119,11 @@ pub fn parse_fst(fst: &[u8]) -> Result<Vec<FileEntry>, DiscError> {
                 path.push('/');
             }
             path.push_str(&name);
-            out.push(FileEntry { path, offset: be32(e, 4) as u64, size: be32(e, 8) as u64 });
+            out.push(FileEntry {
+                path,
+                offset: be32(e, 4) as u64,
+                size: be32(e, 8) as u64,
+            });
         }
     }
     Ok(out)
@@ -132,10 +144,18 @@ impl IsoDisc {
         file.read_exact(&mut boot)
             .map_err(|_| DiscError::BadImage("file too small".into()))?;
         if be32(&boot, 0x1C) != GCM_MAGIC {
-            return Err(DiscError::BadImage("GCM magic not found (compressed formats are unsupported)".into()));
+            return Err(DiscError::BadImage(
+                "GCM magic not found (compressed formats are unsupported)".into(),
+            ));
         }
         let id = game_id_of(&boot)?;
-        let mut disc = IsoDisc { path: path.to_path_buf(), file, id, boot, files: Vec::new() };
+        let mut disc = IsoDisc {
+            path: path.to_path_buf(),
+            file,
+            id,
+            boot,
+            files: Vec::new(),
+        };
         let fst = disc.fst()?;
         disc.files = parse_fst(&fst)?;
         Ok(disc)
@@ -151,7 +171,10 @@ impl IsoDisc {
     }
 
     fn fst(&mut self) -> Result<Vec<u8>, DiscError> {
-        let (off, len) = (be32(&self.boot, 0x424) as u64, be32(&self.boot, 0x428) as usize);
+        let (off, len) = (
+            be32(&self.boot, 0x424) as u64,
+            be32(&self.boot, 0x428) as usize,
+        );
         self.read_at(off, len)
     }
 
@@ -170,11 +193,15 @@ impl Disc for IsoDisc {
 
     fn sys_files(&mut self) -> Result<Vec<(&'static str, Vec<u8>)>, DiscError> {
         let hdr = self.read_at(APPLOADER_OFFSET, APPLOADER_HEADER)?;
-        let apploader_len = APPLOADER_HEADER + be32(&hdr, 0x14) as usize + be32(&hdr, 0x18) as usize;
+        let apploader_len =
+            APPLOADER_HEADER + be32(&hdr, 0x14) as usize + be32(&hdr, 0x18) as usize;
         Ok(vec![
             ("boot.bin", self.boot.clone()),
             ("bi2.bin", self.read_at(BI2_OFFSET, BI2_SIZE)?),
-            ("apploader.img", self.read_at(APPLOADER_OFFSET, apploader_len)?),
+            (
+                "apploader.img",
+                self.read_at(APPLOADER_OFFSET, apploader_len)?,
+            ),
             ("fst.bin", self.fst()?),
             ("main.dol", self.dol_bytes()?),
         ])
@@ -189,8 +216,11 @@ impl Disc for IsoDisc {
     }
 
     fn read_file(&mut self, entry: &FileEntry, out: &mut dyn Write) -> Result<(), DiscError> {
-        self.file.seek(SeekFrom::Start(entry.offset)).map_err(io_err(&self.path))?;
-        let copied = io::copy(&mut (&mut self.file).take(entry.size), out).map_err(io_err(&self.path))?;
+        self.file
+            .seek(SeekFrom::Start(entry.offset))
+            .map_err(io_err(&self.path))?;
+        let copied =
+            io::copy(&mut (&mut self.file).take(entry.size), out).map_err(io_err(&self.path))?;
         if copied != entry.size {
             return Err(DiscError::BadImage(format!("{} is truncated", entry.path)));
         }
@@ -229,7 +259,10 @@ impl FolderDisc {
         let id = game_id_of(&boot)?;
         // Prefer the FST in sys/ (real disc offsets); fall back to scanning the folder.
         let sys = root.join("sys");
-        let mut files = match std::fs::read(sys.join("fst.bin")).ok().and_then(|f| parse_fst(&f).ok()) {
+        let mut files = match std::fs::read(sys.join("fst.bin"))
+            .ok()
+            .and_then(|f| parse_fst(&f).ok())
+        {
             Some(entries) => entries,
             None => {
                 let mut v = Vec::new();
@@ -245,15 +278,36 @@ impl FolderDisc {
         let size_of = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         let mut regions = vec![
             (0, size_of(&sys.join("boot.bin")), sys.join("boot.bin")),
-            (BI2_OFFSET, size_of(&sys.join("bi2.bin")), sys.join("bi2.bin")),
-            (APPLOADER_OFFSET, size_of(&sys.join("apploader.img")), sys.join("apploader.img")),
-            (word(0x424), size_of(&sys.join("fst.bin")), sys.join("fst.bin")),
-            (word(0x420), size_of(&sys.join("main.dol")), sys.join("main.dol")),
+            (
+                BI2_OFFSET,
+                size_of(&sys.join("bi2.bin")),
+                sys.join("bi2.bin"),
+            ),
+            (
+                APPLOADER_OFFSET,
+                size_of(&sys.join("apploader.img")),
+                sys.join("apploader.img"),
+            ),
+            (
+                word(0x424),
+                size_of(&sys.join("fst.bin")),
+                sys.join("fst.bin"),
+            ),
+            (
+                word(0x420),
+                size_of(&sys.join("main.dol")),
+                sys.join("main.dol"),
+            ),
         ];
         for f in &files {
             regions.push((f.offset, f.size, root.join("files").join(&f.path)));
         }
-        Ok(FolderDisc { root: root.to_path_buf(), id, files, regions })
+        Ok(FolderDisc {
+            root: root.to_path_buf(),
+            id,
+            files,
+            regions,
+        })
     }
 
     fn sys(&self, name: &str) -> Result<Vec<u8>, DiscError> {
@@ -271,7 +325,11 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<FileEntry>) -> Result<(), DiscEr
         if meta.is_dir() {
             walk(&e.path(), &format!("{rel}/"), out)?;
         } else {
-            out.push(FileEntry { path: rel, offset: 0, size: meta.len() });
+            out.push(FileEntry {
+                path: rel,
+                offset: 0,
+                size: meta.len(),
+            });
         }
     }
     Ok(())
@@ -283,10 +341,16 @@ impl Disc for FolderDisc {
     }
 
     fn sys_files(&mut self) -> Result<Vec<(&'static str, Vec<u8>)>, DiscError> {
-        ["boot.bin", "bi2.bin", "apploader.img", "fst.bin", "main.dol"]
-            .into_iter()
-            .map(|n| Ok((n, self.sys(n)?)))
-            .collect()
+        [
+            "boot.bin",
+            "bi2.bin",
+            "apploader.img",
+            "fst.bin",
+            "main.dol",
+        ]
+        .into_iter()
+        .map(|n| Ok((n, self.sys(n)?)))
+        .collect()
     }
 
     fn dol(&mut self) -> Result<Vec<u8>, DiscError> {

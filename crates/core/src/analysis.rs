@@ -103,14 +103,21 @@ struct Code {
 
 impl Code {
     fn build(dol: &Dol, cfg: &AnalysisConfig) -> Code {
-        let mut c = Code { addr: vec![], ins: vec![], allowed: vec![], secs: vec![] };
+        let mut c = Code {
+            addr: vec![],
+            ins: vec![],
+            allowed: vec![],
+            secs: vec![],
+        };
         for s in dol.text_sections() {
             c.secs.push((s.addr, s.addr + s.size, c.ins.len()));
             for (k, w) in dol.section_bytes(s).chunks_exact(4).enumerate() {
                 let a = s.addr + 4 * k as u32;
                 c.addr.push(a);
-                c.ins.push(Ins::new(u32::from_be_bytes(w.try_into().unwrap())));
-                c.allowed.push(!cfg.exclude.iter().any(|r| a >= r.start && a < r.end));
+                c.ins
+                    .push(Ins::new(u32::from_be_bytes(w.try_into().unwrap())));
+                c.allowed
+                    .push(!cfg.exclude.iter().any(|r| a >= r.start && a < r.end));
             }
         }
         c
@@ -132,7 +139,8 @@ impl Code {
     }
 
     fn valid(&self, a: u32) -> bool {
-        self.idx(a).is_some_and(|i| self.ins[i].op != Opcode::Illegal)
+        self.idx(a)
+            .is_some_and(|i| self.ins[i].op != Opcode::Illegal)
     }
 }
 
@@ -165,7 +173,9 @@ fn offset(p: &ParsedIns, k: usize) -> Option<i16> {
 }
 
 fn defines(ins: Ins, reg: u8) -> bool {
-    ins.defs().iter().any(|a| matches!(a, Argument::GPR(GPR(r)) if *r == reg))
+    ins.defs()
+        .iter()
+        .any(|a| matches!(a, Argument::GPR(GPR(r)) if *r == reg))
 }
 
 /// Constant value of `reg` just before instruction `at`, following `lis`/`addi`/`ori` chains.
@@ -221,7 +231,9 @@ impl Walker<'_> {
         match t {
             Some(t) if self.code.valid(t) => self.new_starts.push((t, Origin::Call)),
             Some(t) => {
-                self.warnings.insert(format!("{at:#010x}: call target {t:#010x} is not decodable code"));
+                self.warnings.insert(format!(
+                    "{at:#010x}: call target {t:#010x} is not decodable code"
+                ));
             }
             None => {}
         }
@@ -231,7 +243,9 @@ impl Walker<'_> {
     fn jump(&mut self, at: u32, t: Option<u32>) -> Option<usize> {
         let t = t?;
         let Some(i) = self.code.idx(t) else {
-            self.warnings.insert(format!("{at:#010x}: branch target {t:#010x} is outside analysed code"));
+            self.warnings.insert(format!(
+                "{at:#010x}: branch target {t:#010x} is outside analysed code"
+            ));
             return None;
         };
         if self.internal(t) {
@@ -246,7 +260,8 @@ impl Walker<'_> {
 
     fn walk(&mut self, s: u32, seen: &mut [u32], stamp: u32, origin: Origin) {
         let Some(sidx) = self.code.idx(s) else {
-            self.warnings.insert(format!("{s:#010x}: function start is not analysed code"));
+            self.warnings
+                .insert(format!("{s:#010x}: function start is not analysed code"));
             return;
         };
         self.start = s;
@@ -275,7 +290,10 @@ impl Walker<'_> {
                 match ins.op {
                     Opcode::Rfi => falls = false,
                     Opcode::Illegal => {
-                        self.warnings.insert(format!("{a:#010x}: illegal instruction {:#010x} in function {s:#010x}", ins.code));
+                        self.warnings.insert(format!(
+                            "{a:#010x}: illegal instruction {:#010x} in function {s:#010x}",
+                            ins.code
+                        ));
                         falls = false;
                     }
                     Opcode::B => {
@@ -301,14 +319,22 @@ impl Walker<'_> {
                     }
                     Opcode::Bclr => {
                         if lk {
-                            self.indirect.push(IndirectBranch { addr: a, function: s, kind: IndirectKind::CallLr });
+                            self.indirect.push(IndirectBranch {
+                                addr: a,
+                                function: s,
+                                kind: IndirectKind::CallLr,
+                            });
                         } else {
                             falls = !always;
                         }
                     }
                     Opcode::Bcctr => {
                         if lk {
-                            self.indirect.push(IndirectBranch { addr: a, function: s, kind: IndirectKind::CallCtr });
+                            self.indirect.push(IndirectBranch {
+                                addr: a,
+                                function: s,
+                                kind: IndirectKind::CallCtr,
+                            });
                         } else {
                             match resolve_table(self.code, self.dol, self.cfg, sidx, s, s, i) {
                                 Some(t) if always => {
@@ -319,7 +345,11 @@ impl Walker<'_> {
                                     }
                                     self.tables.push(t);
                                 }
-                                _ => self.indirect.push(IndirectBranch { addr: a, function: s, kind: IndirectKind::UnresolvedJump }),
+                                _ => self.indirect.push(IndirectBranch {
+                                    addr: a,
+                                    function: s,
+                                    kind: IndirectKind::UnresolvedJump,
+                                }),
                             }
                             falls = !always;
                         }
@@ -335,14 +365,26 @@ impl Walker<'_> {
                 }
             }
         }
-        self.functions.push(Function { start: s, end: self.code.addr[maxi] + 4, origin });
+        self.functions.push(Function {
+            start: s,
+            end: self.code.addr[maxi] + 4,
+            origin,
+        });
     }
 }
 
 /// Resolve the jump table feeding the `bctr` at index `i`: config override first, then the
 /// CodeWarrior pattern `cmplwi; bgt; lis/addi; slwi; lwzx; mtctr; bctr`.
 /// `lo_limit` bounds how far back to look; targets must be valid code at or above `s_min`.
-fn resolve_table(code: &Code, dol: &Dol, cfg: &AnalysisConfig, lo_limit: usize, s_min: u32, function: u32, i: usize) -> Option<JumpTable> {
+fn resolve_table(
+    code: &Code,
+    dol: &Dol,
+    cfg: &AnalysisConfig,
+    lo_limit: usize,
+    s_min: u32,
+    function: u32,
+    i: usize,
+) -> Option<JumpTable> {
     let valid_target = |t: u32| t >= s_min && code.valid(t);
     let a = code.addr[i];
     if let Some(o) = cfg.jump_tables.iter().find(|o| o.branch == a) {
@@ -350,9 +392,17 @@ fn resolve_table(code: &Code, dol: &Dol, cfg: &AnalysisConfig, lo_limit: usize, 
             o.targets.clone()
         } else {
             let (table, count) = (o.table?, o.count?);
-            (0..count).map(|k| dol.read_u32(table + 4 * k)).collect::<Option<_>>()?
+            (0..count)
+                .map(|k| dol.read_u32(table + 4 * k))
+                .collect::<Option<_>>()?
         };
-        return Some(JumpTable { branch: a, function, table: o.table, targets, source: TableSource::Config });
+        return Some(JumpTable {
+            branch: a,
+            function,
+            table: o.table,
+            targets,
+            source: TableSource::Config,
+        });
     }
 
     let lo = lo_limit.max(i.saturating_sub(64));
@@ -364,7 +414,9 @@ fn resolve_table(code: &Code, dol: &Dol, cfg: &AnalysisConfig, lo_limit: usize, 
     let d = (lo..mt).rev().find(|&j| defines(code.ins[j], rc))?;
     let p = code.ins[d].basic();
     let base = match code.ins[d].op {
-        Opcode::Lwzx => [1, 2].into_iter().find_map(|k| const_val(code, d, lo, gpr(&p, k)?, 6)),
+        Opcode::Lwzx => [1, 2]
+            .into_iter()
+            .find_map(|k| const_val(code, d, lo, gpr(&p, k)?, 6)),
         Opcode::Lwz => {
             let off = offset(&p, 1)? as i32 as u32;
             let rt = gpr(&p, 2)?;
@@ -404,7 +456,13 @@ fn resolve_table(code: &Code, dol: &Dol, cfg: &AnalysisConfig, lo_limit: usize, 
             (t, TableSource::AutoUnbounded)
         }
     };
-    Some(JumpTable { branch: a, function, table: Some(base), targets, source })
+    Some(JumpTable {
+        branch: a,
+        function,
+        table: Some(base),
+        targets,
+        source,
+    })
 }
 trait CmpliBound {
     /// Immediate of a `cmplwi`, if this is one.
@@ -413,7 +471,9 @@ trait CmpliBound {
 
 impl CmpliBound for Ins {
     fn ins_basic_cmpli(&self) -> Option<u16> {
-        (self.op == Opcode::Cmpli).then(|| uimm(&self.basic(), 3)).flatten()
+        (self.op == Opcode::Cmpli)
+            .then(|| uimm(&self.basic(), 3))
+            .flatten()
     }
 }
 
@@ -486,7 +546,9 @@ fn candidates(code: &Code, dol: &Dol, skip: &[(u32, u32)]) -> Vec<(u32, Origin)>
             continue;
         }
         let p = code.ins[i].basic();
-        let (Some(rd), Some(0), Some(hi)) = (gpr(&p, 0), gpr(&p, 1), uimm(&p, 2)) else { continue };
+        let (Some(rd), Some(0), Some(hi)) = (gpr(&p, 0), gpr(&p, 1), uimm(&p, 2)) else {
+            continue;
+        };
         let hi = (hi as u32) << 16;
         let mut j = i;
         for _ in 0..5 {
@@ -494,7 +556,9 @@ fn candidates(code: &Code, dol: &Dol, skip: &[(u32, u32)]) -> Vec<(u32, Origin)>
             j = n;
             let q = code.ins[j].basic();
             let v = match code.ins[j].op {
-                Opcode::Addi if gpr(&q, 1) == Some(rd) => simm(&q, 2).map(|l| hi.wrapping_add(l as i32 as u32)),
+                Opcode::Addi if gpr(&q, 1) == Some(rd) => {
+                    simm(&q, 2).map(|l| hi.wrapping_add(l as i32 as u32))
+                }
                 Opcode::Ori if gpr(&q, 1) == Some(rd) => uimm(&q, 2).map(|l| hi | l as u32),
                 _ => None,
             };
@@ -549,7 +613,13 @@ struct Discovery {
 }
 
 /// Grow the set of starts to a fixpoint. `reject` holds addresses that must not become starts.
-fn discover(code: &Code, dol: &Dol, cfg: &AnalysisConfig, table_ranges: &[(u32, u32)], reject: &BTreeSet<u32>) -> Discovery {
+fn discover(
+    code: &Code,
+    dol: &Dol,
+    cfg: &AnalysisConfig,
+    table_ranges: &[(u32, u32)],
+    reject: &BTreeSet<u32>,
+) -> Discovery {
     let mut starts: BTreeMap<u32, Origin> = BTreeMap::new();
     let add = |starts: &mut BTreeMap<u32, Origin>, a: u32, o: Origin| -> bool {
         !reject.contains(&a) && code.valid(a) && starts.insert(a, o).is_none()
@@ -593,7 +663,10 @@ pub fn analyze(dol: &Dol, cfg: &AnalysisConfig) -> Analysis {
     let mut reject: BTreeSet<u32> = cfg.not_functions.iter().copied().collect();
     let mut warnings = BTreeSet::new();
     if !code.valid(dol.entry) {
-        warnings.insert(format!("entry point {:#010x} is not analysed code", dol.entry));
+        warnings.insert(format!(
+            "entry point {:#010x} is not analysed code",
+            dol.entry
+        ));
     }
     for &f in &cfg.functions {
         if !code.valid(f) {
@@ -622,10 +695,18 @@ pub fn analyze(dol: &Dol, cfg: &AnalysisConfig) -> Analysis {
         let bad: Vec<(u32, Origin)> = d
             .starts
             .iter()
-            .filter(|&(_, &o)| matches!(o, Origin::TailCall | Origin::DataPointer | Origin::AddressLoad | Origin::Gap))
+            .filter(|&(_, &o)| {
+                matches!(
+                    o,
+                    Origin::TailCall | Origin::DataPointer | Origin::AddressLoad | Origin::Gap
+                )
+            })
             .filter(|&(&a, _)| {
                 code.idx(a).is_some_and(|i| {
-                    i > 0 && code.addr[i - 1] + 4 == a && d.pass.covered[i - 1] != 0 && proves_fallthrough(code.ins[i - 1])
+                    i > 0
+                        && code.addr[i - 1] + 4 == a
+                        && d.pass.covered[i - 1] != 0
+                        && proves_fallthrough(code.ins[i - 1])
                 })
             })
             .map(|(&a, &o)| (a, o))
@@ -639,7 +720,11 @@ pub fn analyze(dol: &Dol, cfg: &AnalysisConfig) -> Analysis {
         }
     };
 
-    let mut a = Analysis { warnings: Vec::new(), rejected, ..Analysis::default() };
+    let mut a = Analysis {
+        warnings: Vec::new(),
+        rejected,
+        ..Analysis::default()
+    };
     warnings.extend(pass.warnings);
     a.warnings = warnings.into_iter().collect();
     let mut functions = pass.functions;
@@ -652,7 +737,10 @@ pub fn analyze(dol: &Dol, cfg: &AnalysisConfig) -> Analysis {
     a.text_bytes = code.ins.len() as u32 * 4;
     a.covered_bytes = pass.covered.iter().filter(|&&c| c != 0).count() as u32 * 4;
     for (s, e) in uncovered_runs(&code, &pass.covered) {
-        a.unreached.push(Range { start: code.addr[s], end: code.addr[e - 1] + 4 });
+        a.unreached.push(Range {
+            start: code.addr[s],
+            end: code.addr[e - 1] + 4,
+        });
     }
     a
 }
@@ -697,23 +785,54 @@ impl Analysis {
         use std::fmt::Write;
         let mut s = String::new();
         let _ = writeln!(s, "# Summary\n{}\n", self.summary());
-        let _ = writeln!(s, "# Unresolved indirect branches (runtime dispatch or config needed)");
-        for b in self.indirect.iter().filter(|b| b.kind == IndirectKind::UnresolvedJump) {
+        let _ = writeln!(
+            s,
+            "# Unresolved indirect branches (runtime dispatch or config needed)"
+        );
+        for b in self
+            .indirect
+            .iter()
+            .filter(|b| b.kind == IndirectKind::UnresolvedJump)
+        {
             let _ = writeln!(s, "bctr {:#010x} in function {:#010x}", b.addr, b.function);
         }
         let _ = writeln!(s, "\n# Indirect calls (runtime dispatch)");
-        for b in self.indirect.iter().filter(|b| b.kind != IndirectKind::UnresolvedJump) {
-            let kind = if b.kind == IndirectKind::CallCtr { "bctrl" } else { "blrl" };
-            let _ = writeln!(s, "{kind} {:#010x} in function {:#010x}", b.addr, b.function);
+        for b in self
+            .indirect
+            .iter()
+            .filter(|b| b.kind != IndirectKind::UnresolvedJump)
+        {
+            let kind = if b.kind == IndirectKind::CallCtr {
+                "bctrl"
+            } else {
+                "blrl"
+            };
+            let _ = writeln!(
+                s,
+                "{kind} {:#010x} in function {:#010x}",
+                b.addr, b.function
+            );
         }
         let _ = writeln!(s, "\n# Jump tables");
         for t in &self.jump_tables {
             let table = t.table.map_or("-".into(), |a| format!("{a:#010x}"));
-            let _ = writeln!(s, "bctr {:#010x} table {table} entries {} {:?}", t.branch, t.targets.len(), t.source);
+            let _ = writeln!(
+                s,
+                "bctr {:#010x} table {table} entries {} {:?}",
+                t.branch,
+                t.targets.len(),
+                t.source
+            );
         }
         let _ = writeln!(s, "\n# Unreached code");
         for r in &self.unreached {
-            let _ = writeln!(s, "{:#010x}-{:#010x} ({} bytes)", r.start, r.end, r.end - r.start);
+            let _ = writeln!(
+                s,
+                "{:#010x}-{:#010x} ({} bytes)",
+                r.start,
+                r.end,
+                r.end - r.start
+            );
         }
         let _ = writeln!(s, "\n# Rejected starts (mid-function labels)");
         for (a, o) in &self.rejected {
@@ -773,7 +892,8 @@ mod tests {
     fn dol(text: &[u32], data: &[u32]) -> Dol {
         let mut h = vec![0u8; 0x100];
         let tlen = text.len() as u32 * 4;
-        let put = |h: &mut Vec<u8>, off: usize, v: u32| h[off..off + 4].copy_from_slice(&v.to_be_bytes());
+        let put =
+            |h: &mut Vec<u8>, off: usize, v: u32| h[off..off + 4].copy_from_slice(&v.to_be_bytes());
         put(&mut h, 0, 0x100);
         put(&mut h, 0x48, TEXT);
         put(&mut h, 0x90, tlen);
@@ -790,26 +910,36 @@ mod tests {
     }
 
     fn starts(a: &Analysis) -> Vec<(u32, Origin)> {
-        a.functions.iter().map(|f| (f.start - TEXT, f.origin)).collect()
+        a.functions
+            .iter()
+            .map(|f| (f.start - TEXT, f.origin))
+            .collect()
     }
 
     #[test]
     fn calls_tail_calls_and_internal_branches() {
         let text = [
-            bl(0x10),    // 0x00 -> f1
-            b(0x14),     // 0x04 tail call -> f2
-            0,           // 0x08 padding
-            0,           // 0x0c padding
-            li(3, 1),    // 0x10 f1
-            BLR,         // 0x14
-            li(3, 2),    // 0x18 f2 (0x04 + 0x14)
-            beq(0x8),    // 0x1c forward, internal
-            li(3, 3),    // 0x20
-            BLR,         // 0x24
+            bl(0x10), // 0x00 -> f1
+            b(0x14),  // 0x04 tail call -> f2
+            0,        // 0x08 padding
+            0,        // 0x0c padding
+            li(3, 1), // 0x10 f1
+            BLR,      // 0x14
+            li(3, 2), // 0x18 f2 (0x04 + 0x14)
+            beq(0x8), // 0x1c forward, internal
+            li(3, 3), // 0x20
+            BLR,      // 0x24
         ];
         // f1 at 0x10 (bl 0x00+0x10), f2 at 0x18 (b 0x04+0x14)
         let a = analyze(&dol(&text, &[]), &AnalysisConfig::default());
-        assert_eq!(starts(&a), [(0, Origin::Entry), (0x10, Origin::Call), (0x18, Origin::TailCall)]);
+        assert_eq!(
+            starts(&a),
+            [
+                (0, Origin::Entry),
+                (0x10, Origin::Call),
+                (0x18, Origin::TailCall)
+            ]
+        );
         let f2 = &a.functions[2];
         assert_eq!(f2.end - TEXT, 0x28);
         assert!(a.unreached.is_empty());
@@ -820,20 +950,20 @@ mod tests {
     fn jump_table_is_resolved_and_targets_stay_internal() {
         let t = |off: u32| TEXT + off;
         let text = [
-            cmplwi(3, 2),                      // 0x00
-            bgt(0x20),                         // 0x04 -> default 0x24
-            lis(4, DATA >> 16),                // 0x08
-            addi(4, 4, DATA & 0xFFFF),         // 0x0c
-            SLWI_R0_R3_2,                      // 0x10
-            lwzx(0, 4, 0),                     // 0x14
-            MTCTR_R0,                          // 0x18
-            BCTR,                              // 0x1c
-            li(3, 1),                          // 0x20 case 0
-            BLR,                               // 0x24
-            li(3, 2),                          // 0x28 case 1
-            BLR,                               // 0x2c
-            li(3, 3),                          // 0x30 case 2
-            BLR,                               // 0x34
+            cmplwi(3, 2),              // 0x00
+            bgt(0x20),                 // 0x04 -> default 0x24
+            lis(4, DATA >> 16),        // 0x08
+            addi(4, 4, DATA & 0xFFFF), // 0x0c
+            SLWI_R0_R3_2,              // 0x10
+            lwzx(0, 4, 0),             // 0x14
+            MTCTR_R0,                  // 0x18
+            BCTR,                      // 0x1c
+            li(3, 1),                  // 0x20 case 0
+            BLR,                       // 0x24
+            li(3, 2),                  // 0x28 case 1
+            BLR,                       // 0x2c
+            li(3, 3),                  // 0x30 case 2
+            BLR,                       // 0x34
         ];
         let data = [t(0x20), t(0x28), t(0x30)];
         let a = analyze(&dol(&text, &data), &AnalysisConfig::default());
@@ -858,21 +988,41 @@ mod tests {
         let a = analyze(&dol(&text, &data), &AnalysisConfig::default());
         assert_eq!(
             starts(&a),
-            [(0, Origin::Entry), (4, Origin::Gap), (0xC, Origin::DataPointer)]
+            [
+                (0, Origin::Entry),
+                (4, Origin::Gap),
+                (0xC, Origin::DataPointer)
+            ]
         );
     }
 
     #[test]
     fn config_overrides_apply() {
         let text = [BLR, li(3, 1), BLR, li(3, 2), BLR];
-        let cfg = AnalysisConfig { not_functions: vec![TEXT + 4], functions: vec![TEXT + 0xC], ..Default::default() };
+        let cfg = AnalysisConfig {
+            not_functions: vec![TEXT + 4],
+            functions: vec![TEXT + 0xC],
+            ..Default::default()
+        };
         let a = analyze(&dol(&text, &[]), &cfg);
         // 0x04 is rejected as a start, so the gap run is left unreached; 0x0c is forced.
         assert_eq!(starts(&a), [(0, Origin::Entry), (0xC, Origin::Config)]);
-        assert_eq!(a.unreached, [Range { start: TEXT + 4, end: TEXT + 0xC }]);
+        assert_eq!(
+            a.unreached,
+            [Range {
+                start: TEXT + 4,
+                end: TEXT + 0xC
+            }]
+        );
 
         let text = [b(0x8), 0, BLR, BCTR];
         let a = analyze(&dol(&text, &[]), &AnalysisConfig::default());
-        assert_eq!(a.indirect.iter().filter(|i| i.kind == IndirectKind::UnresolvedJump).count(), 1);
+        assert_eq!(
+            a.indirect
+                .iter()
+                .filter(|i| i.kind == IndirectKind::UnresolvedJump)
+                .count(),
+            1
+        );
     }
 }

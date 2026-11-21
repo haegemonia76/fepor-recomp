@@ -71,7 +71,11 @@ pub struct GenerateConfig {
 
 impl Default for GenerateConfig {
     fn default() -> Self {
-        GenerateConfig { functions_per_unit: 256, runtime_dir: None, trace_calls: false }
+        GenerateConfig {
+            functions_per_unit: 256,
+            runtime_dir: None,
+            trace_calls: false,
+        }
     }
 }
 

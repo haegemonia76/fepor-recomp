@@ -36,7 +36,12 @@ impl Fail {
     }
     pub fn message(&self) -> &str {
         match self {
-            Fail::Usage(m) | Fail::Disc(m) | Fail::Version(m) | Fail::Toolchain(m) | Fail::Build(m) | Fail::Other(m) => m,
+            Fail::Usage(m)
+            | Fail::Disc(m)
+            | Fail::Version(m)
+            | Fail::Toolchain(m)
+            | Fail::Build(m)
+            | Fail::Other(m) => m,
         }
     }
 }
@@ -50,11 +55,18 @@ pub struct Options {
 
 impl Options {
     pub fn new(cli: &Cli, cfg: Config) -> Options {
-        Options { disc: cli.disc.clone().or(cfg.disc.clone()), output: cli.output.clone().or(cfg.output.clone()), no_verify: cli.no_verify, cfg }
+        Options {
+            disc: cli.disc.clone().or(cfg.disc.clone()),
+            output: cli.output.clone().or(cfg.output.clone()),
+            no_verify: cli.no_verify,
+            cfg,
+        }
     }
 
     pub fn disc(&self) -> Result<&PathBuf, Fail> {
-        self.disc.as_ref().ok_or_else(|| Fail::Usage("no disc given (use --disc/--game or `disc` in the config)".into()))
+        self.disc.as_ref().ok_or_else(|| {
+            Fail::Usage("no disc given (use --disc/--game or `disc` in the config)".into())
+        })
     }
 
     pub fn output(&self) -> Result<&PathBuf, Fail> {
@@ -74,11 +86,18 @@ impl Session {
         let mut disc = open_disc(opts.disc()?).map_err(|e| Fail::Disc(e.to_string()))?;
         let bytes = disc.dol().map_err(|e| Fail::Disc(e.to_string()))?;
         if !opts.no_verify {
-            let v = version::check(disc.game_id(), &bytes).map_err(|e| Fail::Version(e.to_string()))?;
+            let v =
+                version::check(disc.game_id(), &bytes).map_err(|e| Fail::Version(e.to_string()))?;
             eprintln!("verified: {} ({})", v.name, v.game_id);
         }
         let dol = Dol::parse(bytes).map_err(|e| Fail::Disc(e.to_string()))?;
-        let defaults = version::lookup(disc.game_id()).map(|v| v.analysis_defaults()).unwrap_or_default();
-        Ok(Session { disc, dol, analysis_cfg: opts.cfg.analysis.clone().with_defaults(defaults) })
+        let defaults = version::lookup(disc.game_id())
+            .map(|v| v.analysis_defaults())
+            .unwrap_or_default();
+        Ok(Session {
+            disc,
+            dol,
+            analysis_cfg: opts.cfg.analysis.clone().with_defaults(defaults),
+        })
     }
 }

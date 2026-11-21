@@ -25,7 +25,9 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    Ok(Args { game: game.ok_or("usage: fepor-game --game <iso|folder> [--data <dir>]")? })
+    Ok(Args {
+        game: game.ok_or("usage: fepor-game --game <iso|folder> [--data <dir>]")?,
+    })
 }
 
 fn run() -> Result<(), String> {
@@ -39,19 +41,29 @@ fn run() -> Result<(), String> {
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
 
     let m = machine();
+    if std::env::var_os("FEPOR_NO_VIDEO").is_none() {
+        match fepor_video::Renderer::new() {
+            Ok(r) => m.hw.set_sink(Box::new(r)),
+            Err(e) => eprintln!("video disabled: {e}"),
+        }
+    }
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
     abi::start_watchdog();
     let mut ctx = Context::new(m.ram_ptr());
     fepor_runtime::sched::init(&mut *ctx);
-    let start: HostFn = abi::find_function(entry).ok_or_else(|| format!("entry point {entry:#010x} has no generated function"))?;
+    let start: HostFn = abi::find_function(entry)
+        .ok_or_else(|| format!("entry point {entry:#010x} has no generated function"))?;
     fepor_runtime::hle::run(start, &mut ctx);
     Err("the game returned from its entry point".into())
 }
 
 fn main() {
     // Guest calls nest on the host stack; give the guest thread plenty of room.
-    let guest = std::thread::Builder::new().stack_size(256 << 20).spawn(run).expect("spawn guest thread");
+    let guest = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(run)
+        .expect("spawn guest thread");
     match guest.join() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {

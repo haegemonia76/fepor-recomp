@@ -45,7 +45,16 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 /// Register the boot thread (thread 0).
 pub fn init(main_ctx: *mut Context) {
     let mut g = STATE.lock().unwrap();
-    *g = Some(State { threads: vec![Thread { ctx: main_ctx, last_save: None, irq_ctx: None, park: None }], running: 0, parked: HashMap::new() });
+    *g = Some(State {
+        threads: vec![Thread {
+            ctx: main_ctx,
+            last_save: None,
+            irq_ctx: None,
+            park: None,
+        }],
+        running: 0,
+        parked: HashMap::new(),
+    });
     crate::abi::set_current(main_ctx);
 }
 
@@ -111,11 +120,21 @@ pub fn switch_to(me: usize, other: usize, token: Option<(u32, ParkKind)>) {
 }
 
 /// Start a new guest thread running `body` and switch to it; returns when `me` is resumed.
-pub fn spawn_and_switch(me: usize, token: Option<(u32, ParkKind)>, ctx: Box<Context>, body: impl FnOnce(*mut Context) + Send + 'static) {
+pub fn spawn_and_switch(
+    me: usize,
+    token: Option<(u32, ParkKind)>,
+    ctx: Box<Context>,
+    body: impl FnOnce(*mut Context) + Send + 'static,
+) {
     let ctx_ptr = Box::into_raw(ctx);
     let ptr_for_thread = ctx_ptr as usize;
     let id = with(|s| {
-        s.threads.push(Thread { ctx: ctx_ptr, last_save: None, irq_ctx: None, park: None });
+        s.threads.push(Thread {
+            ctx: ctx_ptr,
+            last_save: None,
+            irq_ctx: None,
+            park: None,
+        });
         s.threads.len() - 1
     });
     std::thread::Builder::new()

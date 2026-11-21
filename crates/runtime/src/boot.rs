@@ -26,7 +26,12 @@ pub fn setup(m: &mut Machine, disc: &mut dyn Disc, dol: &Dol) -> Result<u32, Str
     }
 
     let sys = disc.sys_files().map_err(|e| e.to_string())?;
-    let get = |name: &str| sys.iter().find(|(n, _)| *n == name).map(|(_, d)| d.as_slice()).ok_or(format!("missing {name}"));
+    let get = |name: &str| {
+        sys.iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, d)| d.as_slice())
+            .ok_or(format!("missing {name}"))
+    };
     let (boot, bi2, fst) = (get("boot.bin")?, get("bi2.bin")?, get("fst.bin")?);
 
     // The first 0x20 bytes of the disc header: game ID, maker, disc number, version, magic.

@@ -45,8 +45,11 @@ pub struct Exi {
 fn default_sram() -> [u8; 64] {
     let mut s = [0u8; 64];
     s[0x13] = 0x01; // flags/language byte
-    // checksum: sum of the big-endian u16 words in bytes 0x0C..0x14, then its complement
-    let sum: u32 = (0x0C..0x14).step_by(2).map(|i| u16::from_be_bytes([s[i], s[i + 1]]) as u32).sum();
+                    // checksum: sum of the big-endian u16 words in bytes 0x0C..0x14, then its complement
+    let sum: u32 = (0x0C..0x14)
+        .step_by(2)
+        .map(|i| u16::from_be_bytes([s[i], s[i + 1]]) as u32)
+        .sum();
     let c = (sum & 0xFFFF) as u16;
     s[0..2].copy_from_slice(&c.to_be_bytes());
     s[2..4].copy_from_slice(&(!c).to_be_bytes());
@@ -55,13 +58,19 @@ fn default_sram() -> [u8; 64] {
 
 impl Exi {
     pub fn new() -> Exi {
-        Exi { ch: Default::default(), sram: default_sram(), rtc: 0x2C00_0000 }
+        Exi {
+            ch: Default::default(),
+            sram: default_sram(),
+            rtc: 0x2C00_0000,
+        }
     }
 
     /// Register read; `off` is the offset inside the EXI block (0..0x400).
     pub fn read(&mut self, off: u32, size: u32) -> u32 {
         let (c, reg) = (off / STRIDE, off % STRIDE);
-        let Some(ch) = self.ch.get(c as usize) else { return 0 };
+        let Some(ch) = self.ch.get(c as usize) else {
+            return 0;
+        };
         let word = match reg & !3 {
             CSR => ch.csr,
             MAR => ch.mar,
@@ -83,7 +92,9 @@ impl Exi {
     /// Register write (32-bit); transfers may read or write guest `ram`.
     pub fn write(&mut self, off: u32, value: u32, ram: &mut [u8]) {
         let (c, reg) = (off / STRIDE, off % STRIDE);
-        let Some(ch) = self.ch.get_mut(c as usize) else { return };
+        let Some(ch) = self.ch.get_mut(c as usize) else {
+            return;
+        };
         match reg {
             CSR => {
                 // the EXT bit is read-only (no memory card inserted); interrupt flags clear on write of 1
@@ -115,7 +126,11 @@ impl Exi {
         let cs = (self.ch[c].csr >> 7) & 7;
         let rw = (cr >> 2) & 3; // 0 read, 1 write, 2 read/write
         let dma = cr & 2 != 0;
-        let len = if dma { self.ch[c].length } else { ((cr >> 4) & 3) + 1 };
+        let len = if dma {
+            self.ch[c].length
+        } else {
+            ((cr >> 4) & 3) + 1
+        };
 
         // Only the IPL device (channel 0, device 1) exists; empty slots read as all ones.
         if !(c == 0 && cs == 0b010) {
@@ -154,7 +169,9 @@ impl Exi {
             SRAM_CMD => self.sram.to_vec(),
             _ => Vec::new(),
         };
-        (0..len as usize).map(|i| source.get(pos + i).copied().unwrap_or(0xFF)).collect()
+        (0..len as usize)
+            .map(|i| source.get(pos + i).copied().unwrap_or(0xFF))
+            .collect()
     }
 
     fn device_write(&mut self, c: usize, data: &[u8]) {

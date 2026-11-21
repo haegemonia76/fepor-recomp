@@ -59,7 +59,12 @@ fn parse(data: &[u8]) -> Vec<Case> {
             let words = (0..nw).map(|_| r.u32()).collect();
             let input = r.entries();
             let output = r.entries();
-            Case { ps1: flags & 1 != 0, words, input, output }
+            Case {
+                ps1: flags & 1 != 0,
+                words,
+                input,
+                output,
+            }
         })
         .collect()
 }
@@ -80,7 +85,17 @@ struct State {
 
 impl State {
     fn zero() -> State {
-        State { r: [0; 32], f0: [0; 32], f1: [0; 32], cr: 0, xer: 0, lr: 0, ctr: 0, fpscr: 0, mem: [0; MEM_WORDS] }
+        State {
+            r: [0; 32],
+            f0: [0; 32],
+            f1: [0; 32],
+            cr: 0,
+            xer: 0,
+            lr: 0,
+            ctr: 0,
+            fpscr: 0,
+            mem: [0; MEM_WORDS],
+        }
     }
     fn apply(&mut self, entries: &[(u8, u8, u64)]) {
         for &(kind, idx, v) in entries {
@@ -124,24 +139,48 @@ impl State {
         let mut d = Vec::new();
         for i in 0..32 {
             if self.r[i] != want.r[i] {
-                d.push(format!("r{i}: got {:#010x} want {:#010x}", self.r[i], want.r[i]));
+                d.push(format!(
+                    "r{i}: got {:#010x} want {:#010x}",
+                    self.r[i], want.r[i]
+                ));
             }
             if self.f0[i] != want.f0[i] {
-                d.push(format!("f{i}.ps0: got {:#018x} ({}) want {:#018x} ({})", self.f0[i], f64::from_bits(self.f0[i]), want.f0[i], f64::from_bits(want.f0[i])));
+                d.push(format!(
+                    "f{i}.ps0: got {:#018x} ({}) want {:#018x} ({})",
+                    self.f0[i],
+                    f64::from_bits(self.f0[i]),
+                    want.f0[i],
+                    f64::from_bits(want.f0[i])
+                ));
             }
             if ps1 && self.f1[i] != want.f1[i] {
-                d.push(format!("f{i}.ps1: got {:#018x} ({}) want {:#018x} ({})", self.f1[i], f64::from_bits(self.f1[i]), want.f1[i], f64::from_bits(want.f1[i])));
+                d.push(format!(
+                    "f{i}.ps1: got {:#018x} ({}) want {:#018x} ({})",
+                    self.f1[i],
+                    f64::from_bits(self.f1[i]),
+                    want.f1[i],
+                    f64::from_bits(want.f1[i])
+                ));
             }
         }
         // XER is checked through the programs' `mfxer r0` epilogue, FPSCR fields through `mcrfs`.
-        for (name, a, b) in [("cr", self.cr, want.cr), ("lr", self.lr, want.lr), ("ctr", self.ctr, want.ctr)] {
+        for (name, a, b) in [
+            ("cr", self.cr, want.cr),
+            ("lr", self.lr, want.lr),
+            ("ctr", self.ctr, want.ctr),
+        ] {
             if a != b {
                 d.push(format!("{name}: got {a:#010x} want {b:#010x}"));
             }
         }
         for i in 0..MEM_WORDS {
             if self.mem[i] != want.mem[i] {
-                d.push(format!("mem[{:#x}]: got {:#010x} want {:#010x}", i * 4, self.mem[i], want.mem[i]));
+                d.push(format!(
+                    "mem[{:#x}]: got {:#010x} want {:#010x}",
+                    i * 4,
+                    self.mem[i],
+                    want.mem[i]
+                ));
             }
         }
         d
@@ -233,7 +272,8 @@ fn build_dol(cases: &[Case]) -> (Dol, Vec<u32>) {
         text.push(0); // padding separates programs
     }
     let mut h = vec![0u8; 0x100];
-    let put = |h: &mut Vec<u8>, off: usize, v: u32| h[off..off + 4].copy_from_slice(&v.to_be_bytes());
+    let put =
+        |h: &mut Vec<u8>, off: usize, v: u32| h[off..off + 4].copy_from_slice(&v.to_be_bytes());
     put(&mut h, 0, 0x100);
     put(&mut h, 0x48, TEXT);
     put(&mut h, 0x90, text.len() as u32 * 4);
@@ -259,7 +299,10 @@ fn describe(words: &[u32]) -> String {
 #[test]
 fn lifted_instructions_match_the_reference_vectors() {
     let found = Command::new("clang++").arg("--version").output().is_ok();
-    assert!(found || std::env::var_os("FEPOR_REQUIRE_CLANG").is_none(), "clang++ is required but not found");
+    assert!(
+        found || std::env::var_os("FEPOR_REQUIRE_CLANG").is_none(),
+        "clang++ is required but not found"
+    );
     if !found {
         eprintln!("clang++ not found, skipping");
         return;
@@ -271,36 +314,72 @@ fn lifted_instructions_match_the_reference_vectors() {
 
     let analysis = analyze(&dol, &AnalysisConfig::default());
     // Unreachable code behind an always-taken branch may become extra functions; every program start must exist.
-    let starts: std::collections::HashSet<u32> = analysis.functions.iter().map(|f| f.start).collect();
+    let starts: std::collections::HashSet<u32> =
+        analysis.functions.iter().map(|f| f.start).collect();
     for (i, a) in addrs.iter().enumerate() {
-        assert!(starts.contains(a), "program {i} at {a:#x} is not a function: {}", describe(&cases[i].words));
+        assert!(
+            starts.contains(a),
+            "program {i} at {a:#x} is not a function: {}",
+            describe(&cases[i].words)
+        );
     }
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
-    let opts = Options { functions_per_unit: 256, runtime_dir: runtime.display().to_string(), trace_calls: false, hle: Vec::new() };
-    let stats = generate(&dol, &analysis, &opts, &mut |name, content| std::fs::write(dir.join(name), content)).unwrap();
-    assert!(stats.unimplemented.is_empty(), "instructions emitted as traps: {:?}", stats.unimplemented);
+    let opts = Options {
+        functions_per_unit: 256,
+        runtime_dir: runtime.display().to_string(),
+        trace_calls: false,
+        hle: Vec::new(),
+    };
+    let stats = generate(&dol, &analysis, &opts, &mut |name, content| {
+        std::fs::write(dir.join(name), content)
+    })
+    .unwrap();
+    assert!(
+        stats.unimplemented.is_empty(),
+        "instructions emitted as traps: {:?}",
+        stats.unimplemented
+    );
 
     std::fs::write(dir.join("harness.cpp"), HARNESS).unwrap();
     let addr_bytes: Vec<u8> = addrs.iter().flat_map(|a| a.to_le_bytes()).collect();
     std::fs::write(dir.join("addrs.bin"), addr_bytes).unwrap();
 
     let mut cmd = Command::new("clang++");
-    cmd.args(["-std=c++20", "-O1", "-w", "-I"]).arg(dir).arg("-I").arg(runtime.join("include"));
+    cmd.args(["-std=c++20", "-O1", "-w", "-I"])
+        .arg(dir)
+        .arg("-I")
+        .arg(runtime.join("include"));
     for f in std::fs::read_dir(dir).unwrap() {
         let p = f.unwrap().path();
         if p.extension().is_some_and(|e| e == "cpp") {
             cmd.arg(p);
         }
     }
-    cmd.arg(runtime.join("src/runtime.cpp")).arg(runtime.join("src/fp.cpp")).arg("-o").arg(dir.join("harness"));
+    cmd.arg(runtime.join("src/runtime.cpp"))
+        .arg(runtime.join("src/fp.cpp"))
+        .arg("-o")
+        .arg(dir.join("harness"));
     let out = cmd.output().unwrap();
-    assert!(out.status.success(), "clang failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "clang failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    let run = Command::new(dir.join("harness")).arg(&vec_path).arg(dir.join("addrs.bin")).arg(dir.join("results.bin")).output().unwrap();
-    assert!(run.status.success(), "harness failed: {}", String::from_utf8_lossy(&run.stderr));
+    let run = Command::new(dir.join("harness"))
+        .arg(&vec_path)
+        .arg(dir.join("addrs.bin"))
+        .arg(dir.join("results.bin"))
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let results = std::fs::read(dir.join("results.bin")).unwrap();
     let mut rd = Rd(&results);
 
@@ -313,15 +392,27 @@ fn lifted_instructions_match_the_reference_vectors() {
         want.apply(&c.output);
         let diffs = got.diff(&want, c.ps1);
         if !diffs.is_empty() {
-            let name = Ins::new(c.words[c.words.len().saturating_sub(2).min(0)]).simplified().mnemonic;
+            let name = Ins::new(c.words[c.words.len().saturating_sub(2).min(0)])
+                .simplified()
+                .mnemonic;
             *failures.entry(name.to_string()).or_default() += 1;
             if shown < 40 {
                 shown += 1;
                 let mut inputs = State::zero();
                 inputs.apply(&c.input);
-                eprintln!("case {i}: {}\n  {}", describe(&c.words[..c.words.len() - 1]), diffs.join("\n  "));
+                eprintln!(
+                    "case {i}: {}\n  {}",
+                    describe(&c.words[..c.words.len() - 1]),
+                    diffs.join("\n  ")
+                );
             }
         }
     }
-    assert!(failures.is_empty(), "{} of {} cases differ: {:?}", failures.values().sum::<usize>(), cases.len(), failures);
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases differ: {:?}",
+        failures.values().sum::<usize>(),
+        cases.len(),
+        failures
+    );
 }

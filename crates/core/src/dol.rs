@@ -27,7 +27,10 @@ pub fn parse_header(header: &[u8]) -> Option<DolInfo> {
             size = size.max(off.checked_add(len)?);
         }
     }
-    Some(DolInfo { entry: be32(header, 0xE0), size })
+    Some(DolInfo {
+        entry: be32(header, 0xE0),
+        size,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,7 +73,11 @@ impl Dol {
         }
         let mut sections = Vec::new();
         for i in 0..SECTIONS {
-            let (offset, addr, size) = (be32(&bytes, i * 4), be32(&bytes, 0x48 + i * 4), be32(&bytes, 0x90 + i * 4));
+            let (offset, addr, size) = (
+                be32(&bytes, i * 4),
+                be32(&bytes, 0x48 + i * 4),
+                be32(&bytes, 0x90 + i * 4),
+            );
             if size == 0 {
                 continue;
             }
@@ -78,8 +85,17 @@ impl Dol {
             if end.is_none_or(|e| e > bytes.len()) {
                 return Err(DolError::BadSection(i));
             }
-            let kind = if i < 7 { SectionKind::Text } else { SectionKind::Data };
-            sections.push(Section { kind, addr, size, offset });
+            let kind = if i < 7 {
+                SectionKind::Text
+            } else {
+                SectionKind::Data
+            };
+            sections.push(Section {
+                kind,
+                addr,
+                size,
+                offset,
+            });
         }
         Ok(Dol {
             entry: be32(&bytes, 0xE0),
@@ -104,7 +120,10 @@ impl Dol {
 
     /// Read a big-endian word from the initialised image (text or data).
     pub fn read_u32(&self, addr: u32) -> Option<u32> {
-        let s = self.sections.iter().find(|s| addr >= s.addr && addr - s.addr + 4 <= s.size)?;
+        let s = self
+            .sections
+            .iter()
+            .find(|s| addr >= s.addr && addr - s.addr + 4 <= s.size)?;
         Some(be32(self.section_bytes(s), (addr - s.addr) as usize))
     }
 }

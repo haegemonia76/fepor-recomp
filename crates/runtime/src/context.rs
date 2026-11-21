@@ -65,13 +65,20 @@ impl Context {
 
 /// CR as the architected 32-bit value (field 0 in the top nibble).
 pub fn pack_cr(cr: &[Crf; 8]) -> u32 {
-    cr.iter().fold(0, |v, f| v << 4 | (f.lt as u32) << 3 | (f.gt as u32) << 2 | (f.eq as u32) << 1 | f.so as u32)
+    cr.iter().fold(0, |v, f| {
+        v << 4 | (f.lt as u32) << 3 | (f.gt as u32) << 2 | (f.eq as u32) << 1 | f.so as u32
+    })
 }
 
 pub fn unpack_cr(cr: &mut [Crf; 8], v: u32) {
     for (i, f) in cr.iter_mut().enumerate() {
         let n = v >> (28 - 4 * i);
-        *f = Crf { lt: (n >> 3 & 1) as u8, gt: (n >> 2 & 1) as u8, eq: (n >> 1 & 1) as u8, so: (n & 1) as u8 };
+        *f = Crf {
+            lt: (n >> 3 & 1) as u8,
+            gt: (n >> 2 & 1) as u8,
+            eq: (n >> 1 & 1) as u8,
+            so: (n & 1) as u8,
+        };
     }
 }
 
@@ -80,5 +87,10 @@ pub fn pack_xer(x: &Xer) -> u32 {
 }
 
 pub fn unpack_xer(v: u32) -> Xer {
-    Xer { so: (v >> 31 & 1) as u8, ov: (v >> 30 & 1) as u8, ca: (v >> 29 & 1) as u8, bc: (v & 0x7F) as u8 }
+    Xer {
+        so: (v >> 31 & 1) as u8,
+        ov: (v >> 30 & 1) as u8,
+        ca: (v >> 29 & 1) as u8,
+        bc: (v & 0x7F) as u8,
+    }
 }

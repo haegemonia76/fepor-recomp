@@ -121,7 +121,11 @@ pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
         sched::spawn_and_switch(me, token, ctx, move |cp| {
             // SAFETY: the context was boxed for this thread and is only used by it.
             let cp = unsafe { &mut *cp };
-            let Some(f) = guest_function(entry) else { die_str(&format!("new thread entry {entry:#010x} has no generated function")) };
+            let Some(f) = guest_function(entry) else {
+                die_str(&format!(
+                    "new thread entry {entry:#010x} has no generated function"
+                ))
+            };
             run(f, cp);
             // thread functions return into the SDK's exit stub (OSExitThread)
             let ret = cp.lr;

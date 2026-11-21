@@ -21,7 +21,12 @@ pub struct Ai {
 
 impl Ai {
     pub fn new() -> Ai {
-        Ai { regs: [0; 8], control: 0, base: 0, playing_since: None }
+        Ai {
+            regs: [0; 8],
+            control: 0,
+            base: 0,
+            playing_since: None,
+        }
     }
 
     fn rate(&self) -> u64 {
@@ -33,7 +38,9 @@ impl Ai {
     }
 
     fn counter(&self) -> u32 {
-        let live = self.playing_since.map_or(0, |t| (t.elapsed().as_micros() as u64 * self.rate()) / 1_000_000);
+        let live = self.playing_since.map_or(0, |t| {
+            (t.elapsed().as_micros() as u64 * self.rate()) / 1_000_000
+        });
         (self.base + live) as u32
     }
 
@@ -62,7 +69,8 @@ impl Ai {
                     self.playing_since = None;
                 }
                 // AIINT clears on write of 1; SCRESET is a strobe
-                self.control = (value & !CR_AIINT & !CR_SCRESET) | (self.control & CR_AIINT & !value);
+                self.control =
+                    (value & !CR_AIINT & !CR_SCRESET) | (self.control & CR_AIINT & !value);
             }
             o => self.regs[(o / 4) as usize & 7] = value,
         }

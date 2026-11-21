@@ -128,21 +128,34 @@ impl<'a> Fx<'a> {
             let mut v = Vec::new();
             if t <= from {
                 // loops need a safe point too: a guest spinning on a flag an interrupt sets never calls anything
-                v.push("if (__builtin_expect(--fepor_ticks == 0, 0)) { out(); fepor_poll(&c); in(); }".to_string());
+                v.push(
+                    "if (__builtin_expect(--fepor_ticks == 0, 0)) { out(); fepor_poll(&c); in(); }"
+                        .to_string(),
+                );
             }
             v.push(format!("goto L_{t:08x};"));
             v
         } else if self.funcs.contains(&t) {
-            vec!["out();".into(), format!("[[clang::musttail]] return {}(c);", fname(t))]
+            vec![
+                "out();".into(),
+                format!("[[clang::musttail]] return {}(c);", fname(t)),
+            ]
         } else {
-            vec!["out();".into(), format!("unresolved(c, 0x{from:x}, 0x{t:x});")]
+            vec![
+                "out();".into(),
+                format!("unresolved(c, 0x{from:x}, 0x{t:x});"),
+            ]
         }
     }
 
     fn call(&mut self, from: u32, t: u32) -> Vec<String> {
         self.used.lr = true;
         if self.funcs.contains(&t) {
-            let mut v = vec!["out();".to_string(), format!("{}(c);", fname(t)), "in();".to_string()];
+            let mut v = vec![
+                "out();".to_string(),
+                format!("{}(c);", fname(t)),
+                "in();".to_string(),
+            ];
             if let Some(h) = self.hle.get(&t) {
                 if h.unwinds {
                     v.push("if (c.spr[1023] == 1) unwind();".into());
@@ -153,7 +166,10 @@ impl<'a> Fx<'a> {
             }
             v
         } else {
-            vec!["out();".into(), format!("unresolved(c, 0x{from:x}, 0x{t:x});")]
+            vec![
+                "out();".into(),
+                format!("unresolved(c, 0x{from:x}, 0x{t:x});"),
+            ]
         }
     }
 
@@ -168,7 +184,11 @@ impl<'a> Fx<'a> {
         if bo & 0x10 == 0 {
             let f = ["lt", "gt", "eq", "so"][(bi & 3) as usize];
             let c = self.cr(bi >> 2);
-            parts.push(if bo & 8 != 0 { format!("{c}.{f}") } else { format!("!{c}.{f}") });
+            parts.push(if bo & 8 != 0 {
+                format!("{c}.{f}")
+            } else {
+                format!("!{c}.{f}")
+            });
         }
         if parts.is_empty() {
             None
@@ -189,7 +209,10 @@ impl<'a> Fx<'a> {
     }
 
     fn indirect_tail(&mut self, from: u32, target: &str) -> Vec<String> {
-        vec!["out();".into(), format!("[[clang::musttail]] return lookup(0x{from:x}, {target})(c);")]
+        vec![
+            "out();".into(),
+            format!("[[clang::musttail]] return lookup(0x{from:x}, {target})(c);"),
+        ]
     }
 
     fn branch(&mut self, addr: u32, ins: Ins) {
@@ -228,7 +251,11 @@ impl<'a> Fx<'a> {
                 if lk {
                     self.emit(format!("{{ uint32_t t = lr; lr = 0x{ret:x}u;"));
                     let c = self.cond(bo, bi);
-                    let t = vec!["out();".into(), format!("lookup(0x{addr:x}, t)(c);"), "in();".into()];
+                    let t = vec![
+                        "out();".into(),
+                        format!("lookup(0x{addr:x}, t)(c);"),
+                        "in();".into(),
+                    ];
                     self.guarded(c, t);
                     self.emit("}");
                 } else {
@@ -242,7 +269,11 @@ impl<'a> Fx<'a> {
                 if lk {
                     self.emit(format!("{{ uint32_t t = ctr; lr = 0x{ret:x}u;"));
                     let c = self.cond(bo, bi);
-                    let t = vec!["out();".into(), format!("lookup(0x{addr:x}, t)(c);"), "in();".into()];
+                    let t = vec![
+                        "out();".into(),
+                        format!("lookup(0x{addr:x}, t)(c);"),
+                        "in();".into(),
+                    ];
                     self.guarded(c, t);
                     self.emit("}");
                 } else {
@@ -274,10 +305,21 @@ impl<'a> Fx<'a> {
     fn unimplemented(&mut self, addr: u32, ins: Ins) {
         self.unimpl.push((addr, ins.code));
         self.unimpl_ops.push(ins.op);
-        self.emit(format!("out(); unimplemented(c, 0x{addr:x}, 0x{:08x});", ins.code));
+        self.emit(format!(
+            "out(); unimplemented(c, 0x{addr:x}, 0x{:08x});",
+            ins.code
+        ));
     }
 
-    fn load(&mut self, ins: Ins, expr: &str, ea: &str, update_reg: Option<u8>, fp: bool, kind: LoadKind) {
+    fn load(
+        &mut self,
+        ins: Ins,
+        expr: &str,
+        ea: &str,
+        update_reg: Option<u8>,
+        fp: bool,
+        kind: LoadKind,
+    ) {
         let d = if fp { ins.field_frd() } else { ins.field_rd() };
         let dst = if fp { self.f(d) } else { self.r(d) };
         let assign = |dst: &str, v: &str| match kind {
@@ -294,7 +336,10 @@ impl<'a> Fx<'a> {
             Some(a) => {
                 let ra = self.r(a);
                 let v = expr.replace("EA", "ea");
-                self.emit(format!("{{ uint32_t ea = {ea}; {} {ra} = ea; }}", assign(&dst, &v)));
+                self.emit(format!(
+                    "{{ uint32_t ea = {ea}; {} {ra} = ea; }}",
+                    assign(&dst, &v)
+                ));
             }
         }
     }
@@ -368,8 +413,12 @@ impl<'a> Fx<'a> {
                 let (ra, rd) = (self.r(a), self.r(d));
                 self.emit(format!("{rd} = mullw({ra}, {});", simm(simmv)));
             }
-            Add | Subf | Neg | Mullw | Divw | Divwu | Mulhw | Mulhwu | Addc | Adde | Addze | Addme | Subfc | Subfe | Subfze | Subfme => {
-                let carry_op = matches!(ins.op, Addc | Adde | Addze | Addme | Subfc | Subfe | Subfze | Subfme);
+            Add | Subf | Neg | Mullw | Divw | Divwu | Mulhw | Mulhwu | Addc | Adde | Addze
+            | Addme | Subfc | Subfe | Subfze | Subfme => {
+                let carry_op = matches!(
+                    ins.op,
+                    Addc | Adde | Addze | Addme | Subfc | Subfe | Subfze | Subfme
+                );
                 let mulh = matches!(ins.op, Mulhw | Mulhwu);
                 if (oe && (carry_op || mulh)) || (ins.op == Mulhw && oe) {
                     return self.unimplemented(addr, ins);
@@ -463,7 +512,11 @@ impl<'a> Fx<'a> {
             Sraw | Srawi => {
                 self.used.xer = true;
                 let (rs, ra) = (self.r(s), self.r(a));
-                let amount = if ins.op == Sraw { self.r(b) } else { format!("{sh}") };
+                let amount = if ins.op == Sraw {
+                    self.r(b)
+                } else {
+                    format!("{sh}")
+                };
                 self.emit(format!("{ra} = sraw(xer, {rs}, {amount});"));
                 self.rc0(ins, &ra);
             }
@@ -528,7 +581,9 @@ impl<'a> Fx<'a> {
             Lwarx => {
                 let ea = self.ea_x(a, b);
                 let rd = self.r(d);
-                self.emit(format!("{{ uint32_t ea = {ea}; {rd} = ld32(m, ea); c.reserve_addr = ea; }}"));
+                self.emit(format!(
+                    "{{ uint32_t ea = {ea}; {rd} = ld32(m, ea); c.reserve_addr = ea; }}"
+                ));
             }
             Lmw => {
                 let mut ea = self.ea_d(a, off);
@@ -579,26 +634,40 @@ impl<'a> Fx<'a> {
                 let rs = self.r(s);
                 let so = self.so();
                 self.used.cr = true;
-                self.emit(format!("{{ st32(m, {ea}, {rs}); cr[0] = CRF{{0, 0, 1, {so}}}; }}"));
+                self.emit(format!(
+                    "{{ st32(m, {ea}, {rs}); cr[0] = CRF{{0, 0, 1, {so}}}; }}"
+                ));
             }
             // ---- FP loads/stores ----
             Lfs | Lfsu | Lfd | Lfdu => {
                 let upd = matches!(ins.op, Lfsu | Lfdu).then_some(a);
                 let ea = self.ea_d(a, off);
-                let (e, k) = if matches!(ins.op, Lfs | Lfsu) { ("ldfs(m, EA)", LoadKind::FprSingle) } else { ("ldfd(m, EA)", LoadKind::FprDouble) };
+                let (e, k) = if matches!(ins.op, Lfs | Lfsu) {
+                    ("ldfs(m, EA)", LoadKind::FprSingle)
+                } else {
+                    ("ldfd(m, EA)", LoadKind::FprDouble)
+                };
                 self.load(ins, e, &ea, upd, true, k);
             }
             Lfsx | Lfsux | Lfdx | Lfdux => {
                 let upd = matches!(ins.op, Lfsux | Lfdux).then_some(a);
                 let ea = self.ea_x(a, b);
-                let (e, k) = if matches!(ins.op, Lfsx | Lfsux) { ("ldfs(m, EA)", LoadKind::FprSingle) } else { ("ldfd(m, EA)", LoadKind::FprDouble) };
+                let (e, k) = if matches!(ins.op, Lfsx | Lfsux) {
+                    ("ldfs(m, EA)", LoadKind::FprSingle)
+                } else {
+                    ("ldfd(m, EA)", LoadKind::FprDouble)
+                };
                 self.load(ins, e, &ea, upd, true, k);
             }
             Stfs | Stfsu | Stfd | Stfdu => {
                 let upd = matches!(ins.op, Stfsu | Stfdu).then_some(a);
                 let ea = self.ea_d(a, off);
                 let f = self.f(fs);
-                let e = if matches!(ins.op, Stfs | Stfsu) { format!("stfs(m, EA, {f}.x)") } else { format!("stfd(m, EA, {f}.x)") };
+                let e = if matches!(ins.op, Stfs | Stfsu) {
+                    format!("stfs(m, EA, {f}.x)")
+                } else {
+                    format!("stfd(m, EA, {f}.x)")
+                };
                 self.store(&e, &ea, upd);
             }
             Stfsx | Stfsux | Stfdx | Stfdux | Stfiwx => {
@@ -616,13 +685,27 @@ impl<'a> Fx<'a> {
                 let (i, w) = (ins.field_ps_i(), ins.field_ps_w());
                 let ea = self.ea_d(a, ins.field_ps_offset());
                 let e = format!("psq_ld(m, EA, c.spr[{}], {w})", 912 + i as u32);
-                self.load(ins, &e, &ea, (ins.op == PsqLu).then_some(a), true, LoadKind::Quant);
+                self.load(
+                    ins,
+                    &e,
+                    &ea,
+                    (ins.op == PsqLu).then_some(a),
+                    true,
+                    LoadKind::Quant,
+                );
             }
             PsqLx | PsqLux => {
                 let (i, w) = (ins.field_ps_ix(), ins.field_ps_wx());
                 let ea = self.ea_x(a, b);
                 let e = format!("psq_ld(m, EA, c.spr[{}], {w})", 912 + i as u32);
-                self.load(ins, &e, &ea, (ins.op == PsqLux).then_some(a), true, LoadKind::Quant);
+                self.load(
+                    ins,
+                    &e,
+                    &ea,
+                    (ins.op == PsqLux).then_some(a),
+                    true,
+                    LoadKind::Quant,
+                );
             }
             PsqSt | PsqStu => {
                 let (i, w) = (ins.field_ps_i(), ins.field_ps_w());
@@ -643,7 +726,10 @@ impl<'a> Fx<'a> {
             // ---- condition register ----
             Crand | Crandc | Creqv | Crnand | Crnor | Cror | Crorc | Crxor => {
                 self.used.cr = true;
-                let (x, y) = (format!("crbit_get(cr, {})", ins.field_crba()), format!("crbit_get(cr, {})", ins.field_crbb()));
+                let (x, y) = (
+                    format!("crbit_get(cr, {})", ins.field_crba()),
+                    format!("crbit_get(cr, {})", ins.field_crbb()),
+                );
                 let e = match ins.op {
                     Crand => format!("{x} & {y}"),
                     Crandc => format!("{x} & !{y}"),
@@ -663,7 +749,9 @@ impl<'a> Fx<'a> {
             Mcrxr => {
                 self.used.xer = true;
                 let x = self.cr(ins.field_crfd());
-                self.emit(format!("{x} = CRF{{xer.so, xer.ov, xer.ca, 0}}; xer.so = xer.ov = xer.ca = 0;"));
+                self.emit(format!(
+                    "{x} = CRF{{xer.so, xer.ov, xer.ca, 0}}; xer.so = xer.ov = xer.ca = 0;"
+                ));
             }
             Mfcr => {
                 self.used.cr = true;
@@ -746,7 +834,9 @@ impl<'a> Fx<'a> {
             Mffs => {
                 self.used.fpscr = true;
                 let f = self.f(fd);
-                self.emit(format!("{f}.x = std::bit_cast<double>(0xFFF8000000000000ull | fpscr);"));
+                self.emit(format!(
+                    "{f}.x = std::bit_cast<double>(0xFFF8000000000000ull | fpscr);"
+                ));
                 self.rc1(ins);
             }
             Mtfsf => {
@@ -759,14 +849,22 @@ impl<'a> Fx<'a> {
                     }
                 }
                 let f = self.f(fb);
-                self.emit(format!("fpscr = (fpscr & ~{}) | ((uint32_t)std::bit_cast<uint64_t>({f}.x) & {});", h(m), h(m)));
+                self.emit(format!(
+                    "fpscr = (fpscr & ~{}) | ((uint32_t)std::bit_cast<uint64_t>({f}.x) & {});",
+                    h(m),
+                    h(m)
+                ));
                 self.rc1(ins);
             }
             Mtfsfi => {
                 self.used.fpscr = true;
                 let n = ins.field_crfd() as u32;
                 let m = 0xFu32 << (28 - 4 * n);
-                self.emit(format!("fpscr = (fpscr & ~{}) | {};", h(m), h((ins.field_mtfsf_imm() as u32) << (28 - 4 * n))));
+                self.emit(format!(
+                    "fpscr = (fpscr & ~{}) | {};",
+                    h(m),
+                    h((ins.field_mtfsf_imm() as u32) << (28 - 4 * n))
+                ));
                 self.rc1(ins);
             }
             Mtfsb0 | Mtfsb1 => {
@@ -786,7 +884,9 @@ impl<'a> Fx<'a> {
                 self.emit(format!("{{ uint32_t v = fpscr >> {} & 0xF; {c} = CRF{{(uint8_t)(v >> 3 & 1), (uint8_t)(v >> 2 & 1), (uint8_t)(v >> 1 & 1), (uint8_t)(v & 1)}}; }}", 28 - 4 * n));
             }
             // ---- cache, sync, system ----
-            Sync | Isync | Eieio | Dcbf | Dcbi | Dcbst | Dcbt | Dcbtst | Icbi | Tlbie | Tlbsync => self.emit(";"),
+            Sync | Isync | Eieio | Dcbf | Dcbi | Dcbst | Dcbt | Dcbtst | Icbi | Tlbie | Tlbsync => {
+                self.emit(";")
+            }
             Dcbz | DcbzL => {
                 let ea = self.ea_x(a, b);
                 self.emit(format!("dcbz(m, {ea});"));
@@ -797,8 +897,14 @@ impl<'a> Fx<'a> {
                     self.emit(";");
                 } else {
                     let ra = self.r(a);
-                    let rhs = if ins.op == Twi { simm(simmv) } else { self.r(b) };
-                    self.emit(format!("if (tw_cond({to}, {ra}, {rhs})) {{ out(); trap(c, 0x{addr:x}); }}"));
+                    let rhs = if ins.op == Twi {
+                        simm(simmv)
+                    } else {
+                        self.r(b)
+                    };
+                    self.emit(format!(
+                        "if (tw_cond({to}, {ra}, {rhs})) {{ out(); trap(c, 0x{addr:x}); }}"
+                    ));
                 }
             }
             // `sc` only reaches the SDK's instruction-cache flush handler; the runtime may treat it as a no-op.
@@ -838,7 +944,11 @@ impl<'a> Fx<'a> {
             Fmadd | Fmsub | Fnmadd | Fnmsub | Fmadds | Fmsubs | Fnmadds | Fnmsubs => {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
                 let single = matches!(ins.op, Fmadds | Fmsubs | Fnmadds | Fnmsubs);
-                let c = if single { format!("force25({rc}.x)") } else { format!("{rc}.x") };
+                let c = if single {
+                    format!("force25({rc}.x)")
+                } else {
+                    format!("{rc}.x")
+                };
                 let (op, neg) = match ins.op {
                     Fmadd | Fmadds => ("pfmadd", false),
                     Fmsub | Fmsubs => ("pfmsub", false),
@@ -913,7 +1023,11 @@ impl<'a> Fx<'a> {
             }
             PsMuls0 | PsMuls1 | PsMadds0 | PsMadds1 => {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
-                let lane = if matches!(ins.op, PsMuls0 | PsMadds0) { "xx" } else { "yy" };
+                let lane = if matches!(ins.op, PsMuls0 | PsMadds0) {
+                    "xx"
+                } else {
+                    "yy"
+                };
                 let e = if matches!(ins.op, PsMuls0 | PsMuls1) {
                     format!("ps_mul({ra}, {rc}.{lane})")
                 } else {
@@ -925,7 +1039,11 @@ impl<'a> Fx<'a> {
             PsSum0 | PsSum1 => {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
                 let sum = format!("round_single(pfadd({ra}.x, {rb}.y))");
-                let e = if ins.op == PsSum0 { format!("v2d{{{sum}, {rc}.y}}") } else { format!("v2d{{{rc}.x, {sum}}}") };
+                let e = if ins.op == PsSum0 {
+                    format!("v2d{{{sum}, {rc}.y}}")
+                } else {
+                    format!("v2d{{{rc}.x, {sum}}}")
+                };
                 self.emit(format!("{x} = {e};"));
                 self.rc1(ins);
             }
@@ -955,13 +1073,19 @@ impl<'a> Fx<'a> {
             }
             PsSel => {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
-                self.emit(format!("{x} = v2d{{fsel({ra}.x, {rb}.x, {rc}.x), fsel({ra}.y, {rb}.y, {rc}.y)}};"));
+                self.emit(format!(
+                    "{x} = v2d{{fsel({ra}.x, {rb}.x, {rc}.x), fsel({ra}.y, {rb}.y, {rc}.y)}};"
+                ));
                 self.rc1(ins);
             }
             PsCmpu0 | PsCmpo0 | PsCmpu1 | PsCmpo1 => {
                 let crd = self.cr(ins.field_crfd());
                 let (ra, rb) = (self.f(fa), self.f(fb));
-                let l = if matches!(ins.op, PsCmpu0 | PsCmpo0) { "x" } else { "y" };
+                let l = if matches!(ins.op, PsCmpu0 | PsCmpo0) {
+                    "x"
+                } else {
+                    "y"
+                };
                 self.emit(format!("{crd} = fcmp({ra}.{l}, {rb}.{l});"));
             }
             _ => self.unimplemented(addr, ins),

@@ -9,6 +9,7 @@ use crate::ai::Ai;
 use crate::di::Di;
 use crate::dsp::Dsp;
 use crate::exi::Exi;
+use fepor_gx::{Event, Gx, Sink};
 
 pub const PHYS_BASE: u32 = 0x0C00_0000;
 const SPAN: usize = 0x9000;
@@ -30,6 +31,9 @@ const VI_DI: u32 = 0x2030;
 const VI_DI_END: u32 = 0x2040;
 const VI_INT_STATUS: u32 = 1 << 31;
 const VI_INT_ENABLE: u32 = 1 << 28;
+/// Pixel engine: interrupt status/mask (enables: bit0 token, bit1 finish; flags: bit2 token, bit3 finish, cleared by writing 1) and token value.
+const PE_INTSR: u32 = 0x100A;
+const PE_TOKEN: u32 = 0x100E;
 
 const LOCKED_BASE: u32 = 0xE000_0000;
 const LOCKED_SIZE: usize = 0x4000;
@@ -52,8 +56,15 @@ pub struct Hw {
     /// `FEPOR_HW_LIMIT=n`: stop with a crash report after n register accesses (finds polling loops).
     limit: Option<u64>,
     accesses: u64,
-    /// Bytes written to the write-gather pipe (0xCC008000): the GX command stream (M3).
-    pub fifo_bytes: u64,
+    /// The graphics pipeline fed by the write-gather pipe (0xCC008000).
+    pub gx: Gx,
+    fifo: Vec<u8>,
+    sink: Box<dyn Sink>,
+    pe_intsr: u16,
+    pe_token: u16,
+    /// A finish was reached while the token flag was still set; the SDK's token handler would clear
+    /// both flags at once, so the finish is raised only after the token interrupt was acknowledged.
+    pe_finish_pending: bool,
 }
 
 fn block_name(off: u32) -> &'static str {
@@ -86,11 +97,20 @@ impl Hw {
             vi_period: Duration::from_micros(16_683),
             retraces: 0,
             locked: vec![0; LOCKED_SIZE],
-            trace: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "hw" || x == "all")),
-            trace_vi: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "vi" || x == "all")),
-            limit: std::env::var("FEPOR_HW_LIMIT").ok().and_then(|v| v.parse().ok()),
+            trace: std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "hw" || x == "all")),
+            trace_vi: std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "vi" || x == "all")),
+            limit: std::env::var("FEPOR_HW_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok()),
             accesses: 0,
-            fifo_bytes: 0,
+            gx: Gx::new(),
+            fifo: Vec::new(),
+            sink: Box::new(CountingSink::default()),
+            pe_intsr: 0,
+            pe_token: 0,
+            pe_finish_pending: false,
         }
     }
 
@@ -119,6 +139,11 @@ impl Hw {
     /// Interrupt cause bits as the PI reports them.
     fn pi_cause(&mut self) -> u32 {
         self.vi_tick();
+        self.dsp.tick();
+        if self.pe_finish_pending && self.pe_intsr & 4 == 0 {
+            self.pe_finish_pending = false;
+            self.pe_intsr |= 8;
+        }
         let mut cause = 0;
         if self.di.interrupt_pending() {
             cause |= 1 << 2;
@@ -126,16 +151,52 @@ impl Hw {
         if self.dsp.interrupt_pending() {
             cause |= 1 << 6;
         }
-        if self.vi_di.iter().any(|d| d & VI_INT_STATUS != 0 && d & VI_INT_ENABLE != 0) {
+        if self
+            .vi_di
+            .iter()
+            .any(|d| d & VI_INT_STATUS != 0 && d & VI_INT_ENABLE != 0)
+        {
             cause |= 1 << 8;
+        }
+        if self.pe_intsr & 0b0101 == 0b0101 {
+            cause |= 1 << 9;
+        }
+        if self.pe_intsr & 0b1010 == 0b1010 {
+            cause |= 1 << 10;
         }
         cause
     }
 
     /// Is an unmasked interrupt waiting for the CPU?
     pub fn interrupt_pending(&mut self) -> bool {
-        let mask = u32::from_be_bytes(self.mem[PI_INTMSK as usize..PI_INTMSK as usize + 4].try_into().unwrap());
+        let mask = u32::from_be_bytes(
+            self.mem[PI_INTMSK as usize..PI_INTMSK as usize + 4]
+                .try_into()
+                .unwrap(),
+        );
         self.pi_cause() & mask != 0
+    }
+
+    /// Run the command processor on everything gathered so far.
+    pub fn flush_fifo(&mut self, ram: &[u8]) {
+        let bytes = std::mem::take(&mut self.fifo);
+        let mut tap = Tap {
+            inner: &mut *self.sink,
+            finish: false,
+            token: None,
+        };
+        self.gx.feed(&bytes, ram, &mut tap);
+        let (finish, token) = (tap.finish, tap.token);
+        if let Some(t) = token {
+            self.pe_token = t;
+            self.pe_intsr |= 4;
+        }
+        self.pe_finish_pending |= finish;
+    }
+
+    /// Replace the default (counting) video backend.
+    pub fn set_sink(&mut self, sink: Box<dyn Sink>) {
+        self.sink = sink;
     }
 
     /// Attach the player's disc to the DVD interface.
@@ -161,7 +222,9 @@ impl Hw {
     fn count(&mut self) -> Result<(), String> {
         self.accesses += 1;
         match self.limit {
-            Some(n) if self.accesses > n => Err(format!("hardware access limit ({n}) reached: probable polling loop")),
+            Some(n) if self.accesses > n => Err(format!(
+                "hardware access limit ({n}) reached: probable polling loop"
+            )),
             _ => Ok(()),
         }
     }
@@ -169,11 +232,15 @@ impl Hw {
     pub fn read(&mut self, ea: u32, size: u32) -> Result<u32, String> {
         self.count()?;
         if !Self::contains(ea) {
-            return Err(format!("read of unmapped address {ea:#010x} ({size} bytes)"));
+            return Err(format!(
+                "read of unmapped address {ea:#010x} ({size} bytes)"
+            ));
         }
         if Self::in_locked(ea) {
             let (o, n) = ((ea - LOCKED_BASE) as usize, size as usize);
-            return Ok(self.locked[o..o + n].iter().fold(0u32, |a, &b| a << 8 | b as u32));
+            return Ok(self.locked[o..o + n]
+                .iter()
+                .fold(0u32, |a, &b| a << 8 | b as u32));
         }
         let off = Self::offset(ea);
         let v = if (EXI_START..EXI_END).contains(&off) {
@@ -184,6 +251,10 @@ impl Hw {
             self.di.read(off - DI_START, size)
         } else if (AI_START..AI_END).contains(&off) && size == 4 {
             self.ai.read(off - AI_START)
+        } else if off == PE_INTSR && size == 2 {
+            self.pe_intsr as u32
+        } else if off == PE_TOKEN && size == 2 {
+            self.pe_token as u32
         } else if off == PI_CHIPID {
             0x2465_00B1
         } else if off == PI_INTSR {
@@ -197,10 +268,16 @@ impl Hw {
             }
         } else {
             let (o, n) = (off as usize, size as usize);
-            self.mem[o..o + n].iter().fold(0u32, |a, &b| a << 8 | b as u32)
+            self.mem[o..o + n]
+                .iter()
+                .fold(0u32, |a, &b| a << 8 | b as u32)
         };
         if self.trace {
-            eprintln!("hw read{} {ea:#010x} [{}] -> {v:#x}", size * 8, block_name(off));
+            eprintln!(
+                "hw read{} {ea:#010x} [{}] -> {v:#x}",
+                size * 8,
+                block_name(off)
+            );
         }
         Ok(v)
     }
@@ -209,7 +286,9 @@ impl Hw {
     pub fn write(&mut self, ea: u32, value: u32, size: u32, ram: &mut [u8]) -> Result<(), String> {
         self.count()?;
         if !Self::contains(ea) {
-            return Err(format!("write of {value:#x} to unmapped address {ea:#010x} ({size} bytes)"));
+            return Err(format!(
+                "write of {value:#x} to unmapped address {ea:#010x} ({size} bytes)"
+            ));
         }
         if Self::in_locked(ea) {
             let (o, n) = ((ea - LOCKED_BASE) as usize, size as usize);
@@ -220,10 +299,19 @@ impl Hw {
         }
         let off = Self::offset(ea);
         if self.trace {
-            eprintln!("hw write{} {ea:#010x} [{}] <- {value:#x}", size * 8, block_name(off));
+            eprintln!(
+                "hw write{} {ea:#010x} [{}] <- {value:#x}",
+                size * 8,
+                block_name(off)
+            );
         }
         if off >= FIFO_START {
-            self.fifo_bytes += size as u64;
+            // the write-gather pipe: big-endian bytes, handed to the command processor in 32-byte bursts
+            self.fifo
+                .extend((0..size).rev().map(|i| (value >> (8 * i)) as u8));
+            if self.fifo.len() >= 32 {
+                self.flush_fifo(ram);
+            }
         } else if (EXI_START..EXI_END).contains(&off) {
             self.exi.write(off - EXI_START, value, ram);
         } else if (DSP_START..DSP_END).contains(&off) {
@@ -232,6 +320,10 @@ impl Hw {
             self.di.write(off - DI_START, value, ram);
         } else if (AI_START..AI_END).contains(&off) && size == 4 {
             self.ai.write(off - AI_START, value);
+        } else if off == PE_INTSR && size == 2 {
+            // flags clear when written with 1; enables are storage
+            self.pe_intsr =
+                (self.pe_intsr & !0b0011 | (value as u16 & 0b0011)) & !(value as u16 & 0b1100);
         } else if (VI_DI..VI_DI_END).contains(&off) {
             // Each DIx is a 32-bit register the SDK writes as two halfwords. The interrupt status bit clears
             // when written with 0; the enable bit and the position are plain storage.
@@ -255,5 +347,44 @@ impl Hw {
 impl Default for Hw {
     fn default() -> Self {
         Hw::new()
+    }
+}
+
+/// Default backend: counts what the game draws.
+#[derive(Default)]
+pub struct CountingSink {
+    frames: u64,
+}
+
+impl Sink for CountingSink {
+    fn event(&mut self, event: Event, _ram: &[u8], _tluts: &fepor_gx::state::Tluts) {
+        if let Event::Copy(c) = &event {
+            if c.to_xfb {
+                self.frames += 1;
+                if std::env::var("FEPOR_TRACE")
+                    .is_ok_and(|v| v.split(',').any(|x| x == "gx" || x == "all"))
+                {
+                    eprintln!("gx: frame {} copied to XFB at {:#x}", self.frames, c.dest);
+                }
+            }
+        }
+    }
+}
+
+/// Forwards to the real backend while noting the events that raise pixel-engine interrupts.
+struct Tap<'a> {
+    inner: &'a mut dyn Sink,
+    finish: bool,
+    token: Option<u16>,
+}
+
+impl Sink for Tap<'_> {
+    fn event(&mut self, event: Event, ram: &[u8], tluts: &fepor_gx::state::Tluts) {
+        match &event {
+            Event::Finish => self.finish = true,
+            Event::Token(t) => self.token = Some(*t),
+            _ => {}
+        }
+        self.inner.event(event, ram, tluts);
     }
 }

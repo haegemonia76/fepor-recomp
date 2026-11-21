@@ -26,7 +26,11 @@ pub enum VersionError {
     #[error("unsupported game ID {0:?} (supported: GFEP01)")]
     Unsupported(String),
     #[error("main.dol hash mismatch for {game_id}: expected {expected}, found {found}")]
-    HashMismatch { game_id: String, expected: &'static str, found: String },
+    HashMismatch {
+        game_id: String,
+        expected: &'static str,
+        found: String,
+    },
 }
 
 impl Version {
@@ -40,16 +44,22 @@ pub fn lookup(game_id: &str) -> Option<&'static Version> {
 }
 
 pub fn sha1_hex(data: &[u8]) -> String {
-    Sha1::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+    Sha1::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Check the disc's game ID and `main.dol` hash against the version table.
 pub fn check(game_id: &str, dol: &[u8]) -> Result<&'static Version, VersionError> {
-    let v = lookup(game_id)
-        .ok_or_else(|| VersionError::Unsupported(game_id.into()))?;
+    let v = lookup(game_id).ok_or_else(|| VersionError::Unsupported(game_id.into()))?;
     let found = sha1_hex(dol);
     if found != v.dol_sha1 {
-        return Err(VersionError::HashMismatch { game_id: game_id.into(), expected: v.dol_sha1, found });
+        return Err(VersionError::HashMismatch {
+            game_id: game_id.into(),
+            expected: v.dol_sha1,
+            found,
+        });
     }
     Ok(v)
 }
