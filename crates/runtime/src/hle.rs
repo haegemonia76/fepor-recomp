@@ -93,15 +93,55 @@ fn restore(c: &mut Context, ctx: u32) {
     c.r[3] = rd32(ctx + 0xC);
 }
 
+/// The last few OSLoadContext decisions, printed with a crash report.
+static LOG: std::sync::Mutex<std::collections::VecDeque<String>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+fn log_switch(msg: String) {
+    let mut l = LOG.lock().unwrap_or_else(|e| e.into_inner());
+    if l.len() == 24 {
+        l.pop_front();
+    }
+    l.push_back(msg);
+}
+
+fn dump_log() {
+    for m in LOG.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        eprintln!("  switch: {m}");
+    }
+}
+
 /// OSLoadContext(context): switch to the thread that owns `context`.
 #[no_mangle]
 pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
     // SAFETY: the generated stub passes its live context.
     let c = unsafe { &mut *c };
     let target = c.r[3];
+    if target == 0 {
+        let mut sp = c.r[1];
+        let mut chain = format!("lr={:08x}", c.lr);
+        for _ in 0..10 {
+            if !(0x8000_0000..0x8180_0000).contains(&sp) {
+                break;
+            }
+            let back = rd32(sp);
+            chain += &format!(" {:08x}", rd32(back.wrapping_add(4)));
+            sp = back;
+        }
+        dump_log();
+        die_str(&format!(
+            "OSLoadContext(NULL) from {chain}; current thread {:08x}",
+            rd32(0x8000_00E4)
+        ));
+    }
     let me = sched::current();
     let token = sched::token(me);
     let in_irq = matches!(token, Some((_, ParkKind::AfterIrq)));
+    log_switch(format!(
+        "thread#{me} lr={:08x} load {target:#x} token {token:x?} parked_at {:?}",
+        c.lr,
+        sched::parked_at(target)
+    ));
 
     if token.is_some_and(|(t, _)| t == target) {
         // The thread picked itself again: continue where it saved (or where it was interrupted).
@@ -138,6 +178,7 @@ pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
     // Resumed by someone else's OSLoadContext.
     match sched::woken_as(me) {
         Some((ctx, kind)) => {
+            log_switch(format!("thread#{me} resumed from {ctx:#x} as {kind:?}"));
             restore(c, ctx);
             c.spr[HLE_STATUS] = (kind == ParkKind::AfterIrq) as u32;
         }

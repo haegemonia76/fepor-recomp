@@ -15,6 +15,7 @@ fepor-ppc-lift = { path = "crates/ppc-lift" }
 fepor-runtime = { path = "crates/runtime" }
 fepor-gx = { path = "crates/gx" }
 fepor-video = { path = "crates/video" }
+winit = "0.30"
 cc = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

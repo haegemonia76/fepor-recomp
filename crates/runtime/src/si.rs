@@ -55,7 +55,12 @@ pub struct PadState {
 
 impl Default for PadState {
     fn default() -> Self {
-        PadState { buttons: 0, stick: (128, 128), c_stick: (128, 128), triggers: (0, 0) }
+        PadState {
+            buttons: 0,
+            stick: (128, 128),
+            c_stick: (128, 128),
+            triggers: (0, 0),
+        }
     }
 }
 
@@ -63,9 +68,44 @@ impl PadState {
     /// The two status words the hardware reads from a polled controller.
     fn words(&self) -> (u32, u32) {
         let b = self.buttons;
-        let hi = (((b >> 8) as u32) << 24) | ((0x80 | (b & 0x7F) as u32) << 16) | ((self.stick.0 as u32) << 8) | self.stick.1 as u32;
-        let lo = ((self.c_stick.0 as u32) << 24) | ((self.c_stick.1 as u32) << 16) | ((self.triggers.0 as u32) << 8) | self.triggers.1 as u32;
+        let hi = (((b >> 8) as u32) << 24)
+            | ((0x80 | (b & 0x7F) as u32) << 16)
+            | ((self.stick.0 as u32) << 8)
+            | self.stick.1 as u32;
+        let lo = ((self.c_stick.0 as u32) << 24)
+            | ((self.c_stick.1 as u32) << 16)
+            | ((self.triggers.0 as u32) << 8)
+            | self.triggers.1 as u32;
         (hi, lo)
+    }
+}
+
+/// The controller state set by the front end (window or gamepad thread), packed so it can be shared
+/// with the guest thread without locking: buttons, stick x/y, c-stick x/y, triggers L/R.
+static LIVE_PAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Publish the controller state the guest sees from the next retrace on.
+pub fn set_pad(p: PadState) {
+    let v = p.buttons as u64
+        | (p.stick.0 as u64) << 16
+        | (p.stick.1 as u64) << 24
+        | (p.c_stick.0 as u64) << 32
+        | (p.c_stick.1 as u64) << 40
+        | (p.triggers.0 as u64) << 48
+        | (p.triggers.1 as u64) << 56;
+    LIVE_PAD.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn live_pad() -> PadState {
+    let v = LIVE_PAD.load(std::sync::atomic::Ordering::Relaxed);
+    if v == 0 {
+        return PadState::default();
+    }
+    PadState {
+        buttons: v as u16,
+        stick: ((v >> 16) as u8, (v >> 24) as u8),
+        c_stick: ((v >> 32) as u8, (v >> 40) as u8),
+        triggers: ((v >> 48) as u8, (v >> 56) as u8),
     }
 }
 
@@ -111,21 +151,40 @@ fn parse_script(spec: &str) -> Vec<Press> {
                 }
             };
         }
-        out.push(Press { buttons, from: from.parse().unwrap_or(0), frames: frames.parse().unwrap_or(6) });
+        out.push(Press {
+            buttons,
+            from: from.parse().unwrap_or(0),
+            frames: frames.parse().unwrap_or(6),
+        });
     }
     out
 }
 
 impl Si {
     pub fn new() -> Si {
-        let script = std::env::var("FEPOR_PAD").map(|s| parse_script(&s)).unwrap_or_default();
-        Si { regs: [0; 0x20], buf: [0; 128], poll: 0, csr: 0, sr: 0, pad: PadState::default(), script }
+        let script = std::env::var("FEPOR_PAD")
+            .map(|s| parse_script(&s))
+            .unwrap_or_default();
+        Si {
+            regs: [0; 0x20],
+            buf: [0; 128],
+            poll: 0,
+            csr: 0,
+            sr: 0,
+            pad: PadState::default(),
+            script,
+        }
     }
 
     /// One retrace: apply scripted input and, when polling is on, refresh channel 0.
     pub fn retrace(&mut self, frame: u64) {
+        self.pad = live_pad();
         if !self.script.is_empty() {
-            self.pad.buttons = self.script.iter().filter(|p| frame >= p.from && frame < p.from + p.frames).fold(0, |a, p| a | p.buttons);
+            self.pad.buttons |= self
+                .script
+                .iter()
+                .filter(|p| frame >= p.from && frame < p.from + p.frames)
+                .fold(0, |a, p| a | p.buttons);
         }
         if self.poll & POLL_EN0 != 0 {
             let (hi, lo) = self.pad.words();
@@ -144,7 +203,8 @@ impl Si {
     }
 
     pub fn interrupt_pending(&self) -> bool {
-        (self.csr & CSR_TCINT != 0 && self.csr & CSR_TCINTMSK != 0) || (self.csr & CSR_RDSTINT != 0 && self.csr & CSR_RDSTINTMSK != 0)
+        (self.csr & CSR_TCINT != 0 && self.csr & CSR_TCINTMSK != 0)
+            || (self.csr & CSR_RDSTINT != 0 && self.csr & CSR_RDSTINTMSK != 0)
     }
 
     pub fn read(&mut self, off: u32, size: u32) -> u32 {
@@ -152,7 +212,9 @@ impl Si {
             SIPOLL => self.poll,
             SICOMCSR => self.csr,
             SISR => self.sr,
-            o if o >= SIBUF => u32::from_be_bytes(self.buf[(o - SIBUF) as usize..][..4].try_into().unwrap()),
+            o if o >= SIBUF => {
+                u32::from_be_bytes(self.buf[(o - SIBUF) as usize..][..4].try_into().unwrap())
+            }
             o => self.regs[(o / 4) as usize & 0x1F],
         };
         if off & !3 == C0_IN_H {
@@ -188,7 +250,9 @@ impl Si {
                 self.sr &= !(value & 0x0F0F_0F0F);
                 self.sr &= !(value & SR_WR);
             }
-            o if o >= SIBUF => self.buf[(o - SIBUF) as usize..][..4].copy_from_slice(&value.to_be_bytes()),
+            o if o >= SIBUF => {
+                self.buf[(o - SIBUF) as usize..][..4].copy_from_slice(&value.to_be_bytes())
+            }
             o => self.regs[(o / 4) as usize & 0x1F] = value,
         }
     }

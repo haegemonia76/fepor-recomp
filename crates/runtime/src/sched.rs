@@ -74,6 +74,11 @@ pub fn set_irq_ctx(me: usize, ctx: Option<u32>) {
     with(|s| s.threads[me].irq_ctx = ctx);
 }
 
+/// The exception context `me` is currently handling an interrupt for, if any.
+pub fn irq_ctx(me: usize) -> Option<u32> {
+    with(|s| s.threads[me].irq_ctx)
+}
+
 /// The context `me` would be resumed from, and how.
 pub fn token(me: usize) -> Option<(u32, ParkKind)> {
     with(|s| {

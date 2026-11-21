@@ -10,3 +10,4 @@ wgpu = "26"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.17"
+winit.workspace = true

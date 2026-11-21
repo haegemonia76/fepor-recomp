@@ -4,11 +4,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use fepor_gx::state::{CopyEfb, DrawCall, Event, Primitive, RenderState, Sink, TextureDesc, Tluts};
 use fepor_gx::{tev, texture};
 use wgpu::util::DeviceExt;
+
+mod present;
 
 pub const EFB_WIDTH: u32 = 640;
 pub const EFB_HEIGHT: u32 = 528;
@@ -76,6 +79,7 @@ pub struct Renderer {
     trace_draws: bool,
     /// Draws since the last presented frame.
     pub draws: u64,
+    presenter: Option<present::Presenter>,
 }
 
 fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
@@ -96,11 +100,21 @@ fn hash_str(s: &str) -> u64 {
 }
 
 impl Renderer {
-    /// Create a headless renderer (no window).
-    pub fn new() -> Result<Renderer, String> {
+    /// Create a renderer. With a window it presents every XFB copy there; without one it only renders
+    /// (frames can still be dumped with `FEPOR_DUMP_FRAMES`).
+    pub fn new(window: Option<Arc<winit::window::Window>>) -> Result<Renderer, String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let surface = match &window {
+            Some(w) => Some(
+                instance
+                    .create_surface(w.clone())
+                    .map_err(|e| format!("surface: {e}"))?,
+            ),
+            None => None,
+        };
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: surface.as_ref(),
             ..Default::default()
         }))
         .map_err(|e| format!("no GPU adapter: {e}"))?;
@@ -109,6 +123,14 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|e| format!("device: {e}"))?;
+        let presenter = surface.map(|s| {
+            present::Presenter::new(
+                &adapter,
+                &device,
+                s,
+                window.clone().expect("surface implies window"),
+            )
+        });
 
         let efb = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("efb"),
@@ -235,6 +257,7 @@ impl Renderer {
             pending_clear: Some(([0.0; 4], 1.0)),
             frame: 0,
             dump,
+            presenter,
             cull: std::env::var("FEPOR_CULL").is_ok(),
             dump_textures: std::env::var("FEPOR_DUMP_TEXTURES")
                 .ok()
@@ -806,6 +829,9 @@ impl Renderer {
             );
         }
         self.draws = 0;
+        if let Some(p) = &mut self.presenter {
+            p.show(&self.device, &self.queue, &self.efb_view, c);
+        }
         let Some(d) = &self.dump else { return };
         if self.frame % d.every != 0 {
             return;

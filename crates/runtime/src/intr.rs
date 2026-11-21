@@ -103,13 +103,20 @@ fn deliver(c: &mut Context, number: u32) {
         ))
     };
 
+    let outer = sched::irq_ctx(me);
+    if outer.is_some() && m.trace.irq {
+        eprintln!(
+            "irq: nested delivery inside the handler of context {:#x}",
+            outer.unwrap()
+        );
+    }
     sched::set_irq_ctx(me, Some(ctx_virtual));
     c.r[5] = c.msr; // SRR1
     c.r[3] = number;
     c.r[4] = ctx_virtual;
     c.msr = (c.msr & !MSR_EE) | 0x30;
     let unwound = crate::hle::run(f, c);
-    sched::set_irq_ctx(me, None);
+    sched::set_irq_ctx(me, outer);
 
     if !unwound {
         // The handler returned normally: the interrupted code continues with its own registers.
