@@ -54,6 +54,11 @@ pub enum Command {
     Generate(commands::generate::GenerateArgs),
     /// Generate and build the game from the player's copy, printing `progress` lines (RecompLauncher setup step).
     Prepare(commands::generate::GenerateArgs),
+    /// Check a raw memory card image (header/directory/BAT checksums) and list its saves.
+    CardInfo {
+        /// The `.raw` image.
+        image: PathBuf,
+    },
     /// List the disc's files with their disc offsets (for matching DVD reads in a trace).
     Ls,
     /// Disassemble guest code from main.dol.
@@ -94,6 +99,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Command::Generate(args) => commands::generate::run(&opts, &args, false),
         Command::Prepare(args) => commands::generate::run(&opts, &args, true),
         Command::Ls => commands::inspect::ls(&opts),
+        Command::CardInfo { image } => commands::inspect::card_info(&image),
         Command::Disasm { addr, count } => commands::inspect::disasm(&opts, addr, count),
         Command::Opcodes => commands::inspect::opcodes(&opts),
         Command::Find {

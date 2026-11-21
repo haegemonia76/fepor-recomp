@@ -164,6 +164,9 @@ impl Hw {
         if self.si.interrupt_pending() {
             cause |= 1 << 3;
         }
+        if self.exi.interrupt_pending() {
+            cause |= 1 << 4;
+        }
         if self.dsp.interrupt_pending() {
             cause |= 1 << 6;
         }
@@ -245,6 +248,11 @@ impl Hw {
             Some(s) => self.dsp.drain_audio(ram, s.as_mut()),
             None => self.dsp.drain_audio(ram, &mut NullSink),
         }
+    }
+
+    /// Insert a memory card in slot A (0) or B (1).
+    pub fn insert_card(&mut self, slot: usize, card: crate::card::MemCard) {
+        self.exi.insert_card(slot, card);
     }
 
     /// Attach the player's disc to the DVD interface.

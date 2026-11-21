@@ -3,6 +3,7 @@
 //!
 //! Transfers complete immediately: writing CR with TSTART performs the transfer and clears TSTART.
 
+use crate::card::MemCard;
 const STRIDE: u32 = 0x14;
 const CSR: u32 = 0x00;
 const MAR: u32 = 0x04;
@@ -21,7 +22,7 @@ const RTC_CMD: u32 = 0x2000_0000;
 const SRAM_CMD: u32 = 0x2000_0100;
 const CMD_WRITE: u32 = 0x8000_0000;
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct Channel {
     csr: u32,
     mar: u32,
@@ -32,6 +33,8 @@ struct Channel {
     cmd: Option<u32>,
     /// Bytes of the current command already transferred.
     pos: u32,
+    /// Memory card in this channel's device 0.
+    card: Option<MemCard>,
 }
 
 pub struct Exi {
@@ -72,7 +75,17 @@ impl Exi {
             return 0;
         };
         let word = match reg & !3 {
-            CSR => ch.csr,
+            CSR => {
+                // EXT: a card is inserted; EXIINT mirrors the card's interrupt line
+                let mut v = ch.csr;
+                if let Some(card) = &ch.card {
+                    v |= CSR_EXT;
+                    if card.interrupt_pending() {
+                        v |= CSR_EXIINT;
+                    }
+                }
+                v
+            }
             MAR => ch.mar,
             LENGTH => ch.length,
             CR => ch.cr,
@@ -97,10 +110,19 @@ impl Exi {
         };
         match reg {
             CSR => {
-                // the EXT bit is read-only (no memory card inserted); interrupt flags clear on write of 1
+                // EXT is read-only; interrupt flags clear on write of 1
+                let old_cs = (ch.csr >> 7) & 7;
                 let plain = value & !CSR_W1C & !CSR_EXT;
                 ch.csr = plain | (ch.csr & CSR_W1C & !(value & CSR_W1C));
-                if (ch.csr >> 7) & 7 == 0 {
+                let new_cs = (ch.csr >> 7) & 7;
+                if let Some(card) = ch.card.as_mut() {
+                    if old_cs & 1 == 0 && new_cs & 1 != 0 {
+                        card.set_cs(true);
+                    } else if old_cs & 1 != 0 && new_cs & 1 == 0 {
+                        card.set_cs(false);
+                    }
+                }
+                if new_cs == 0 {
                     ch.cmd = None;
                     ch.pos = 0;
                 }
@@ -132,7 +154,36 @@ impl Exi {
             ((cr >> 4) & 3) + 1
         };
 
-        // Only the IPL device (channel 0, device 1) exists; empty slots read as all ones.
+        // Memory card: device 0 of channels 0 and 1
+        if cs == 0b001 && self.ch[c].card.is_some() {
+            let ch = &mut self.ch[c];
+            let card = ch.card.as_mut().expect("checked above");
+            if dma {
+                let mar = ch.mar as usize;
+                if rw == 0 {
+                    let bytes = card.dma_read(len as usize);
+                    ram[mar..mar + bytes.len()].copy_from_slice(&bytes);
+                } else {
+                    card.dma_write(&ram[mar..mar + len as usize]);
+                }
+            } else {
+                let mut w = ch.data.to_be_bytes();
+                for b in w.iter_mut().take(len as usize) {
+                    let out = card.transfer_byte(if rw == 0 { 0 } else { *b });
+                    if rw != 1 {
+                        *b = out;
+                    }
+                }
+                if rw != 1 {
+                    let mut r = [0u8; 4];
+                    r[..len as usize].copy_from_slice(&w[..len as usize]);
+                    ch.data = u32::from_be_bytes(r);
+                }
+            }
+            return;
+        }
+
+        // Only the IPL device (channel 0, device 1) exists besides cards; empty slots read as all ones.
         if !(c == 0 && cs == 0b010) {
             if rw != 1 && !dma {
                 self.ch[c].data = u32::MAX;
@@ -158,6 +209,33 @@ impl Exi {
             let w = self.ch[c].data.to_be_bytes();
             self.device_write(c, &w[..len as usize]);
         }
+    }
+
+    /// Insert a memory card in slot A (channel 0) or B (channel 1). Its header also determines the flash ID
+    /// the OS reads from SRAM.
+    pub fn insert_card(&mut self, slot: usize, card: MemCard) {
+        let h = card.header();
+        let mut rand = u64::from_be_bytes(h[12..20].try_into().expect("8 bytes"));
+        let mut sum = 0u8;
+        for i in 0..12 {
+            rand = (rand.wrapping_mul(0x41c6_4e6d).wrapping_add(0x3039)) >> 16;
+            let v = h[i].wrapping_sub(rand as u8);
+            self.sram[0x14 + slot * 12 + i] = v;
+            sum = sum.wrapping_add(v);
+            rand = ((rand.wrapping_mul(0x41c6_4e6d).wrapping_add(0x3039)) >> 16) & 0x7FFF;
+        }
+        self.sram[0x3A + slot] = sum ^ 0xFF;
+        self.ch[slot].card = Some(card);
+    }
+
+    /// An unmasked EXI interrupt is pending (device interrupt, transfer complete or card insertion).
+    pub fn interrupt_pending(&self) -> bool {
+        self.ch.iter().any(|ch| {
+            let dev = ch.card.as_ref().is_some_and(|c| c.interrupt_pending());
+            (dev && ch.csr & 1 != 0)
+                || (ch.csr & CSR_TCINT != 0 && ch.csr & 4 != 0)
+                || (ch.csr & CSR_EXTINT != 0 && ch.csr & (1 << 10) != 0)
+        })
     }
 
     /// Bytes the IPL device (RTC, SRAM, anything else reads as ones) sends for the current command.

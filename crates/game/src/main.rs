@@ -20,23 +20,58 @@ use winit::window::{Window, WindowId};
 
 struct Args {
     game: PathBuf,
+    data: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut game = None;
+    let mut data = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--game" | "--disc" => game = it.next().map(PathBuf::from),
-            "--data" | "--output" => {
-                it.next(); // accepted for RecompLauncher compatibility; the runtime writes nothing yet
-            }
+            "--data" | "--output" => data = it.next().map(PathBuf::from),
             other => return Err(format!("unknown argument {other}")),
         }
     }
     Ok(Args {
         game: game.ok_or("usage: fepor-game --game <iso|folder> [--data <dir>]")?,
+        data,
     })
+}
+
+/// Memory cards: raw Dolphin-format images, `<data>/memcards/MemoryCard{A,B}.<region>.raw`, or the files named
+/// by `FEPOR_MEMCARD_A` / `FEPOR_MEMCARD_B` (`none` leaves the slot empty). New cards are 16 Mbit (251 blocks)
+/// and unformatted; the game offers to format them.
+fn insert_cards(m: &mut fepor_runtime::Machine, game_id: &str, data: Option<&std::path::Path>) {
+    let region = match game_id.as_bytes().get(3) {
+        Some(b'E') => "USA",
+        Some(b'J') => "JAP",
+        _ => "EUR",
+    };
+    let base = data.map(PathBuf::from).unwrap_or_else(|| {
+        let home = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .unwrap_or_else(|| PathBuf::from("."));
+        home.join("fepor-recomp")
+    });
+    for (slot, letter) in ["A", "B"].into_iter().enumerate() {
+        // slot B stays empty unless asked for
+        let var = std::env::var(format!("FEPOR_MEMCARD_{letter}")).ok();
+        let path = match (&var, slot) {
+            (Some(v), _) if v == "none" => continue,
+            (Some(v), _) => PathBuf::from(v),
+            (None, 0) => base
+                .join("memcards")
+                .join(format!("MemoryCardA.{region}.raw")),
+            (None, _) => continue,
+        };
+        match fepor_runtime::card::MemCard::open(&path, 16) {
+            Ok(card) => m.hw.insert_card(slot, card),
+            Err(e) => eprintln!("memory card {letter}: {e}"),
+        }
+    }
 }
 
 fn run(window: Option<Arc<Window>>) -> Result<(), String> {
@@ -59,6 +94,7 @@ fn run(window: Option<Arc<Window>>) -> Result<(), String> {
     if let Some(sink) = fepor_audio::open() {
         m.hw.set_audio_sink(sink);
     }
+    insert_cards(m, disc.game_id(), args.data.as_deref());
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
     abi::start_watchdog();

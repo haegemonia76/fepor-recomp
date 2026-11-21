@@ -133,3 +133,34 @@ pub fn ls(opts: &Options) -> Result<(), Fail> {
     }
     Ok(())
 }
+
+/// Structural check of a raw memory card image.
+pub fn card_info(image: &std::path::Path) -> Result<(), Fail> {
+    let data =
+        std::fs::read(image).map_err(|e| Fail::Usage(format!("{}: {e}", image.display())))?;
+    let info = fepor_core::memcard::inspect(&data).map_err(Fail::Usage)?;
+    println!(
+        "{} Mbit ({} blocks), {}",
+        info.size_mbit,
+        info.size_mbit * 16 - 5,
+        if info.formatted {
+            "formatted"
+        } else {
+            "not formatted"
+        }
+    );
+    println!(
+        "header {}; directory {:?}; BAT {:?}; {} free blocks",
+        if info.header_ok { "ok" } else { "BAD" },
+        info.dir_ok,
+        info.bat_ok,
+        info.free_blocks
+    );
+    for s in &info.saves {
+        println!(
+            "  {}{} {:<32} first block {:>4}, {} blocks",
+            s.game_code, s.maker_code, s.file_name, s.first_block, s.blocks
+        );
+    }
+    Ok(())
+}
