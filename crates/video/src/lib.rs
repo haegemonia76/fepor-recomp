@@ -204,6 +204,8 @@ pub struct Renderer {
     pending_clear: Option<([f64; 4], f32)>,
     /// Images shown per guest frame (1 = every frame as it comes).
     mult: u32,
+    /// Internal resolution factor (`FEPOR_RES`): render targets are `scale` times the GameCube's EFB.
+    scale: u32,
     /// Draws and clears go to the interpolation target (`alt_*`) while a frame is replayed.
     use_alt: bool,
     alt_view: wgpu::TextureView,
@@ -298,11 +300,17 @@ impl Renderer {
             )
         });
 
+        // `FEPOR_RES=n`: render at n times the GameCube's 640x528 (windowed or dumped; 1..=4).
+        let scale: u32 = std::env::var("FEPOR_RES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+            .clamp(1, 4);
         let efb = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("efb"),
             size: wgpu::Extent3d {
-                width: EFB_WIDTH,
-                height: EFB_HEIGHT,
+                width: EFB_WIDTH * scale,
+                height: EFB_HEIGHT * scale,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -317,8 +325,8 @@ impl Renderer {
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("efb depth"),
             size: wgpu::Extent3d {
-                width: EFB_WIDTH,
-                height: EFB_HEIGHT,
+                width: EFB_WIDTH * scale,
+                height: EFB_HEIGHT * scale,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -334,8 +342,8 @@ impl Renderer {
         let alt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("efb interp"),
             size: wgpu::Extent3d {
-                width: EFB_WIDTH,
-                height: EFB_HEIGHT,
+                width: EFB_WIDTH * scale,
+                height: EFB_HEIGHT * scale,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -352,8 +360,8 @@ impl Renderer {
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("efb interp depth"),
                 size: wgpu::Extent3d {
-                    width: EFB_WIDTH,
-                    height: EFB_HEIGHT,
+                    width: EFB_WIDTH * scale,
+                    height: EFB_HEIGHT * scale,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -367,8 +375,8 @@ impl Renderer {
         let xfb = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("xfb"),
             size: wgpu::Extent3d {
-                width: EFB_WIDTH,
-                height: EFB_HEIGHT,
+                width: EFB_WIDTH * scale,
+                height: EFB_HEIGHT * scale,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -473,6 +481,7 @@ impl Renderer {
             stream,
             tex_binds: HashMap::new(),
             mult,
+            scale,
             use_alt: false,
             alt_view,
             alt_depth_view,
@@ -985,6 +994,7 @@ impl Renderer {
             );
         }
         let pass = self.pass.as_mut().expect("render pass");
+        let s = self.scale as f32;
         let [vx, vy, vw, vh, _, _] = r.viewport;
         let (x0, y0) = (vx.max(0.0), vy.max(0.0));
         let (x1, y1) = (
@@ -992,7 +1002,7 @@ impl Renderer {
             (vy + vh).min(EFB_HEIGHT as f32),
         );
         if x1 > x0 && y1 > y0 {
-            pass.set_viewport(x0, y0, x1 - x0, y1 - y0, 0.0, 1.0);
+            pass.set_viewport(x0 * s, y0 * s, (x1 - x0) * s, (y1 - y0) * s, 0.0, 1.0);
         }
         let [sx, sy, sw, sh] = r.scissor;
         let (sx0, sy0) = (
@@ -1004,11 +1014,12 @@ impl Renderer {
             (sy + sh).clamp(0, EFB_HEIGHT as i32),
         );
         if sx1 > sx0 && sy1 > sy0 {
+            let k = self.scale;
             pass.set_scissor_rect(
-                sx0 as u32,
-                sy0 as u32,
-                (sx1 - sx0) as u32,
-                (sy1 - sy0) as u32,
+                sx0 as u32 * k,
+                sy0 as u32 * k,
+                (sx1 - sx0) as u32 * k,
+                (sy1 - sy0) as u32 * k,
             );
         }
         pass.set_pipeline(&r.pipeline);
@@ -1084,12 +1095,14 @@ impl Renderer {
         });
     }
 
-    /// Read back a region of the EFB as RGBA8.
+    /// Read back a region of the EFB (coordinates in GameCube pixels) as RGBA8; the result is `scale()`
+    /// times larger in each direction.
     pub fn read_efb(&mut self, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
         self.flush();
+        let s = self.scale;
         let (w, h) = (
-            w.min(EFB_WIDTH - x.min(EFB_WIDTH)),
-            h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)),
+            w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
+            h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)) * s,
         );
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1103,7 +1116,11 @@ impl Renderer {
             wgpu::TexelCopyTextureInfo {
                 texture: if self.read_alt { &self.alt } else { &self.efb },
                 mip_level: 0,
-                origin: wgpu::Origin3d { x, y, z: 0 },
+                origin: wgpu::Origin3d {
+                    x: x * s,
+                    y: y * s,
+                    z: 0,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -1161,7 +1178,13 @@ impl Renderer {
             .chunks_exact(4)
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
-        write_png(&path, w, h, png::ColorType::Rgb, &rgb);
+        write_png(
+            &path,
+            w * self.scale,
+            h * self.scale,
+            png::ColorType::Rgb,
+            &rgb,
+        );
     }
 
     /// Show a finished frame: right away, or (with `mult > 1`) as the plan of interpolated images
@@ -1200,8 +1223,8 @@ impl Renderer {
             self.efb.as_image_copy(),
             self.xfb.as_image_copy(),
             wgpu::Extent3d {
-                width: EFB_WIDTH,
-                height: EFB_HEIGHT,
+                width: EFB_WIDTH * self.scale,
+                height: EFB_HEIGHT * self.scale,
                 depth_or_array_layers: 1,
             },
         );
@@ -1286,7 +1309,13 @@ impl Renderer {
                 .collect();
             let name = format!("frame_{:05}_t{:02}.png", self.frame, (t * 100.0) as u32);
             let path = self.dump.as_ref().expect("dump").dir.join(name);
-            write_png(&path, w, h, png::ColorType::Rgb, &rgb);
+            write_png(
+                &path,
+                w * self.scale,
+                h * self.scale,
+                png::ColorType::Rgb,
+                &rgb,
+            );
         }
     }
 
@@ -1305,8 +1334,8 @@ impl Renderer {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("efb copy"),
                 size: wgpu::Extent3d {
-                    width: w,
-                    height: h,
+                    width: w * self.scale,
+                    height: h * self.scale,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -1325,7 +1354,11 @@ impl Renderer {
                 wgpu::TexelCopyTextureInfo {
                     texture: efb,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    origin: wgpu::Origin3d {
+                        x: x * self.scale,
+                        y: y * self.scale,
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyTextureInfo {
@@ -1335,8 +1368,8 @@ impl Renderer {
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::Extent3d {
-                    width: w,
-                    height: h,
+                    width: w * self.scale,
+                    height: h * self.scale,
                     depth_or_array_layers: 1,
                 },
             );
