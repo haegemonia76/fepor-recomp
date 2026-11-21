@@ -28,11 +28,12 @@ pub struct Di {
     regs: [u32; 10],
     status: u32,
     cover: u32,
+    trace: bool,
 }
 
 impl Di {
     pub fn new() -> Di {
-        Di { disc: None, regs: [0; 10], status: 0, cover: 0 }
+        Di { disc: None, regs: [0; 10], status: 0, cover: 0, trace: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "di" || x == "all")) }
     }
 
     pub fn attach(&mut self, disc: Box<dyn Disc>) {
@@ -80,6 +81,9 @@ impl Di {
         let dma = cr & 2 != 0;
         let mar = (self.regs[(DIMAR / 4) as usize] & 0x03FF_FFE0) as usize;
         let len = self.regs[(DILENGTH / 4) as usize] as usize;
+        if self.trace {
+            eprintln!("di: cmd {cmd:#010x} arg1 {:#x} arg2 {:#x} mar {mar:#x} len {len:#x} dma {dma}", self.regs[(DICMDBUF1 / 4) as usize], self.regs[(DICMDBUF2 / 4) as usize]);
+        }
         match cmd >> 24 {
             0x12 => {
                 // inquiry: drive revision information
@@ -100,6 +104,11 @@ impl Di {
                 }
             }
             _ => {} // seek, stop motor, audio streaming: nothing to do
+        }
+        if dma {
+            // the driver measures how much was transferred from what remains
+            self.regs[(DIMAR / 4) as usize] = self.regs[(DIMAR / 4) as usize].wrapping_add(len as u32);
+            self.regs[(DILENGTH / 4) as usize] = 0;
         }
         self.regs[(DIIMMBUF / 4) as usize] = 0;
         self.regs[(DICMDBUF1 / 4) as usize] = self.regs[(DICMDBUF1 / 4) as usize];

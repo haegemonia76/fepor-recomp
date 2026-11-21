@@ -43,10 +43,9 @@ fn run() -> Result<(), String> {
     boot::attach_disc(m, disc);
     abi::start_watchdog();
     let mut ctx = Context::new(m.ram_ptr());
-    abi::set_current(&mut *ctx);
+    fepor_runtime::sched::init(&mut *ctx);
     let start: HostFn = abi::find_function(entry).ok_or_else(|| format!("entry point {entry:#010x} has no generated function"))?;
-    // SAFETY: `start` is a generated function taking the guest context; the context outlives the call.
-    unsafe { start(&mut *ctx) };
+    fepor_runtime::hle::run(start, &mut ctx);
     Err("the game returned from its entry point".into())
 }
 

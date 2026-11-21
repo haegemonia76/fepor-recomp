@@ -14,11 +14,13 @@ pub struct Machine {
     pub hw: Hw,
     pub trace: Trace,
     pub started: Instant,
+    /// Function entries seen (interrupt polling cadence).
+    pub enter_count: u32,
 }
 
 impl Machine {
     pub fn new() -> Machine {
-        Machine { ram: vec![0u8; RAM_SIZE + RAM_SLACK].into_boxed_slice(), hw: Hw::new(), trace: Trace::from_env(), started: Instant::now() }
+        Machine { ram: vec![0u8; RAM_SIZE + RAM_SLACK].into_boxed_slice(), hw: Hw::new(), trace: Trace::from_env(), started: Instant::now(), enter_count: 0 }
     }
 
     pub fn ram_ptr(&mut self) -> *mut u8 {

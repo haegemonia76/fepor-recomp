@@ -57,6 +57,7 @@ fn generate(opts: &Options, args: &GenerateArgs, session: &Session, out: &Path) 
         functions_per_unit: args.functions_per_unit.unwrap_or(opts.cfg.generate.functions_per_unit),
         runtime_dir: runtime_dir.display().to_string(),
         trace_calls: args.trace_calls || opts.cfg.generate.trace_calls,
+        hle: session.analysis_cfg.hle.clone(),
     };
     let stats = fepor_ppc_lift::generate(&session.dol, &analysis, &lift_opts, &mut |name, content| write_if_changed(&gen_dir.join(name), content))
         .map_err(|e| Fail::Other(e.to_string()))?;

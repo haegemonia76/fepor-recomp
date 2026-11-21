@@ -50,6 +50,7 @@ pub fn setup(m: &mut Machine, disc: &mut dyn Disc, dol: &Dol) -> Result<u32, Str
     m.write_u32(0x8000_0038, fst_addr);
     m.write_u32(0x8000_003C, fst_size);
     m.write_u32(0x8000_00CC, video_mode(disc.game_id()));
+    m.hw.set_video_mode(video_mode(disc.game_id()) == 1);
     m.write_u32(0x8000_00D0, 0x0100_0000); // ARAM size
     m.write_u32(0x8000_00EC, TOP); // top of RAM
     m.write_u32(0x8000_00F0, RAM_SIZE as u32); // simulated memory size

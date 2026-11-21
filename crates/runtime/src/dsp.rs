@@ -8,6 +8,7 @@ const MAILBOX_TO_DSP_L: u32 = 0x02;
 const MAILBOX_FROM_DSP_H: u32 = 0x04;
 const MAILBOX_FROM_DSP_L: u32 = 0x06;
 const CONTROL: u32 = 0x0A;
+const AR_MODE: u32 = 0x16;
 const AR_DMA_MMADDR: u32 = 0x20;
 const AR_DMA_ARADDR: u32 = 0x24;
 const AR_DMA_CNT: u32 = 0x28;
@@ -32,16 +33,25 @@ pub struct Dsp {
     to_dsp: u32,
     from_dsp: u32,
     aram: Vec<u8>,
+    trace: bool,
 }
 
 impl Dsp {
     pub fn new() -> Dsp {
-        Dsp { regs: [0; 0x100], control: 0, to_dsp: 0, from_dsp: 0, aram: vec![0; ARAM_SIZE] }
+        Dsp { regs: [0; 0x100], control: 0, to_dsp: 0, from_dsp: 0, aram: vec![0; ARAM_SIZE], trace: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "dsp" || x == "all")) }
+    }
+
+    /// An unmasked interrupt flag is set (AI DMA, ARAM DMA or DSP).
+    pub fn interrupt_pending(&self) -> bool {
+        let c = self.control;
+        (c & (1 << 3) != 0 && c & (1 << 4) != 0) || (c & (1 << 5) != 0 && c & (1 << 6) != 0) || (c & (1 << 7) != 0 && c & (1 << 8) != 0)
     }
 
     pub fn read(&mut self, off: u32, size: u32) -> u32 {
         match (off, size) {
             (CONTROL, 2) => self.control as u32,
+            // bit 0: the ARAM controller is ready (the SDK spins on it after configuring the memory)
+            (AR_MODE, 2) => self.raw_read(off, size) | 1,
             (MAILBOX_FROM_DSP_H, 2) => self.from_dsp >> 16,
             (MAILBOX_FROM_DSP_L, 2) => {
                 let v = self.from_dsp & 0xFFFF;
@@ -73,7 +83,13 @@ impl Dsp {
                 // DSPINIT is answered immediately as well: the DSP clears it when its init is done
             }
             (MAILBOX_TO_DSP_H, 2) => self.to_dsp = (self.to_dsp & 0xFFFF) | (value & 0x7FFF) << 16,
-            (MAILBOX_TO_DSP_L, 2) => self.to_dsp = (self.to_dsp & 0xFFFF_0000) | (value & 0xFFFF) | MAIL_VALID,
+            (MAILBOX_TO_DSP_L, 2) => {
+                // the DSP consumes mail immediately: the valid flag never stays set for the CPU to poll
+                self.to_dsp = (self.to_dsp & 0x7FFF_0000) | (value & 0xFFFF);
+                if self.trace {
+                    eprintln!("dsp: mail from cpu {:#010x}", self.to_dsp | MAIL_VALID);
+                }
+            }
             (AR_DMA_CNT, 4) => {
                 self.raw_write(off, value, size);
                 self.aram_dma(ram);

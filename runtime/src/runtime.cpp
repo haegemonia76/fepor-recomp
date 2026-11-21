@@ -48,5 +48,7 @@ void fepor_hw_write(uint32_t ea, uint32_t value, int size) {
     fepor_fatal("hardware register write (%d bytes, value %08x) at %08x not implemented yet", size, value, ea);
 }
 void fepor_enter(uint32_t) {}
+uint32_t fepor_ticks = 4096;
+void fepor_poll(fepor::Context*) { fepor_ticks = 4096; }
 
 }  // extern "C"

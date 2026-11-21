@@ -279,7 +279,7 @@ fn lifted_instructions_match_the_reference_vectors() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
-    let opts = Options { functions_per_unit: 256, runtime_dir: runtime.display().to_string(), trace_calls: false };
+    let opts = Options { functions_per_unit: 256, runtime_dir: runtime.display().to_string(), trace_calls: false, hle: Vec::new() };
     let stats = generate(&dol, &analysis, &opts, &mut |name, content| std::fs::write(dir.join(name), content)).unwrap();
     assert!(stats.unimplemented.is_empty(), "instructions emitted as traps: {:?}", stats.unimplemented);
 

@@ -9,3 +9,17 @@ end = 0x800034e0
 [[exclude]]
 start = 0x80005544
 end = 0x80005600
+
+# SDK functions replaced by the runtime (found with `fepor-recomp find` / `disasm`; see docs/adr/0012).
+# OSSaveContext: stores the registers in an OSContext, returns 0 (resumed threads see 1).
+[[hle]]
+addr = 0x8020e550
+name = "OSSaveContext"
+
+# OSLoadContext: switches to the thread owning the context. A thread that is switched out inside
+# SelectThread (which also calls OSSaveContext) continues after that save call when resumed.
+[[hle]]
+addr = 0x8020e5d0
+name = "OSLoadContext"
+unwinds = true
+resumes_at = 0x8020e550

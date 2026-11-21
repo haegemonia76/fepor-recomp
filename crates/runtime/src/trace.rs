@@ -1,4 +1,4 @@
-//! Development tracing, selected with `FEPOR_TRACE=hw,calls` (comma separated).
+//! Development tracing, selected with `FEPOR_TRACE=hw,calls,irq,vi` (comma separated).
 
 pub const RING: usize = 4096;
 
@@ -6,6 +6,7 @@ pub const RING: usize = 4096;
 pub struct Trace {
     pub hw: bool,
     pub calls: bool,
+    pub irq: bool,
     ring: Vec<u32>,
     next: usize,
 }
@@ -14,7 +15,7 @@ impl Trace {
     pub fn from_env() -> Trace {
         let v = std::env::var("FEPOR_TRACE").unwrap_or_default();
         let has = |k: &str| v.split(',').any(|x| x == k || x == "all");
-        Trace { hw: has("hw"), calls: has("calls"), ring: vec![0; RING], next: 0 }
+        Trace { hw: has("hw"), calls: has("calls"), irq: has("irq"), ring: vec![0; RING], next: 0 }
     }
 
     pub fn enter(&mut self, addr: u32) {

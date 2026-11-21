@@ -9,8 +9,10 @@ fn main() {
         .std("c++20")
         .include(runtime.join("include"))
         .file(runtime.join("src/fp.cpp"))
+        .file(runtime.join("src/guest_shim.cpp"))
         .warnings(false)
         .compile("fepor_fp");
     println!("cargo:rerun-if-changed=../../runtime/src/fp.cpp");
+    println!("cargo:rerun-if-changed=../../runtime/src/guest_shim.cpp");
     println!("cargo:rerun-if-changed=../../runtime/include/fepor/ppc.h");
 }

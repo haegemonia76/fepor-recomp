@@ -41,7 +41,7 @@ fn build_and_run(dol: &Dol, main_cpp: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
-    let opts = Options { functions_per_unit: 2, runtime_dir: runtime.display().to_string(), trace_calls: false };
+    let opts = Options { functions_per_unit: 2, runtime_dir: runtime.display().to_string(), trace_calls: false, hle: Vec::new() };
     let stats = generate(dol, &analysis, &opts, &mut |name, content| std::fs::write(dir.join(name), content)).unwrap();
     assert_eq!(stats.unimplemented.len(), 0, "{:?}", stats.unimplemented);
     std::fs::write(dir.join("main.cpp"), main_cpp).unwrap();
@@ -130,4 +130,41 @@ int main() {
     let out = build_and_run(&dol(&text, &data), main_cpp);
     // r3: 5 -> f1 (<<2) = 20 -> +1 = 21 -> 3 loop iterations +10 = 51 -> store/load/add = 102 -> case1 +1000.
     assert_eq!(out.trim(), "1102 2147496296"); // ctr holds the jump-table target 0x80003168
+}
+
+#[test]
+fn hle_functions_become_runtime_calls_and_resuming_calls_jump_back_to_the_save_site() {
+    // f0: bl save; blr-free body: bl load; blr.   save at 0x10, load at 0x18 (both hooked).
+    let text = [
+        0x4800_0011u32, // 00 f0: bl save (0x10)
+        0x4800_0019,    // 04 bl load (0x1c)
+        0x4E80_0020,    // 08 blr
+        0,              // 0c
+        0x3860_0000,    // 10 save: li r3,0
+        0x4E80_0020,    // 14 blr
+        0,              // 18
+        0x4E80_0020,    // 1c load: blr
+    ];
+    let d = dol(&text, &[]);
+    let analysis = analyze(&d, &AnalysisConfig::default());
+    let hle = vec![
+        fepor_core::config::HleEntry { addr: TEXT + 0x10, name: "Save".into(), ..Default::default() },
+        fepor_core::config::HleEntry { addr: TEXT + 0x1C, name: "Load".into(), unwinds: true, resumes_at: Some(TEXT + 0x10) },
+    ];
+    let opts = Options { functions_per_unit: 16, runtime_dir: String::new(), trace_calls: false, hle };
+    let mut files = std::collections::BTreeMap::new();
+    generate(&d, &analysis, &opts, &mut |n, c| {
+        files.insert(n.to_string(), c.to_string());
+        Ok(())
+    })
+    .unwrap();
+    let unit = &files["unit_0000.cpp"];
+    assert!(unit.contains("fepor_hle_Save(&c);") && unit.contains("fepor_hle_Load(&c);"), "{unit}");
+    // after the load call: unwind check, then back to the instruction after the save call (0x80003104)
+    let call = unit.find("f_8000311c(c);").expect("call to load");
+    let tail = &unit[call..];
+    assert!(tail.contains("if (c.spr[1023] == 1) unwind();"), "{tail}");
+    assert!(tail.contains("goto L_80003104;"), "{tail}");
+    assert!(unit.contains("L_80003104:;"));
+    assert!(files["functions.h"].contains("extern \"C\" void fepor_hle_Load(fepor::Context*);"));
 }

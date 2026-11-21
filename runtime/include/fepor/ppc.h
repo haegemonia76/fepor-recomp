@@ -41,6 +41,11 @@ static_assert(sizeof(Context) == 4864 && offsetof(Context, ram) == 4856, "Contex
 
 using HostFn = void (*)(Context&);
 
+/// Thrown by generated code to abandon the host frames of a guest call chain (a thread resumed after an
+/// interrupt-time context switch continues from the interrupted instruction, not from the handler).
+struct Unwind {};
+[[noreturn]] inline void unwind() { throw Unwind{}; }
+
 }  // namespace fepor
 
 // ---- runtime services: C ABI, implemented by crates/runtime (or runtime/src for tests) -------
@@ -60,6 +65,9 @@ uint32_t fepor_hw_read(uint32_t ea, int size);
 void fepor_hw_write(uint32_t ea, uint32_t value, int size);
 /// Function entry hook, emitted when generating with call tracing.
 void fepor_enter(uint32_t addr);
+/// Backward branches count this down; at zero the runtime gets a chance to deliver interrupts.
+extern uint32_t fepor_ticks;
+void fepor_poll(fepor::Context* c);
 }
 
 namespace fepor {

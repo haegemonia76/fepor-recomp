@@ -4,6 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use fepor_core::analysis::JumpTable;
+use fepor_core::config::HleEntry;
 use ppc750cl::{Ins, Opcode};
 
 #[derive(Default)]
@@ -28,6 +29,9 @@ pub struct Fx<'a> {
     /// (address, instruction word) of instructions emitted as runtime traps.
     pub unimpl: Vec<(u32, u32)>,
     pub unimpl_ops: Vec<Opcode>,
+    pub hle: &'a HashMap<u32, &'a HleEntry>,
+    /// HLE save function address -> address after its first call in this function.
+    pub resume_labels: std::collections::BTreeMap<u32, u32>,
 }
 
 fn h(v: u32) -> String {
@@ -121,7 +125,13 @@ impl<'a> Fx<'a> {
 
     fn jump(&mut self, from: u32, t: u32) -> Vec<String> {
         if self.is_internal(t) {
-            vec![format!("goto L_{t:08x};")]
+            let mut v = Vec::new();
+            if t <= from {
+                // loops need a safe point too: a guest spinning on a flag an interrupt sets never calls anything
+                v.push("if (__builtin_expect(--fepor_ticks == 0, 0)) { out(); fepor_poll(&c); in(); }".to_string());
+            }
+            v.push(format!("goto L_{t:08x};"));
+            v
         } else if self.funcs.contains(&t) {
             vec!["out();".into(), format!("[[clang::musttail]] return {}(c);", fname(t))]
         } else {
@@ -132,7 +142,16 @@ impl<'a> Fx<'a> {
     fn call(&mut self, from: u32, t: u32) -> Vec<String> {
         self.used.lr = true;
         if self.funcs.contains(&t) {
-            vec!["out();".into(), format!("{}(c);", fname(t)), "in();".into()]
+            let mut v = vec!["out();".to_string(), format!("{}(c);", fname(t)), "in();".to_string()];
+            if let Some(h) = self.hle.get(&t) {
+                if h.unwinds {
+                    v.push("if (c.spr[1023] == 1) unwind();".into());
+                }
+                if let Some(label) = h.resumes_at.and_then(|save| self.resume_labels.get(&save)) {
+                    v.push(format!("goto L_{label:08x};"));
+                }
+            }
+            v
         } else {
             vec!["out();".into(), format!("unresolved(c, 0x{from:x}, 0x{t:x});")]
         }

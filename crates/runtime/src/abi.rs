@@ -24,7 +24,7 @@ pub fn start_watchdog() {
         if !c.is_null() {
             // SAFETY: set_current stores a context that outlives the guest run.
             let c = unsafe { &*c };
-            eprintln!("  r1={:#010x} lr={:#010x} ctr={:#010x} r3={:#010x}", c.r[1], c.lr, c.ctr, c.r[3]);
+            eprintln!("  r1={:#010x} lr={:#010x} ctr={:#010x} r3={:#010x} msr={:#06x}", c.r[1], c.lr, c.ctr, c.r[3], c.msr);
         }
         let recent = machine().trace.recent(32);
         eprintln!("  recent calls (oldest first): {}", recent.iter().map(|a| format!("{a:08x}")).collect::<Vec<_>>().join(" "));
@@ -94,12 +94,12 @@ pub extern "C" fn fepor_rfi(c: *mut Context, addr: u32) {
 const SRR0: usize = 26;
 
 #[cfg(feature = "dispatch")]
-fn guest_function(target: u32) -> Option<HostFn> {
+pub fn guest_function(target: u32) -> Option<HostFn> {
     dispatch::find(target)
 }
 
 #[cfg(not(feature = "dispatch"))]
-fn guest_function(_target: u32) -> Option<HostFn> {
+pub fn guest_function(_target: u32) -> Option<HostFn> {
     None
 }
 
@@ -130,6 +130,25 @@ pub extern "C" fn fepor_enter(addr: u32) {
     if m.trace.calls {
         m.trace.enter(addr);
     }
+    // Function entry is the safe point where interrupts are delivered (registers are synced here).
+    m.enter_count = m.enter_count.wrapping_add(1);
+    if m.enter_count & 0xFF == 0 {
+        crate::intr::poll(crate::sched::current_context());
+        // (function entries poll with the thread's context; loops pass their own)
+    }
+}
+
+/// Backward-branch countdown shared with the generated code.
+#[no_mangle]
+pub static mut fepor_ticks: u32 = POLL_INTERVAL;
+const POLL_INTERVAL: u32 = 4096;
+
+/// Safe point reached from a loop in generated code.
+#[no_mangle]
+pub extern "C" fn fepor_poll(c: *mut Context) {
+    // SAFETY: single guest thread at a time; the generated code passes its live context.
+    unsafe { fepor_ticks = POLL_INTERVAL };
+    crate::intr::poll(c);
 }
 
 #[cfg(feature = "dispatch")]
@@ -166,6 +185,7 @@ pub use dispatch::find as find_function;
 /// Addresses of every exported function, so a binary can force the linker to keep them for the
 /// generated static library (which references them but comes later on the link line).
 pub fn exports() -> Vec<usize> {
+    use crate::hle::{fepor_hle_OSLoadContext, fepor_hle_OSSaveContext};
     #[allow(unused_mut)]
     let mut v = vec![
         fepor_unimplemented as *const () as usize,
@@ -177,6 +197,10 @@ pub fn exports() -> Vec<usize> {
         fepor_hw_read as *const () as usize,
         fepor_hw_write as *const () as usize,
         fepor_enter as *const () as usize,
+        fepor_poll as *const () as usize,
+        std::ptr::addr_of!(fepor_ticks) as usize,
+        fepor_hle_OSLoadContext as *const () as usize,
+        fepor_hle_OSSaveContext as *const () as usize,
     ];
     #[cfg(feature = "dispatch")]
     v.push(dispatch::fepor_lookup as *const () as usize);

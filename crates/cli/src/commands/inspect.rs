@@ -41,14 +41,19 @@ pub fn opcodes(opts: &Options) -> Result<(), Fail> {
 }
 
 /// Every occurrence of an opcode, with the function (from the analysis) it sits in.
-pub fn find(opts: &Options, op: &str) -> Result<(), Fail> {
+pub fn find(opts: &Options, op: Option<&str>, callers: Option<u32>) -> Result<(), Fail> {
     let session = Session::open(opts)?;
     let analysis = fepor_core::analysis::analyze(&session.dol, &session.analysis_cfg);
     for s in session.dol.text_sections() {
         for (k, w) in session.dol.section_bytes(s).chunks_exact(4).enumerate() {
             let a = s.addr + 4 * k as u32;
             let ins = Ins::new(u32::from_be_bytes(w.try_into().unwrap()));
-            if format!("{:?}", ins.op).eq_ignore_ascii_case(op) {
+            let hit = match (op, callers) {
+                (Some(op), _) => format!("{:?}", ins.op).eq_ignore_ascii_case(op),
+                (None, Some(t)) => ins.is_direct_branch() && ins.branch_dest(a) == Some(t) && (ins.op == ppc750cl::Opcode::B),
+                (None, None) => return Err(Fail::Usage("find needs --op or --callers".into())),
+            };
+            if hit {
                 let i = analysis.functions.partition_point(|f| f.start <= a);
                 let func = i.checked_sub(1).map(|i| &analysis.functions[i]).filter(|f| a < f.end);
                 let p = ins.simplified();

@@ -2,13 +2,17 @@
 //! the generated code calls (`runtime/include/fepor/ppc.h`).
 
 pub mod abi;
+pub mod ai;
 pub mod boot;
 pub mod context;
 pub mod di;
 pub mod dsp;
 pub mod exi;
+pub mod hle;
 pub mod hw;
+pub mod intr;
 pub mod machine;
+pub mod sched;
 pub mod trace;
 
 pub use context::Context;

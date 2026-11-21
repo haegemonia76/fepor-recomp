@@ -27,6 +27,22 @@ pub struct AnalysisConfig {
     pub exclude: Vec<AddrRange>,
     /// Manually described jump tables.
     pub jump_tables: Vec<JumpTableOverride>,
+    /// Guest functions replaced by runtime implementations (`fepor_hle_<name>`).
+    pub hle: Vec<HleEntry>,
+}
+
+/// A guest function replaced by `fepor_hle_<name>(Context*)` in the runtime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HleEntry {
+    pub addr: u32,
+    pub name: String,
+    /// The replacement may context-switch away and later be resumed: after each call the generated code
+    /// checks `c.spr[1023]` (1 = unwind the host stack, see `fepor::unwind`).
+    pub unwinds: bool,
+    /// Calls to this function inside a function that also calls `resumes_at` (an HLE `setjmp`-like
+    /// save function) continue at the instruction after that save call when the thread is resumed.
+    pub resumes_at: Option<u32>,
 }
 
 impl AnalysisConfig {
@@ -36,6 +52,7 @@ impl AnalysisConfig {
         self.not_functions.extend(defaults.not_functions);
         self.exclude.extend(defaults.exclude);
         self.jump_tables.extend(defaults.jump_tables);
+        self.hle.extend(defaults.hle);
         self
     }
 }

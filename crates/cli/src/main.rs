@@ -59,8 +59,11 @@ pub enum Command {
     /// List every instruction of an opcode (e.g. `--op Rfi`, `--op Sc`, `--op Mtmsr`) with its function.
     Find {
         /// ppc750cl opcode name, case-insensitive.
-        #[arg(long)]
-        op: String,
+        #[arg(long, conflicts_with = "callers")]
+        op: Option<String>,
+        /// List the direct callers (`bl`/`b`) of this guest address instead.
+        #[arg(long, value_parser = commands::inspect::parse_addr)]
+        callers: Option<u32>,
     },
 }
 
@@ -78,7 +81,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Command::Prepare(args) => commands::generate::run(&opts, &args, true),
         Command::Disasm { addr, count } => commands::inspect::disasm(&opts, addr, count),
         Command::Opcodes => commands::inspect::opcodes(&opts),
-        Command::Find { op } => commands::inspect::find(&opts, &op),
+        Command::Find { op, callers } => commands::inspect::find(&opts, op.as_deref(), callers),
     }
 }
 
