@@ -557,6 +557,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fepor-audio"
+version = "0.1.0"
+dependencies = [
+ "fepor-runtime",
+ "sdl3",
+]
+
+[[package]]
 name = "fepor-core"
 version = "0.1.0"
 dependencies = [
@@ -572,6 +580,7 @@ dependencies = [
 name = "fepor-game"
 version = "0.1.0"
 dependencies = [
+ "fepor-audio",
  "fepor-core",
  "fepor-runtime",
  "fepor-video",
@@ -986,6 +995,12 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "lazy_static"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"
@@ -1765,6 +1780,24 @@ dependencies = [
  "smithay-client-toolkit",
  "tiny-skia",
 ]
+
+[[package]]
+name = "sdl3"
+version = "0.14.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00e2a92b001023557b72e649c3a4e2152692cbc85acd234fd1ca58ac158accac"
+dependencies = [
+ "bitflags 2.13.2",
+ "lazy_static",
+ "libc",
+ "sdl3-sys",
+]
+
+[[package]]
+name = "sdl3-sys"
+version = "0.5.12+SDL3-3.2.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78b9638d20441d9641bf479d5ec737a46e159549df3a03d1c09d6387f5adf128"
 
 [[package]]
 name = "semver"

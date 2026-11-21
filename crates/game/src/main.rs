@@ -56,6 +56,9 @@ fn run(window: Option<Arc<Window>>) -> Result<(), String> {
             Err(e) => eprintln!("video disabled: {e}"),
         }
     }
+    if let Some(sink) = fepor_audio::open() {
+        m.hw.set_audio_sink(sink);
+    }
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
     abi::start_watchdog();

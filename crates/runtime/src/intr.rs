@@ -35,6 +35,10 @@ fn vector_number() -> Option<u32> {
 pub fn poll(c: *mut Context) {
     // SAFETY: the running thread's context.
     let c = unsafe { &mut *c };
+    {
+        let m = machine();
+        m.hw.pump_audio(&m.ram);
+    }
     if machine().trace.irq && machine().enter_count % (256 * 2000) == 0 {
         eprintln!(
             "irq: poll msr={:#x} pending={}",

@@ -26,10 +26,15 @@ const CR_INIT: u16 = 1 << 11;
 const CR_ARINT: u16 = 1 << 5;
 const CR_DSPINT: u16 = 1 << 7;
 
+use crate::ax::{Ax, Mem};
+
+/// Receives the audio the game plays: interleaved left/right 16-bit samples at `rate` Hz.
+pub trait AudioSink: Send {
+    fn push(&mut self, rate: u32, samples: &[i16]);
+}
+
 /// Mail the boot task sends once the SDK's ucode is running (DSP_INIT).
 const MAIL_DSP_INIT: u32 = 0xDCD1_0000;
-/// The AX ucode's answer after running a command list.
-const MAIL_DSP_YIELD: u32 = 0xDCD1_0002;
 const CR_AIDINT: u16 = 1 << 3;
 
 /// What the DSP ROM sends after reset to say it is ready for a boot task.
@@ -45,7 +50,11 @@ pub struct Dsp {
     trace: bool,
     /// The previous CPU mail was the boot task's "start vector" command.
     expect_start: bool,
-    expect_cmdlist: bool,
+    ax: Ax,
+    /// The AX ucode is running (after the boot task started it).
+    ax_on: bool,
+    /// Finished AI DMA buffers (start address, length in bytes, sample rate) not yet handed to the sink.
+    pending_audio: Vec<(u32, u32, u32)>,
     /// Audio DMA: playing, buffer length in bytes and when the current buffer finishes.
     ai_dma_on: bool,
     ai_dma_len: u32,
@@ -63,26 +72,56 @@ impl Dsp {
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "dsp" || x == "all")),
             expect_start: false,
-            expect_cmdlist: false,
+            ax: Ax::new(),
+            ax_on: false,
+            pending_audio: Vec::new(),
             ai_dma_on: false,
             ai_dma_len: 0,
             ai_next: None,
         }
     }
 
-    /// Advance the audio DMA clock: every finished buffer raises the AI DMA interrupt flag.
-    pub fn tick(&mut self) {
+    /// Advance the audio DMA clock: every finished buffer raises the AI DMA interrupt flag and is queued
+    /// for `drain_audio` (the buffer is read from RAM later, where the guest memory is at hand).
+    pub fn tick(&mut self, rate: u32) {
         if !self.ai_dma_on || self.ai_dma_len == 0 {
             return;
         }
-        // 16-bit stereo at 32 kHz: 4 bytes per sample
-        let period =
-            std::time::Duration::from_micros(self.ai_dma_len as u64 * 1_000_000 / (4 * 32_000));
+        // 16-bit stereo: 4 bytes per sample
+        let period = std::time::Duration::from_micros(
+            self.ai_dma_len as u64 * 1_000_000 / (4 * rate as u64),
+        );
         let now = std::time::Instant::now();
-        let next = self.ai_next.get_or_insert(now + period);
-        while now >= *next {
-            *next += period;
+        let mut next = *self.ai_next.get_or_insert(now + period);
+        while now >= next {
+            next += period;
             self.control |= CR_AIDINT;
+            let start = (self.raw_read(0x30, 2) & 0x03FF) << 16 | (self.raw_read(0x32, 2) & 0xFFE0);
+            if self.pending_audio.len() < 64 {
+                self.pending_audio.push((start, self.ai_dma_len, rate));
+            }
+        }
+        self.ai_next = Some(next);
+    }
+
+    /// Hand the finished audio DMA buffers to `sink` as interleaved left/right samples.
+    pub fn drain_audio(&mut self, ram: &[u8], sink: &mut dyn AudioSink) {
+        for (start, len, rate) in std::mem::take(&mut self.pending_audio) {
+            let s = (start & 0x03FF_FFFF) as usize;
+            let Some(buf) = ram.get(s..s + len as usize) else {
+                continue;
+            };
+            // the AI plays the first 16-bit word of each frame as the right channel, the second as the left
+            let samples: Vec<i16> = buf
+                .chunks_exact(4)
+                .flat_map(|f| {
+                    [
+                        i16::from_be_bytes([f[2], f[3]]),
+                        i16::from_be_bytes([f[0], f[1]]),
+                    ]
+                })
+                .collect();
+            sink.push(rate, &samples);
         }
     }
 
@@ -149,16 +188,23 @@ impl Dsp {
                     self.expect_start = false;
                     self.from_dsp = MAIL_DSP_INIT;
                     self.control |= CR_DSPINT;
-                } else if self.expect_cmdlist {
-                    // second mail of an AX frame: the command list address. The ucode runs the list and yields.
-                    self.expect_cmdlist = false;
-                    self.from_dsp = MAIL_DSP_YIELD;
-                    self.control |= CR_DSPINT;
+                    self.ax_on = true;
+                    self.ax = Ax::new();
+                } else if self.ax_on {
+                    let mut mem = Mem {
+                        ram,
+                        aram: &self.aram,
+                    };
+                    if let Some(reply) = self.ax.handle_mail(mail, &mut mem) {
+                        self.from_dsp = reply;
+                        self.control |= CR_DSPINT;
+                    }
+                    if self.ax.reset_requested {
+                        // back to the ROM: the next boot task upload starts a new ucode
+                        self.ax_on = false;
+                    }
                 } else if mail == 0x80F3_D001 {
                     self.expect_start = true;
-                } else if mail >> 16 == 0xBABE {
-                    // AX frame: 0xBABE<size> then the command list address
-                    self.expect_cmdlist = true;
                 }
             }
             (AR_DMA_CNT, 4) => {

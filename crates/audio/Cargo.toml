@@ -1,0 +1,9 @@
+[package]
+name = "fepor-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fepor-runtime.workspace = true
+sdl3 = "0.14"

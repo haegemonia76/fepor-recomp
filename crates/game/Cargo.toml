@@ -8,5 +8,6 @@ build = "build.rs"
 [dependencies]
 fepor-core.workspace = true
 fepor-video.workspace = true
+fepor-audio.workspace = true
 fepor-runtime = { workspace = true, features = ["dispatch"] }
 winit.workspace = true

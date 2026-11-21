@@ -9,7 +9,7 @@ const AISCNT: u32 = 0x08;
 const CR_PSTAT: u32 = 1 << 0;
 const CR_AIINT: u32 = 1 << 3;
 const CR_SCRESET: u32 = 1 << 5;
-const CR_DSP_48K: u32 = 1 << 6;
+const CR_AIDFR: u32 = 1 << 6;
 
 pub struct Ai {
     regs: [u32; 8],
@@ -29,11 +29,12 @@ impl Ai {
         }
     }
 
-    fn rate(&self) -> u64 {
-        if self.control & CR_DSP_48K != 0 {
-            48_000
-        } else {
+    /// DSP sample rate: AICR.AIDFR (bit 6) set selects 32 kHz, clear 48 kHz.
+    pub fn rate(&self) -> u64 {
+        if self.control & CR_AIDFR != 0 {
             32_000
+        } else {
+            48_000
         }
     }
 

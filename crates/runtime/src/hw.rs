@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::ai::Ai;
 use crate::di::Di;
-use crate::dsp::Dsp;
+use crate::dsp::{AudioSink, Dsp};
 use crate::exi::Exi;
 use crate::si::Si;
 use fepor_gx::{Event, Gx, Sink};
@@ -64,6 +64,7 @@ pub struct Hw {
     pub gx: Gx,
     fifo: Vec<u8>,
     sink: Box<dyn Sink>,
+    audio: Option<Box<dyn AudioSink>>,
     pe_intsr: u16,
     trace_gx: bool,
     pe_token: u16,
@@ -114,6 +115,7 @@ impl Hw {
             gx: Gx::new(),
             fifo: Vec::new(),
             sink: Box::new(CountingSink::default()),
+            audio: None,
             pe_intsr: 0,
             trace_gx: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gxstats")),
@@ -148,7 +150,7 @@ impl Hw {
     /// Interrupt cause bits as the PI reports them.
     fn pi_cause(&mut self) -> u32 {
         self.vi_tick();
-        self.dsp.tick();
+        self.dsp.tick(self.ai.rate() as u32);
         if self.pe_finish_pending && self.pe_intsr & 4 == 0 {
             self.pe_finish_pending = false;
             self.pe_intsr |= 8;
@@ -226,6 +228,21 @@ impl Hw {
     /// Replace the default (counting) video backend.
     pub fn set_sink(&mut self, sink: Box<dyn Sink>) {
         self.sink = sink;
+    }
+
+    /// Send the game's audio (AI DMA) to `sink`.
+    pub fn set_audio_sink(&mut self, sink: Box<dyn AudioSink>) {
+        self.audio = Some(sink);
+    }
+
+    /// Advance the audio DMA clock and hand finished buffers to the audio sink. Called from safe points,
+    /// before an AI interrupt can let the guest refill a buffer.
+    pub fn pump_audio(&mut self, ram: &[u8]) {
+        self.dsp.tick(self.ai.rate() as u32);
+        match self.audio.as_mut() {
+            Some(s) => self.dsp.drain_audio(ram, s.as_mut()),
+            None => self.dsp.drain_audio(ram, &mut NullSink),
+        }
     }
 
     /// Attach the player's disc to the DVD interface.
@@ -420,4 +437,11 @@ impl Sink for Tap<'_> {
         }
         self.inner.event(event, ram, tluts);
     }
+}
+
+/// Drops audio when no output device is attached.
+struct NullSink;
+
+impl AudioSink for NullSink {
+    fn push(&mut self, _rate: u32, _samples: &[i16]) {}
 }
