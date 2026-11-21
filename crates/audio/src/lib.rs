@@ -83,7 +83,8 @@ fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Resu
     };
     let mut rate = 0u32;
     let trace = std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "audio"));
-    let (mut underruns, mut last) = (0u32, std::time::Instant::now());
+    let (mut underruns, mut drops, mut last) = (0u32, 0u32, std::time::Instant::now());
+    let (mut qmin, mut qmax) = (i32::MAX, 0i32);
     let _ = ready.send(Ok(()));
     let mut stream = None;
     while let Ok((r, samples)) = rx.recv() {
@@ -104,18 +105,28 @@ fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Resu
         }
         if let Some(s) = &stream {
             let queued = s.queued_bytes().unwrap_or(0);
+            qmin = qmin.min(queued);
+            qmax = qmax.max(queued);
+            if trace && last.elapsed() >= std::time::Duration::from_secs(5) {
+                let ms = |b: i32| b as i64 * 1000 / (rate as i64 * 4);
+                eprintln!(
+                    "audio: queue {}..{} ms, {underruns} underruns, {drops} drops in 5 s",
+                    ms(qmin),
+                    ms(qmax)
+                );
+                (qmin, qmax, underruns, drops, last) =
+                    (i32::MAX, 0, 0, 0, std::time::Instant::now());
+            }
             if queued == 0 {
                 underruns += 1;
-                if trace && last.elapsed() >= std::time::Duration::from_secs(5) {
-                    eprintln!("audio: {underruns} underruns so far");
-                    last = std::time::Instant::now();
-                }
                 // start or underrun: refill a 60 ms cushion so that late frames from the guest do not crackle
                 let silence = vec![0i16; (rate as usize * 60 / 1000) * 2];
                 let _ = s.put_data_i16(&silence);
             }
             // keep the queue short: drop audio when the device falls behind (about 200 ms)
-            if queued < (rate as i32 * 4 / 5) {
+            if queued >= (rate as i32 * 4 / 5) {
+                drops += 1;
+            } else {
                 let _ = s.put_data_i16(&samples);
             }
         }
