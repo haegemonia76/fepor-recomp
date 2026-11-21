@@ -28,7 +28,7 @@ struct Thread {
 struct State {
     threads: Vec<Thread>,
     running: usize,
-    parked: HashMap<u32, usize>,
+    parked: HashMap<u32, (usize, u64)>,
 }
 
 // SAFETY: raw context pointers are only dereferenced by the thread holding the baton.
@@ -95,9 +95,24 @@ pub fn woken_as(me: usize) -> Option<(u32, ParkKind)> {
     with(|s| s.threads[me].park.take())
 }
 
-/// Which parked thread resumes from this context?
+/// Which parked thread resumes from this context? A thread that was cancelled and re-created at the same
+/// OSThread address leaves its old host thread parked on a context the game has since rewritten
+/// (OSCreateThread/OSInitContext): that stale entry is dropped and the load starts a new thread instead.
 pub fn parked_at(ctx: u32) -> Option<usize> {
-    with(|s| s.parked.get(&ctx).copied())
+    with(|s| match s.parked.get(&ctx).copied() {
+        Some((t, fp)) if fp == fingerprint(ctx) => Some(t),
+        Some(_) => {
+            s.parked.remove(&ctx);
+            None
+        }
+        None => None,
+    })
+}
+
+/// The part of an OSContext a parked thread cannot change: PC, stack pointer, LR, CR and r3 as saved.
+fn fingerprint(ctx: u32) -> u64 {
+    let m = crate::machine::machine();
+    [0x198, 0x4, 0x84, 0x80, 0xC].iter().fold(0xcbf2_9ce4_8422_2325u64, |h, off| (h ^ m.read_u32(ctx + off) as u64).wrapping_mul(0x100_0000_01b3))
 }
 
 fn wait_for_turn(me: usize) {
@@ -113,7 +128,7 @@ pub fn switch_to(me: usize, other: usize, token: Option<(u32, ParkKind)>) {
     with(|s| {
         if let Some((ctx, kind)) = token {
             s.threads[me].park = Some((ctx, kind));
-            s.parked.insert(ctx, me);
+            s.parked.insert(ctx, (me, fingerprint(ctx)));
         }
         if let Some((ctx, _)) = s.threads[other].park {
             s.parked.remove(&ctx);

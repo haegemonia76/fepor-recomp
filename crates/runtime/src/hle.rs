@@ -105,7 +105,7 @@ fn log_switch(msg: String) {
     l.push_back(msg);
 }
 
-fn dump_log() {
+pub fn dump_log() {
     for m in LOG.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         eprintln!("  switch: {m}");
     }

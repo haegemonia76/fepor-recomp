@@ -120,6 +120,7 @@ pub fn start_watchdog() {
 /// Report a fatal guest error with state and recent calls, then exit with status 70.
 pub fn die_str(msg: &str) -> ! {
     eprintln!("fepor: fatal: {msg}");
+    crate::hle::dump_log();
     let c = CURRENT.load(std::sync::atomic::Ordering::Relaxed);
     if !c.is_null() {
         // SAFETY: set_current stores a context that outlives the guest run.
