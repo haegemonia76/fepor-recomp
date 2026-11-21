@@ -20,7 +20,8 @@ pub struct ExtractReport {
 }
 
 /// Extract `sys/` and `files/` (Dolphin folder layout) into `out`.
-/// `on_file` is called with each file's relative path before it is written.
+/// `on_file` is called with each file's relative path before it is written. Files that already exist with
+/// the right size are kept, so an interrupted extraction can simply be run again.
 pub fn extract(
     disc: &mut dyn Disc,
     out: &Path,
@@ -48,6 +49,12 @@ pub fn extract(
         let p = files_dir.join(&entry.path);
         if let Some(parent) = p.parent() {
             fs::create_dir_all(parent).map_err(io(parent))?;
+        }
+        // already extracted (an interrupted or repeated run): keep it
+        if fs::metadata(&p).is_ok_and(|m| m.len() == entry.size) {
+            report.files += 1;
+            report.bytes += entry.size;
+            continue;
         }
         let mut w = BufWriter::new(File::create(&p).map_err(io(&p))?);
         disc.read_file(entry, &mut w)?;

@@ -1,6 +1,6 @@
 //! Development build of the recompiled game: the runtime plus the generated C++ library.
 //!
-//! `fepor-game --game <iso|folder> [--data <dir>]`
+//! `fepor-game [--data <dir>] [--game <iso|folder>]`: without `--game` the data `prepare` copied to `<data>/disc` is used.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 struct Args {
-    game: PathBuf,
+    game: Option<PathBuf>,
     data: Option<PathBuf>,
 }
 
@@ -33,19 +33,12 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    Ok(Args {
-        game: game.ok_or("usage: fepor-game --game <iso|folder> [--data <dir>]")?,
-        data,
-    })
+    Ok(Args { game, data })
 }
 
-/// Where saves and settings live without `--data`: `$XDG_DATA_HOME/fepor-recomp`.
+/// Where the prepared game, saves and settings live: see `fepor_core::paths::default_data_dir`.
 fn default_data_dir() -> PathBuf {
-    let home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join("fepor-recomp")
+    fepor_core::paths::default_data_dir()
 }
 
 /// The data directory from the command line, or the default.
@@ -89,7 +82,15 @@ fn run(window: Option<Arc<Window>>) -> Result<(), String> {
     std::hint::black_box(abi::exports());
 
     let args = parse_args()?;
-    let mut disc = open_disc(&args.game).map_err(|e| e.to_string())?;
+    let data = args.data.clone().unwrap_or_else(default_data_dir);
+    // The disc image when given, else the game data `prepare` copied next to the build: no disc needed.
+    let game = args.game.clone().or_else(|| fepor_core::paths::prepared_disc(&data)).ok_or_else(|| {
+        format!(
+            "no game data in {}: run the recompilation first (fepor-recomp-gui or `fepor-recomp prepare`), or pass --game <iso|folder>",
+            data.display()
+        )
+    })?;
+    let mut disc = open_disc(&game).map_err(|e| e.to_string())?;
     let bytes = disc.dol().map_err(|e| e.to_string())?;
     version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
@@ -104,7 +105,7 @@ fn run(window: Option<Arc<Window>>) -> Result<(), String> {
     if let Some(sink) = fepor_audio::open() {
         m.hw.set_audio_sink(sink);
     }
-    insert_cards(m, disc.game_id(), args.data.as_deref());
+    insert_cards(m, disc.game_id(), Some(&data));
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
     abi::start_watchdog();

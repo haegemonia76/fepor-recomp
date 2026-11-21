@@ -6,6 +6,7 @@ pub mod disc;
 pub mod dol;
 pub mod extract;
 pub mod memcard;
+pub mod paths;
 pub mod version;
 
 pub use config::Config;

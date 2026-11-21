@@ -24,12 +24,7 @@ struct Saved {
 }
 
 fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("fepor-recomp").join("gui.toml")
+    fepor_core::paths::gui_config_path()
 }
 
 /// Message for the exit codes of `fepor-recomp prepare` (same texts as `packaging/recomplauncher.json`).
@@ -304,7 +299,7 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().show(root, |ui| {
             ui.heading("Fire Emblem: Path of Radiance");
-            ui.label("Recompile the game from your own copy of the disc.");
+            ui.label("Recompile the game from your own copy of the disc. The game data is copied to the output folder (about 1.3 GB), so the disc is only needed once.");
             ui.add_space(12.0);
             let running = matches!(self.state, State::Running);
 
@@ -397,7 +392,7 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.colored_label(
                         egui::Color32::from_rgb(60, 160, 80),
-                        format!("Done. The game was built in {}.", self.output.trim()),
+                        format!("Done. The game and its data are in {}; the disc image is no longer needed.", self.output.trim()),
                     );
                 }
                 State::Finished(Err(e)) => {

@@ -142,6 +142,30 @@ fn parse_ninja_progress(line: &str) -> Option<(u32, u32)> {
     Some((done.trim().parse().ok()?, total.trim().parse().ok()?))
 }
 
+/// Extract the disc's `sys/` and `files/` to `<out>/disc`, reporting progress by bytes (0.65 .. 0.99).
+fn extract_disc(session: &mut Session, out: &Path) -> Result<(), Fail> {
+    let sizes: std::collections::HashMap<String, u64> = session
+        .disc
+        .files()
+        .iter()
+        .map(|f| (f.path.clone(), f.size))
+        .collect();
+    let total: u64 = sizes.values().sum::<u64>().max(1);
+    let mut done = 0u64;
+    let mut last = 0.0f32;
+    progress(0.65, "Copying the game data from the disc");
+    fepor_core::extract::extract(&mut *session.disc, &out.join("disc"), |path| {
+        let f = 0.65 + 0.34 * done as f32 / total as f32;
+        if f - last >= 0.01 {
+            last = f;
+            progress(f, "Copying the game data from the disc");
+        }
+        done += sizes.get(path).copied().unwrap_or(0);
+    })
+    .map_err(|e| Fail::Other(format!("copying the game data: {e}")))?;
+    Ok(())
+}
+
 pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fail> {
     let out = opts.output()?.clone();
     if prepare {
@@ -150,7 +174,7 @@ pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fai
         }
     }
     progress(0.02, "Reading the disc image");
-    let session = Session::open(opts)?;
+    let mut session = Session::open(opts)?;
     progress(0.10, "Analysing the game code");
     let gen_dir = {
         progress(0.20, "Generating C++");
@@ -181,15 +205,18 @@ pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fai
         |line| {
             if let Some((done, total)) = parse_ninja_progress(line).filter(|&(_, t)| t > 0) {
                 progress(
-                    0.35 + 0.63 * done as f32 / total as f32,
+                    0.35 + 0.30 * done as f32 / total as f32,
                     &format!("Building the game ({done}/{total})"),
                 );
             }
         },
     )?;
+    // The game's data (textures, sounds, movies, ...) is read from the disc while playing. Copy it next to the
+    // build so the game runs on its own, without the disc image.
+    extract_disc(&mut session, &out)?;
     // Marker for RecompLauncher's `prepare.done`: written last, so its presence means the build finished.
     let marker = format!(
-        "{{\n  \"tool\": \"{}\",\n  \"game_id\": \"{}\",\n  \"build_type\": \"{}\"\n}}\n",
+        "{{\n  \"tool\": \"{}\",\n  \"game_id\": \"{}\",\n  \"build_type\": \"{}\",\n  \"disc\": \"disc\"\n}}\n",
         env!("CARGO_PKG_VERSION"),
         session.disc.game_id(),
         args.build_type

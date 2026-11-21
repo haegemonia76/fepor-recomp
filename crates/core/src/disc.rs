@@ -302,6 +302,7 @@ impl FolderDisc {
         for f in &files {
             regions.push((f.offset, f.size, root.join("files").join(&f.path)));
         }
+        regions.sort_by_key(|r| r.0);
         Ok(FolderDisc {
             root: root.to_path_buf(),
             id,
@@ -371,7 +372,14 @@ impl Disc for FolderDisc {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError> {
         buf.fill(0);
         let end = offset + buf.len() as u64;
-        for (start, len, path) in &self.regions {
+        // regions do not overlap and are sorted by start: skip to the first one that ends after `offset`
+        let first = self
+            .regions
+            .partition_point(|(start, len, _)| start + len <= offset);
+        for (start, len, path) in self.regions[first..]
+            .iter()
+            .take_while(|(start, _, _)| *start < end)
+        {
             let (lo, hi) = (offset.max(*start), end.min(start + len));
             if lo >= hi {
                 continue;

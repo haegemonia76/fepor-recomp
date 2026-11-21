@@ -16,8 +16,8 @@
     "done": ["{data}/prepared.json"]
   },
   "start": {
-    "program": ["fepor-recomp.exe", "fepor-recomp"],
-    "args": ["run", "--game", "{game}", "--data", "{data}"]
+    "program": ["fepor-game.exe", "fepor-game"],
+    "args": ["--data", "{data}"]
   },
   "saves": ["{data}/saves"],
   "exit_codes": {
