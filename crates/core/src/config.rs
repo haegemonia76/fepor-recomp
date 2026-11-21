@@ -10,6 +10,50 @@ pub struct Config {
     pub disc: Option<PathBuf>,
     /// Output directory for extracted and generated data (git-ignored).
     pub output: Option<PathBuf>,
+    /// Manual corrections for the static analysis.
+    pub analysis: AnalysisConfig,
+}
+
+/// Overrides for function discovery. Addresses are guest addresses (TOML hex literals work).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnalysisConfig {
+    /// Extra function starts.
+    pub functions: Vec<u32>,
+    /// Addresses that must never become function starts (rejects false positives).
+    pub not_functions: Vec<u32>,
+    /// Code ranges `[start, end)` that are data and must not be decoded.
+    pub exclude: Vec<AddrRange>,
+    /// Manually described jump tables.
+    pub jump_tables: Vec<JumpTableOverride>,
+}
+
+impl AnalysisConfig {
+    /// Append `defaults` after the user's entries (user entries win where order matters).
+    pub fn with_defaults(mut self, defaults: AnalysisConfig) -> Self {
+        self.functions.extend(defaults.functions);
+        self.not_functions.extend(defaults.not_functions);
+        self.exclude.extend(defaults.exclude);
+        self.jump_tables.extend(defaults.jump_tables);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AddrRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A jump table for the `bctr` at `branch`: either explicit `targets`, or `table` + `count` read from the image.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct JumpTableOverride {
+    pub branch: u32,
+    pub table: Option<u32>,
+    pub count: Option<u32>,
+    pub targets: Vec<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]

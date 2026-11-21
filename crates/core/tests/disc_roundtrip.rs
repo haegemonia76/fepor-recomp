@@ -97,9 +97,24 @@ fn rejects_non_gcm_and_unknown_version() {
 fn config_roundtrip_and_unknown_keys() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("c.toml");
-    let c = Config { disc: Some("a.iso".into()), output: Some("out".into()) };
+    let c = Config { disc: Some("a.iso".into()), output: Some("out".into()), ..Config::default() };
     c.save(&p).unwrap();
     assert_eq!(Config::load(&p).unwrap(), c);
     std::fs::write(&p, "bogus = 1").unwrap();
     assert!(Config::load(&p).is_err());
+}
+
+#[test]
+fn analysis_config_parses_hex_and_merges_builtin_defaults() {
+    let user: Config = toml::from_str(
+        "[analysis]\nfunctions = [0x80003154]\n[[analysis.exclude]]\nstart = 0x80003100\nend = 0x80003110\n[[analysis.jump_tables]]\nbranch = 0x8023528c\ntargets = [0x80235290]\n",
+    )
+    .unwrap();
+    assert_eq!(user.analysis.functions, [0x8000_3154]);
+    let defaults = version::lookup("GFEP01").unwrap().analysis_defaults();
+    assert!(!defaults.exclude.is_empty());
+    let merged = user.analysis.with_defaults(defaults.clone());
+    assert_eq!(merged.exclude.len(), 1 + defaults.exclude.len());
+    assert_eq!(merged.exclude[0].start, 0x8000_3100);
+    assert_eq!(merged.jump_tables[0].targets, [0x8023_5290]);
 }

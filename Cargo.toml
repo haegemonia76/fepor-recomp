@@ -14,4 +14,5 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 sha1 = "0.10"
 thiserror = "2"
+ppc750cl = "0.3"
 tempfile = "3"

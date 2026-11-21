@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use fepor_core::{extract::extract, open_disc, version, Config};
+use fepor_core::{analysis::analyze, dol::Dol, extract::extract, open_disc, version, Config};
 
 #[derive(Parser)]
 #[command(version, about = "Static recompilation of Fire Emblem: Path of Radiance")]
@@ -24,6 +24,21 @@ enum Command {
         /// Output directory.
         #[arg(long, short)]
         output: Option<PathBuf>,
+        /// Skip the game ID / main.dol hash check.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Analyse main.dol: function starts, jump tables, unresolved indirect branches.
+    Analyze {
+        /// ISO/GCM file or extracted folder.
+        #[arg(long)]
+        disc: Option<PathBuf>,
+        /// Output directory; the report goes to `<output>/analysis.txt` unless `--report` is given.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Report file.
+        #[arg(long)]
+        report: Option<PathBuf>,
         /// Skip the game ID / main.dol hash check.
         #[arg(long)]
         no_verify: bool,
@@ -61,6 +76,27 @@ fn run(cli: Cli) -> Result<(), String> {
                 report.bytes,
                 out.display()
             );
+            Ok(())
+        }
+        Command::Analyze { disc, output, report, no_verify } => {
+            let disc_path = disc.or(cfg.disc).ok_or("no disc given (use --disc or `disc` in the config)")?;
+            let mut disc = open_disc(&disc_path).map_err(|e| e.to_string())?;
+            let bytes = disc.dol().map_err(|e| e.to_string())?;
+            if !no_verify {
+                let v = version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
+                eprintln!("verified: {} ({})", v.name, v.game_id);
+            }
+            let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
+            let defaults = version::lookup(disc.game_id()).map(|v| v.analysis_defaults()).unwrap_or_default();
+            let analysis = analyze(&dol, &cfg.analysis.with_defaults(defaults));
+            eprintln!("{}", analysis.summary());
+            if let Some(path) = report.or(output.or(cfg.output).map(|o| o.join("analysis.txt"))) {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                }
+                std::fs::write(&path, analysis.report()).map_err(|e| format!("{}: {e}", path.display()))?;
+                eprintln!("report written to {}", path.display());
+            }
             Ok(())
         }
     }

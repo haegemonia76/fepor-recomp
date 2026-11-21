@@ -1,0 +1,11 @@
+# Built-in analysis corrections for GFEP01 (merged under the user's config).
+
+# "Metrowerks Target Resident Kernel for PowerPC" string embedded in text.
+[[exclude]]
+start = 0x800034ac
+end = 0x800034e0
+
+# .init ROM copy / BSS clear tables (address, address, size triples).
+[[exclude]]
+start = 0x80005544
+end = 0x80005600

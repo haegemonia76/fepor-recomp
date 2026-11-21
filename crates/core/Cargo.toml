@@ -9,6 +9,8 @@ serde.workspace = true
 toml.workspace = true
 sha1.workspace = true
 thiserror.workspace = true
+ppc750cl.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+toml.workspace = true

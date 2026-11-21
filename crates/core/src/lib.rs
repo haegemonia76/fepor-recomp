@@ -1,5 +1,6 @@
 //! Core library shared by the CLI and GUI: configuration, disc reading, extraction.
 
+pub mod analysis;
 pub mod config;
 pub mod disc;
 pub mod dol;
