@@ -1,0 +1,19 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust build and tests
+        run: cargo test --workspace
+      - name: Runtime configure and build
+        run: |
+          cmake -S runtime -B build/runtime -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/runtime --config Release
