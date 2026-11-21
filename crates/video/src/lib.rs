@@ -152,7 +152,11 @@ fn mix(h: u64, v: u64) -> u64 {
 /// Vertices of `cur` moved `t` of the way from where `prev` had them. Anything that jumps across the
 /// screen (a cut, a teleport) or has no counterpart is left as it is in `cur`.
 fn lerp_verts(prev: Option<&RecDraw>, cur: &RecDraw, t: f32) -> Vec<GpuVertex> {
-    let Some(p) = prev.filter(|p| p.sig == cur.sig) else {
+    // same object: same shader/textures/counts and the very same texture coordinates (glyphs of a text
+    // that grows, or sprites that swap frames, are not the same object even when the sig matches)
+    let Some(p) = prev
+        .filter(|p| p.sig == cur.sig && p.verts.iter().zip(&cur.verts).all(|(a, b)| a.uv == b.uv))
+    else {
         return cur.verts.clone();
     };
     let ndc = |v: &GpuVertex| (v.pos[0] / v.pos[3], v.pos[1] / v.pos[3]);
@@ -1271,10 +1275,17 @@ impl Renderer {
     /// Draw the frame `cur` with every object `t` of the way from where it was in `prev`, and show it.
     fn show_interp(&mut self, prev: &[Rec], cur: &[Rec], t: f32, c: &CopyEfb) {
         self.use_alt = true;
-        let mut before = prev.iter().filter_map(|r| match r {
-            Rec::Draw(d) => Some(d),
-            Rec::Clear { .. } => None,
-        });
+        // a changed draw count shifts every later draw against its counterpart (typewriter text adds
+        // one glyph per frame): no interpolation for such a frame
+        let draws = |f: &[Rec]| f.iter().filter(|r| matches!(r, Rec::Draw(_))).count();
+        let aligned = draws(prev) == draws(cur);
+        let mut before = prev
+            .iter()
+            .filter_map(|r| match r {
+                Rec::Draw(d) => Some(d),
+                Rec::Clear { .. } => None,
+            })
+            .filter(|_| aligned);
         for r in cur {
             match r {
                 Rec::Clear {

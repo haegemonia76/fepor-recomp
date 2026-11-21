@@ -82,8 +82,10 @@ fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Resu
         }
     };
     let mut rate = 0u32;
-    let mut stream = None;
+    let trace = std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "audio"));
+    let (mut underruns, mut last) = (0u32, std::time::Instant::now());
     let _ = ready.send(Ok(()));
+    let mut stream = None;
     while let Ok((r, samples)) = rx.recv() {
         if r != rate || stream.is_none() {
             rate = r;
@@ -103,6 +105,11 @@ fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Resu
         if let Some(s) = &stream {
             let queued = s.queued_bytes().unwrap_or(0);
             if queued == 0 {
+                underruns += 1;
+                if trace && last.elapsed() >= std::time::Duration::from_secs(5) {
+                    eprintln!("audio: {underruns} underruns so far");
+                    last = std::time::Instant::now();
+                }
                 // start or underrun: refill a 60 ms cushion so that late frames from the guest do not crackle
                 let silence = vec![0i16; (rate as usize * 60 / 1000) * 2];
                 let _ = s.put_data_i16(&silence);

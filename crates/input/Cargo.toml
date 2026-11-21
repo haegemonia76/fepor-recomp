@@ -8,7 +8,8 @@ license.workspace = true
 fepor-runtime.workspace = true
 serde.workspace = true
 toml.workspace = true
-sdl3 = "0.14"
+# test-mode lifts the crate's "first thread that calls init" rule: audio and gamepads each own a thread
+sdl3 = { version = "0.14", features = ["test-mode"] }
 
 [dev-dependencies]
 tempfile.workspace = true
