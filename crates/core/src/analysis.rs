@@ -445,6 +445,17 @@ fn walk_all(code: &Code, dol: &Dol, cfg: &AnalysisConfig, starts: &BTreeMap<u32,
     for (ord, (&s, &origin)) in starts.iter().enumerate() {
         w.walk(s, &mut seen, ord as u32 + 1, origin);
     }
+    // Dead code between reachable parts of a function (e.g. a `b` after an unconditional branch) is not a
+    // function of its own: starting one there would split the function and turn its branches into tail calls.
+    for f in &w.functions {
+        if let (Some(i0), Some(i1)) = (code.idx(f.start), code.idx(f.end - 4)) {
+            for i in i0..=i1 {
+                if w.covered[i] == 0 {
+                    w.covered[i] = f.start;
+                }
+            }
+        }
+    }
     Pass {
         covered: w.covered,
         functions: w.functions,

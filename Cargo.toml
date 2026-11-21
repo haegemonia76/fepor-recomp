@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui"]
+members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates/runtime", "crates/game"]
+# crates/game links the generated game library and only builds through tools/dev-run.sh.
+default-members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates/runtime"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +12,8 @@ license = "GPL-2.0-or-later"
 [workspace.dependencies]
 fepor-core = { path = "crates/core" }
 fepor-ppc-lift = { path = "crates/ppc-lift" }
+fepor-runtime = { path = "crates/runtime" }
+cc = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

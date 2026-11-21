@@ -1,0 +1,10 @@
+[package]
+name = "fepor-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+fepor-core.workspace = true
+fepor-runtime = { workspace = true, features = ["dispatch"] }

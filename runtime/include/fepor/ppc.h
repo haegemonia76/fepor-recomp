@@ -4,6 +4,7 @@
 
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -36,22 +37,42 @@ struct Context {
     uint8_t* ram;  // kRamSize bytes plus slack for accesses straddling the end
 };
 
+static_assert(sizeof(Context) == 4864 && offsetof(Context, ram) == 4856, "Context layout is mirrored by crates/runtime/src/context.rs");
+
 using HostFn = void (*)(Context&);
 
-// ---- runtime services (runtime/src) ---------------------------------------------------------
+}  // namespace fepor
 
-[[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-[[noreturn]] void unimplemented(Context& c, uint32_t addr, uint32_t code);
+// ---- runtime services: C ABI, implemented by crates/runtime (or runtime/src for tests) -------
+
+extern "C" {
+[[noreturn]] void fepor_fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+[[noreturn]] void fepor_unimplemented(fepor::Context* c, uint32_t addr, uint32_t code);
 /// Control flow to a guest address that has no generated function.
-[[noreturn]] void unresolved(Context& c, uint32_t from, uint32_t target);
+[[noreturn]] void fepor_unresolved(fepor::Context* c, uint32_t from, uint32_t target);
 /// Guest address to host function; fatal if the address is not in the dispatch table.
-HostFn lookup(uint32_t from, uint32_t target);
-[[noreturn]] void trap(Context& c, uint32_t addr);
-[[noreturn]] void syscall(Context& c, uint32_t addr);
-[[noreturn]] void rfi(Context& c, uint32_t addr);
-uint32_t mftb(uint32_t tbr);
-uint32_t hw_read(uint32_t ea, int size);
-void hw_write(uint32_t ea, uint32_t value, int size);
+fepor::HostFn fepor_lookup(uint32_t from, uint32_t target);
+[[noreturn]] void fepor_trap(fepor::Context* c, uint32_t addr);
+void fepor_syscall(fepor::Context* c, uint32_t addr);
+void fepor_rfi(fepor::Context* c, uint32_t addr);
+uint32_t fepor_mftb(uint32_t tbr);
+uint32_t fepor_hw_read(uint32_t ea, int size);
+void fepor_hw_write(uint32_t ea, uint32_t value, int size);
+/// Function entry hook, emitted when generating with call tracing.
+void fepor_enter(uint32_t addr);
+}
+
+namespace fepor {
+
+[[noreturn]] inline void unimplemented(Context& c, uint32_t addr, uint32_t code) { fepor_unimplemented(&c, addr, code); }
+[[noreturn]] inline void unresolved(Context& c, uint32_t from, uint32_t target) { fepor_unresolved(&c, from, target); }
+inline HostFn lookup(uint32_t from, uint32_t target) { return fepor_lookup(from, target); }
+[[noreturn]] inline void trap(Context& c, uint32_t addr) { fepor_trap(&c, addr); }
+inline void syscall(Context& c, uint32_t addr) { fepor_syscall(&c, addr); }
+inline void rfi(Context& c, uint32_t addr) { fepor_rfi(&c, addr); }
+inline uint32_t mftb(uint32_t tbr) { return fepor_mftb(tbr); }
+inline uint32_t hw_read(uint32_t ea, int size) { return fepor_hw_read(ea, size); }
+inline void hw_write(uint32_t ea, uint32_t value, int size) { fepor_hw_write(ea, value, size); }
 
 // ---- memory ---------------------------------------------------------------------------------
 

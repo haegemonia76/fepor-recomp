@@ -25,7 +25,7 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: brew install cmake ninja
       - name: Rust build and tests (lifter, instruction vectors)
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude fepor-game
       - name: Runtime build and helper tests
         run: |
           cmake -S runtime -B build/runtime -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++

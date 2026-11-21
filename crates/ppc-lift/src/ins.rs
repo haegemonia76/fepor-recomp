@@ -782,7 +782,8 @@ impl<'a> Fx<'a> {
                     self.emit(format!("if (tw_cond({to}, {ra}, {rhs})) {{ out(); trap(c, 0x{addr:x}); }}"));
                 }
             }
-            Sc => self.emit(format!("out(); syscall(c, 0x{addr:x});")),
+            // `sc` only reaches the SDK's instruction-cache flush handler; the runtime may treat it as a no-op.
+            Sc => self.emit(format!("out(); syscall(c, 0x{addr:x}); in();")),
             Rfi => self.emit(format!("out(); rfi(c, 0x{addr:x}); return;")),
             // ---- floating point ----
             Fmr | Fabs | Fneg | Fnabs => {

@@ -41,7 +41,7 @@ fn build_and_run(dol: &Dol, main_cpp: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
-    let opts = Options { functions_per_unit: 2, runtime_dir: runtime.display().to_string() };
+    let opts = Options { functions_per_unit: 2, runtime_dir: runtime.display().to_string(), trace_calls: false };
     let stats = generate(dol, &analysis, &opts, &mut |name, content| std::fs::write(dir.join(name), content)).unwrap();
     assert_eq!(stats.unimplemented.len(), 0, "{:?}", stats.unimplemented);
     std::fs::write(dir.join("main.cpp"), main_cpp).unwrap();

@@ -11,7 +11,8 @@ Players should be able to install, set up and play this recomp from [RecompLaunc
 - **Saves and settings**: saves are the Dolphin-compatible memory card image in `{data}/saves`; user options live in the shared TOML config so the profile's `config`/`settings` can expose them (resolution, frame rate, glyph set, remapping) as M5/M6 add them.
 - **Disc formats**: the launcher's GameCube standard is ISO, RVZ and GCZ; the disc reader must gain RVZ and GCZ (ticket).
 - **Releases**: one archive per system and architecture named `fepor-recomp-<version>-<windows|linux|macos>-<x64|arm64>.<zip|tar.xz>`; no game data in any archive.
-- **Open decisions**: the launcher installs from GitHub releases (a Gitea-only repository needs a mirror or a catalog entry); the player needs a clang/CMake/Ninja toolchain unless we bundle or download one.
+- **Toolchain**: decided in ADR 0011: one executable, no tools for players (the C++ `prepare` described above is the development backend).
+- **Open decision**: the launcher installs from GitHub releases (a Gitea-only repository needs a mirror or a catalog entry).
 
 ## Tooling rule
 

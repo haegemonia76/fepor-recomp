@@ -15,6 +15,9 @@ pub struct GenerateArgs {
     /// Runtime CMake project (default: `runtime/` of this repository).
     #[arg(long)]
     pub runtime_dir: Option<PathBuf>,
+    /// Emit `fepor_enter(addr)` at every function entry (call tracing for development builds).
+    #[arg(long)]
+    pub trace_calls: bool,
     /// C++ compiler for `prepare`; must be clang.
     #[arg(long, default_value = "clang++", env = "CXX")]
     pub cxx: String,
@@ -53,6 +56,7 @@ fn generate(opts: &Options, args: &GenerateArgs, session: &Session, out: &Path) 
     let lift_opts = fepor_ppc_lift::Options {
         functions_per_unit: args.functions_per_unit.unwrap_or(opts.cfg.generate.functions_per_unit),
         runtime_dir: runtime_dir.display().to_string(),
+        trace_calls: args.trace_calls || opts.cfg.generate.trace_calls,
     };
     let stats = fepor_ppc_lift::generate(&session.dol, &analysis, &lift_opts, &mut |name, content| write_if_changed(&gen_dir.join(name), content))
         .map_err(|e| Fail::Other(e.to_string()))?;

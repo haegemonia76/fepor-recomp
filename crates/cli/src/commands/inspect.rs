@@ -39,3 +39,23 @@ pub fn opcodes(opts: &Options) -> Result<(), Fail> {
     }
     Ok(())
 }
+
+/// Every occurrence of an opcode, with the function (from the analysis) it sits in.
+pub fn find(opts: &Options, op: &str) -> Result<(), Fail> {
+    let session = Session::open(opts)?;
+    let analysis = fepor_core::analysis::analyze(&session.dol, &session.analysis_cfg);
+    for s in session.dol.text_sections() {
+        for (k, w) in session.dol.section_bytes(s).chunks_exact(4).enumerate() {
+            let a = s.addr + 4 * k as u32;
+            let ins = Ins::new(u32::from_be_bytes(w.try_into().unwrap()));
+            if format!("{:?}", ins.op).eq_ignore_ascii_case(op) {
+                let i = analysis.functions.partition_point(|f| f.start <= a);
+                let func = i.checked_sub(1).map(|i| &analysis.functions[i]).filter(|f| a < f.end);
+                let p = ins.simplified();
+                let args: Vec<String> = p.args_iter().map(|x| x.to_string()).collect();
+                println!("{a:08x}  {} {}  in {}", p.mnemonic, args.join(", "), func.map_or("-".to_string(), |f| format!("{:08x}", f.start)));
+            }
+        }
+    }
+    Ok(())
+}

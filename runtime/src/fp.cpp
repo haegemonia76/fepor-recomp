@@ -106,3 +106,7 @@ double fres(double val) {
 }
 
 }  // namespace fepor
+
+// C entry points for backends that cannot call C++ symbols.
+extern "C" double fepor_fres(double v) { return fepor::fres(v); }
+extern "C" double fepor_frsqrte(double v) { return fepor::frsqrte(v); }

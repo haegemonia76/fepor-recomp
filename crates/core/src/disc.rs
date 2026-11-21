@@ -45,6 +45,8 @@ pub trait Disc {
     fn files(&self) -> &[FileEntry];
     /// Stream one file's content into `out`.
     fn read_file(&mut self, entry: &FileEntry, out: &mut dyn Write) -> Result<(), DiscError>;
+    /// Raw read from the disc image at `offset`; bytes outside the image read as zero.
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError>;
 }
 
 /// Open an ISO/GCM file or an extracted folder.
@@ -194,12 +196,27 @@ impl Disc for IsoDisc {
         }
         Ok(())
     }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError> {
+        buf.fill(0);
+        let len = self.file.metadata().map_err(io_err(&self.path))?.len();
+        if offset >= len {
+            return Ok(());
+        }
+        let n = buf.len().min((len - offset) as usize);
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .and_then(|_| self.file.read_exact(&mut buf[..n]))
+            .map_err(io_err(&self.path))
+    }
 }
 
 pub struct FolderDisc {
     root: PathBuf,
     id: String,
     files: Vec<FileEntry>,
+    /// (disc offset, length, host file) for every part of the virtual disc image.
+    regions: Vec<(u64, u64, PathBuf)>,
 }
 
 impl FolderDisc {
@@ -210,10 +227,33 @@ impl FolderDisc {
             .and_then(|mut f| f.read_exact(&mut boot))
             .map_err(io_err(&boot_path))?;
         let id = game_id_of(&boot)?;
-        let mut files = Vec::new();
-        walk(&root.join("files"), "", &mut files)?;
+        // Prefer the FST in sys/ (real disc offsets); fall back to scanning the folder.
+        let sys = root.join("sys");
+        let mut files = match std::fs::read(sys.join("fst.bin")).ok().and_then(|f| parse_fst(&f).ok()) {
+            Some(entries) => entries,
+            None => {
+                let mut v = Vec::new();
+                walk(&root.join("files"), "", &mut v)?;
+                v.sort_by(|a, b| a.path.cmp(&b.path));
+                v
+            }
+        };
         files.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(FolderDisc { root: root.to_path_buf(), id, files })
+
+        // Where each file lives in the virtual disc image, for raw reads (the DVD driver reads by offset).
+        let word = |o: usize| u32::from_be_bytes(boot[o..o + 4].try_into().unwrap()) as u64;
+        let size_of = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let mut regions = vec![
+            (0, size_of(&sys.join("boot.bin")), sys.join("boot.bin")),
+            (BI2_OFFSET, size_of(&sys.join("bi2.bin")), sys.join("bi2.bin")),
+            (APPLOADER_OFFSET, size_of(&sys.join("apploader.img")), sys.join("apploader.img")),
+            (word(0x424), size_of(&sys.join("fst.bin")), sys.join("fst.bin")),
+            (word(0x420), size_of(&sys.join("main.dol")), sys.join("main.dol")),
+        ];
+        for f in &files {
+            regions.push((f.offset, f.size, root.join("files").join(&f.path)));
+        }
+        Ok(FolderDisc { root: root.to_path_buf(), id, files, regions })
     }
 
     fn sys(&self, name: &str) -> Result<Vec<u8>, DiscError> {
@@ -261,6 +301,28 @@ impl Disc for FolderDisc {
         let p = self.root.join("files").join(&entry.path);
         let mut f = File::open(&p).map_err(io_err(&p))?;
         io::copy(&mut f, out).map_err(io_err(&p))?;
+        Ok(())
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError> {
+        buf.fill(0);
+        let end = offset + buf.len() as u64;
+        for (start, len, path) in &self.regions {
+            let (lo, hi) = (offset.max(*start), end.min(start + len));
+            if lo >= hi {
+                continue;
+            }
+            let mut f = File::open(path).map_err(io_err(path))?;
+            f.seek(SeekFrom::Start(lo - start)).map_err(io_err(path))?;
+            let dst = &mut buf[(lo - offset) as usize..(hi - offset) as usize];
+            let mut got = 0;
+            while got < dst.len() {
+                match f.read(&mut dst[got..]).map_err(io_err(path))? {
+                    0 => break, // file shorter than the FST says: the rest stays zero
+                    n => got += n,
+                }
+            }
+        }
         Ok(())
     }
 }

@@ -48,11 +48,13 @@ pub struct GenerateConfig {
     pub functions_per_unit: usize,
     /// Runtime sources (CMake project); defaults to the `runtime/` directory of this repository.
     pub runtime_dir: Option<PathBuf>,
+    /// Emit a call-trace hook at every function entry (development builds).
+    pub trace_calls: bool,
 }
 
 impl Default for GenerateConfig {
     fn default() -> Self {
-        GenerateConfig { functions_per_unit: 256, runtime_dir: None }
+        GenerateConfig { functions_per_unit: 256, runtime_dir: None, trace_calls: false }
     }
 }
 

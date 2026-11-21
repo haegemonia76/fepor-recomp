@@ -56,6 +56,12 @@ pub enum Command {
     },
     /// Instruction histogram of main.dol's text sections.
     Opcodes,
+    /// List every instruction of an opcode (e.g. `--op Rfi`, `--op Sc`, `--op Mtmsr`) with its function.
+    Find {
+        /// ppc750cl opcode name, case-insensitive.
+        #[arg(long)]
+        op: String,
+    },
 }
 
 fn run(cli: Cli) -> Result<(), Fail> {
@@ -72,6 +78,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Command::Prepare(args) => commands::generate::run(&opts, &args, true),
         Command::Disasm { addr, count } => commands::inspect::disasm(&opts, addr, count),
         Command::Opcodes => commands::inspect::opcodes(&opts),
+        Command::Find { op } => commands::inspect::find(&opts, &op),
     }
 }
 
