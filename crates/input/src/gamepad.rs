@@ -18,10 +18,15 @@ pub fn spawn(mut on_input: impl FnMut(&str, f32) + Send + 'static) {
             let Ok(mut pump) = sdl.event_pump() else {
                 return;
             };
+            let trace = std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "input" || x == "all"));
             let mut open: HashMap<u32, Gamepad> = HashMap::new();
             if let Ok(ids) = subsystem.gamepads() {
                 for id in ids {
                     if let Ok(g) = subsystem.open(id) {
+                        if trace {
+                            eprintln!("input: gamepad found: {}", g.name().unwrap_or_default());
+                        }
                         open.insert(id, g);
                     }
                 }
@@ -31,6 +36,12 @@ pub fn spawn(mut on_input: impl FnMut(&str, f32) + Send + 'static) {
                     match event {
                         Event::ControllerDeviceAdded { which, .. } => {
                             if let Ok(g) = subsystem.open(which) {
+                                if trace {
+                                    eprintln!(
+                                        "input: gamepad connected: {}",
+                                        g.name().unwrap_or_default()
+                                    );
+                                }
                                 open.insert(which, g);
                             }
                         }
@@ -38,6 +49,9 @@ pub fn spawn(mut on_input: impl FnMut(&str, f32) + Send + 'static) {
                             open.remove(&which);
                         }
                         Event::ControllerButtonDown { button, .. } => {
+                            if trace {
+                                eprintln!("input: gamepad button {} down", button.string());
+                            }
                             on_input(&button.string(), 1.0)
                         }
                         Event::ControllerButtonUp { button, .. } => on_input(&button.string(), 0.0),

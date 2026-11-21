@@ -59,6 +59,15 @@ pub enum Command {
         /// The `.raw` image.
         image: PathBuf,
     },
+    /// Add a save (`.gci`, as exported by Dolphin) to a raw memory card image.
+    CardImport { image: PathBuf, gci: PathBuf },
+    /// Take a save off a raw memory card image as a `.gci` file (the first one, or the one named `--name`).
+    CardExport {
+        image: PathBuf,
+        out: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// List the disc's files with their disc offsets (for matching DVD reads in a trace).
     Ls,
     /// Disassemble guest code from main.dol.
@@ -100,6 +109,10 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Command::Prepare(args) => commands::generate::run(&opts, &args, true),
         Command::Ls => commands::inspect::ls(&opts),
         Command::CardInfo { image } => commands::inspect::card_info(&image),
+        Command::CardImport { image, gci } => commands::inspect::card_import(&image, &gci),
+        Command::CardExport { image, out, name } => {
+            commands::inspect::card_export(&image, &out, name.as_deref())
+        }
         Command::Disasm { addr, count } => commands::inspect::disasm(&opts, addr, count),
         Command::Opcodes => commands::inspect::opcodes(&opts),
         Command::Find {

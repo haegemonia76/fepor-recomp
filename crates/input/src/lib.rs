@@ -486,16 +486,15 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("press the input for A"));
-        // first action A takes the "y" button, every other action is skipped by keeping its binding
+        // action A takes the "y" button; a press needs its release before the next action is asked
         c.input(false, "y", 1.0);
+        c.input(false, "y", 0.0);
         // inputs from the other device are ignored while remapping
         c.input(true, "KeyZ", 1.0);
-        for _ in 1..Action::ALL.len() {
-            c.input(false, "ignored-skip", 0.0);
-            // a gamepad "skip" is not available, so feed the same input again to move on
-            let before = c.message.clone();
-            c.input(false, "dpup", 1.0);
-            assert!(c.message != before || c.message.as_deref() == Some("Controls saved"));
+        for n in 1..Action::ALL.len() {
+            let source = format!("extra{n}");
+            c.input(false, &source, 1.0);
+            c.input(false, &source, 0.0);
         }
         assert_eq!(c.message.as_deref(), Some("Controls saved"));
         let saved = InputConfig::load_or_create(&path);
@@ -504,6 +503,44 @@ mod tests {
         // after remapping the new binding presses A
         c.input(false, "y", 1.0);
         assert_eq!(c.state.pad(&c.cfg).buttons & button::A, button::A);
+    }
+
+    #[test]
+    fn a_held_analog_trigger_binds_one_action_until_it_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Controls::new(dir.path().join("input.toml"));
+        c.toggle_remap(false);
+        // the trigger keeps reporting while held: A takes it, B and the rest must not
+        for v in [0.7, 0.9, 1.0, 1.0, 0.95] {
+            c.input(false, "lefttrigger", v);
+        }
+        assert_eq!(
+            c.config().bindings.gamepad.get("lefttrigger"),
+            Some(&Action::A)
+        );
+        assert!(
+            c.message
+                .as_deref()
+                .unwrap()
+                .contains("press the input for B"),
+            "{:?}",
+            c.message
+        );
+        // released, the next press goes to B
+        c.input(false, "lefttrigger", 0.0);
+        c.input(false, "righttrigger", 1.0);
+        assert_eq!(
+            c.config().bindings.gamepad.get("righttrigger"),
+            Some(&Action::B)
+        );
+        // axis jitter between 0.3 and 0.6 neither releases nor presses
+        c.input(false, "righttrigger", 0.5);
+        c.input(false, "righttrigger", 0.8);
+        assert!(c
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("press the input for X"));
     }
 }
 
@@ -515,6 +552,8 @@ pub struct Controls {
     path: std::path::PathBuf,
     /// A message for the player (shown in the window title) after a hotkey or remapping step.
     pub message: Option<String>,
+    /// Sources of the device being remapped that are currently held down.
+    held: std::collections::HashSet<String>,
 }
 
 impl Controls {
@@ -525,6 +564,7 @@ impl Controls {
             remap: None,
             path,
             message: None,
+            held: Default::default(),
         }
     }
 
@@ -559,6 +599,14 @@ impl Controls {
             self.message = Some("Remapping cancelled".into());
             return;
         }
+        // inputs already held when remapping starts must be released before they can count
+        let prefix = if keyboard { "kb:" } else { "pad:" };
+        self.held = self
+            .state
+            .sources
+            .keys()
+            .filter_map(|k| k.strip_prefix(prefix).map(String::from))
+            .collect();
         self.state.release_all(true);
         self.state.release_all(false);
         self.publish();
@@ -581,20 +629,26 @@ impl Controls {
     /// One input event. `keyboard` selects the device; `value` is 0 on release.
     pub fn input(&mut self, keyboard: bool, source: &str, value: f32) {
         if let Some(r) = &mut self.remap {
-            // the next press on the device being remapped becomes the binding
-            if r.keyboard() == keyboard && value >= 0.6 {
-                let step = if keyboard && source == "Escape" {
-                    r.feed(&mut self.cfg, None)
-                } else {
-                    r.feed(&mut self.cfg, Some(source))
-                };
-                match step {
-                    RemapStep::Done => {
-                        let _ = self.cfg.save(&self.path);
-                        self.remap = None;
-                        self.message = Some("Controls saved".into());
+            // Only the device being remapped counts, and only on the press edge: an analog trigger keeps
+            // reporting values while it is held, and must not bind every following action to itself.
+            // A source is "held" from 0.6 until it falls below 0.3 (hysteresis against axis jitter).
+            if r.keyboard() == keyboard {
+                if value < 0.3 {
+                    self.held.remove(source);
+                } else if value >= 0.6 && self.held.insert(source.to_string()) {
+                    let step = if keyboard && source == "Escape" {
+                        r.feed(&mut self.cfg, None)
+                    } else {
+                        r.feed(&mut self.cfg, Some(source))
+                    };
+                    match step {
+                        RemapStep::Done => {
+                            let _ = self.cfg.save(&self.path);
+                            self.remap = None;
+                            self.message = Some("Controls saved".into());
+                        }
+                        RemapStep::Ask(_) => self.message = self.prompt(),
                     }
-                    RemapStep::Ask(_) => self.message = self.prompt(),
                 }
             }
             return;

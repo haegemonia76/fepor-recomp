@@ -164,3 +164,38 @@ pub fn card_info(image: &std::path::Path) -> Result<(), Fail> {
     }
     Ok(())
 }
+
+/// Add a `.gci` save to a raw card image (in place).
+pub fn card_import(image: &std::path::Path, gci: &std::path::Path) -> Result<(), Fail> {
+    let mut card =
+        std::fs::read(image).map_err(|e| Fail::Usage(format!("{}: {e}", image.display())))?;
+    let save = std::fs::read(gci).map_err(|e| Fail::Usage(format!("{}: {e}", gci.display())))?;
+    fepor_core::memcard::import_gci(&mut card, &save).map_err(Fail::Usage)?;
+    std::fs::write(image, card).map_err(|e| Fail::Other(e.to_string()))?;
+    println!("imported {}", gci.display());
+    Ok(())
+}
+
+/// Take a save off a raw card image as `.gci`.
+pub fn card_export(
+    image: &std::path::Path,
+    out: &std::path::Path,
+    name: Option<&str>,
+) -> Result<(), Fail> {
+    let card =
+        std::fs::read(image).map_err(|e| Fail::Usage(format!("{}: {e}", image.display())))?;
+    let saves = fepor_core::memcard::list(&card).map_err(Fail::Usage)?;
+    let (found, idx) = saves
+        .iter()
+        .find(|(n, _)| name.is_none_or(|w| w == n))
+        .ok_or_else(|| {
+            Fail::Usage(format!(
+                "no save{} on the card",
+                name.map(|n| format!(" named {n}")).unwrap_or_default()
+            ))
+        })?;
+    let gci = fepor_core::memcard::export_gci(&card, *idx).map_err(Fail::Usage)?;
+    std::fs::write(out, gci).map_err(|e| Fail::Other(e.to_string()))?;
+    println!("exported {found} to {}", out.display());
+    Ok(())
+}

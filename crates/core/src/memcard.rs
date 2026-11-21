@@ -121,6 +121,147 @@ pub fn inspect(image: &[u8]) -> Result<CardInfo, String> {
     })
 }
 
+fn put16(d: &mut [u8], o: usize, v: u16) {
+    d[o..o + 2].copy_from_slice(&v.to_be_bytes());
+}
+
+fn fix_checksum(block: &mut [u8], range_end: usize, at: usize, from: usize) {
+    let (c, ci) = checksum(&block[from..range_end]);
+    put16(block, at, c);
+    put16(block, at + 2, ci);
+}
+
+/// Index (0 or 1) of the current copy of the directory and of the BAT, and whether the image is formatted.
+fn current_copies(image: &[u8]) -> Result<(usize, usize), String> {
+    let info = inspect(image)?;
+    if !info.formatted {
+        return Err("the card is not formatted".into());
+    }
+    let pick = |ok: [bool; 2], counter: &dyn Fn(usize) -> u16| match (ok[0], ok[1]) {
+        (true, true) => {
+            usize::from(counter(1).wrapping_sub(counter(0)) < 0x8000 && counter(1) != counter(0))
+        }
+        (false, true) => 1,
+        _ => 0,
+    };
+    let dir = pick(info.dir_ok, &|i| be16(&image[BLOCK * (1 + i)..], 0x1FFA));
+    let bat = pick(info.bat_ok, &|i| be16(&image[BLOCK * (3 + i)..], 4));
+    Ok((dir, bat))
+}
+
+/// Add a save (a `.gci` file: the 0x40-byte directory entry followed by the file's blocks) to the card,
+/// the way a console does it: the unused copy of the directory and BAT is updated and its counter raised.
+pub fn import_gci(image: &mut [u8], gci: &[u8]) -> Result<(), String> {
+    if gci.len() < DIR_ENTRY {
+        return Err("not a GCI file".into());
+    }
+    let (entry, data) = gci.split_at(DIR_ENTRY);
+    let blocks = be16(entry, 0x38) as usize;
+    if blocks == 0 || data.len() < blocks * BLOCK {
+        return Err(format!(
+            "GCI declares {blocks} blocks but holds {} bytes of data",
+            data.len()
+        ));
+    }
+    let (cd, cb) = current_copies(image)?;
+    let (nd, nb) = (1 - cd, 1 - cb);
+    let total_blocks = image.len() / BLOCK;
+    let mut dir = image[BLOCK * (1 + cd)..BLOCK * (2 + cd)].to_vec();
+    let mut bat = image[BLOCK * (3 + cb)..BLOCK * (4 + cb)].to_vec();
+
+    // name clash and free slot
+    let mut slot = None;
+    for e in 0..DIR_ENTRIES {
+        let ent = &dir[e * DIR_ENTRY..(e + 1) * DIR_ENTRY];
+        if ent[..4] == [0xFF; 4] {
+            slot.get_or_insert(e);
+        } else if ent[..6] == entry[..6] && ent[8..40] == entry[8..40] {
+            return Err("the card already holds a save with this name".into());
+        }
+    }
+    let slot = slot.ok_or("the card's directory is full")?;
+    let free = be16(&bat, 6) as usize;
+    if free < blocks {
+        return Err(format!(
+            "not enough free blocks ({free} free, {blocks} needed)"
+        ));
+    }
+
+    // allocate from the block after the last allocated one, wrapping
+    let mut chain = Vec::with_capacity(blocks);
+    let mut b = be16(&bat, 8) as usize;
+    for _ in 0..total_blocks {
+        if chain.len() == blocks {
+            break;
+        }
+        b += 1;
+        if b >= total_blocks || b < 5 {
+            b = 5;
+        }
+        if be16(&bat, 10 + 2 * (b - 5)) == 0 {
+            chain.push(b);
+        }
+    }
+    if chain.len() < blocks {
+        return Err("the block allocation table has too few free blocks".into());
+    }
+    for (i, &blk) in chain.iter().enumerate() {
+        let next = chain.get(i + 1).map_or(0xFFFF, |&n| n as u16);
+        put16(&mut bat, 10 + 2 * (blk - 5), next);
+        image[blk * BLOCK..(blk + 1) * BLOCK].copy_from_slice(&data[i * BLOCK..(i + 1) * BLOCK]);
+    }
+    put16(&mut bat, 6, (free - blocks) as u16);
+    put16(&mut bat, 8, *chain.last().expect("blocks > 0") as u16);
+    let bat_counter = be16(&bat, 4).wrapping_add(1);
+    put16(&mut bat, 4, bat_counter);
+    fix_checksum(&mut bat, BLOCK, 0, 4);
+
+    let mut ent = entry.to_vec();
+    put16(&mut ent, 0x36, chain[0] as u16);
+    dir[slot * DIR_ENTRY..(slot + 1) * DIR_ENTRY].copy_from_slice(&ent);
+    let dir_counter = be16(&dir, 0x1FFA).wrapping_add(1);
+    put16(&mut dir, 0x1FFA, dir_counter);
+    fix_checksum(&mut dir, 0x1FFC, 0x1FFC, 0);
+
+    image[BLOCK * (1 + nd)..BLOCK * (2 + nd)].copy_from_slice(&dir);
+    image[BLOCK * (3 + nb)..BLOCK * (4 + nb)].copy_from_slice(&bat);
+    Ok(())
+}
+
+/// The saves on the card as `(file name, directory entry index)`.
+pub fn list(image: &[u8]) -> Result<Vec<(String, usize)>, String> {
+    let (cd, _) = current_copies(image)?;
+    let dir = &image[BLOCK * (1 + cd)..BLOCK * (2 + cd)];
+    Ok((0..DIR_ENTRIES)
+        .filter(|&e| dir[e * DIR_ENTRY..][..4] != [0xFF; 4])
+        .map(|e| (text(&dir[e * DIR_ENTRY + 8..e * DIR_ENTRY + 40]), e))
+        .collect())
+}
+
+/// Take save number `entry` (see [`list`]) off the card as a `.gci` file.
+pub fn export_gci(image: &[u8], entry: usize) -> Result<Vec<u8>, String> {
+    let (cd, cb) = current_copies(image)?;
+    let dir = &image[BLOCK * (1 + cd)..BLOCK * (2 + cd)];
+    let bat = &image[BLOCK * (3 + cb)..BLOCK * (4 + cb)];
+    let ent = dir
+        .get(entry * DIR_ENTRY..(entry + 1) * DIR_ENTRY)
+        .ok_or("no such directory entry")?;
+    if ent[..4] == [0xFF; 4] {
+        return Err("that directory entry is empty".into());
+    }
+    let (first, blocks) = (be16(ent, 0x36) as usize, be16(ent, 0x38) as usize);
+    let mut out = ent.to_vec();
+    let mut b = first;
+    for _ in 0..blocks {
+        if b < 5 || b >= image.len() / BLOCK {
+            return Err(format!("broken block chain at block {b}"));
+        }
+        out.extend_from_slice(&image[b * BLOCK..(b + 1) * BLOCK]);
+        b = be16(bat, 10 + 2 * (b - 5)) as usize;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +335,29 @@ mod tests {
         let mut img = sample();
         img[0x20] ^= 1;
         assert!(!inspect(&img).unwrap().header_ok);
+    }
+
+    #[test]
+    fn import_then_export_round_trips_and_checksums_stay_valid() {
+        let mut img = sample();
+        let mut gci = vec![0u8; DIR_ENTRY + 2 * BLOCK];
+        gci[..4].copy_from_slice(b"GFEP");
+        gci[4..6].copy_from_slice(b"01");
+        gci[8..8 + 5].copy_from_slice(b"SAVE2");
+        gci[0x38..0x3A].copy_from_slice(&2u16.to_be_bytes());
+        for (i, b) in gci[DIR_ENTRY..].iter_mut().enumerate() {
+            *b = (i * 7) as u8;
+        }
+        import_gci(&mut img, &gci).unwrap();
+        let info = inspect(&img).unwrap();
+        assert!(info.formatted && info.dir_ok == [true, true] && info.bat_ok == [true, true]);
+        assert_eq!(info.free_blocks, 54);
+        assert_eq!(info.saves.len(), 2);
+        let names = list(&img).unwrap();
+        let (_, idx) = names.iter().find(|(n, _)| n == "SAVE2").unwrap();
+        let out = export_gci(&img, *idx).unwrap();
+        assert_eq!(&out[DIR_ENTRY..], &gci[DIR_ENTRY..]);
+        // importing the same name twice is refused
+        assert!(import_gci(&mut img, &gci).is_err());
     }
 }
