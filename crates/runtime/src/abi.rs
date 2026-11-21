@@ -66,6 +66,17 @@ pub fn start_watchdog() {
                     .join(" ")
             );
         }
+        let am = &machine().trace.after_mark;
+        if !am.is_empty() {
+            eprintln!(
+                "  calls after mark ({}): {}",
+                am.len(),
+                am.iter()
+                    .map(|a| format!("{a:08x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
         // OS threads: __OSActiveThreadQueue head at 0x800000DC, linkActive at +0x2FC.
         let m = machine();
         if !c.is_null() {
@@ -206,6 +217,24 @@ pub extern "C" fn fepor_mftb(tbr: u32) -> u32 {
     }
 }
 
+/// `mtspr DMA_L`: with the trigger bit set, run the locked-cache DMA described by DMA_U/DMA_L and clear the bit.
+#[no_mangle]
+pub extern "C" fn fepor_lc_dma(c: *mut Context) {
+    // SAFETY: the generated code passes its live context.
+    let c = unsafe { &mut *c };
+    let (u, l) = (c.spr[922], c.spr[923]);
+    if l & 2 == 0 {
+        return;
+    }
+    let blocks = match ((u & 0x1F) << 2) | ((l >> 2) & 3) {
+        0 => 128,
+        n => n as usize,
+    };
+    let m = machine();
+    m.hw.lc_dma(u & !0x1F, l & !0x1F, blocks, l & 0x10 != 0, &mut m.ram);
+    c.spr[923] &= !3;
+}
+
 /// `mtdec`: the decrementer raises exception 8 when it passes zero, `value + 1` ticks from now.
 #[no_mangle]
 pub extern "C" fn fepor_mtdec(value: u32) {
@@ -331,6 +360,7 @@ pub fn exports() -> Vec<usize> {
         fepor_rfi as *const () as usize,
         fepor_mftb as *const () as usize,
         fepor_mtdec as *const () as usize,
+        fepor_lc_dma as *const () as usize,
         fepor_mfdec as *const () as usize,
         fepor_hw_read as *const () as usize,
         fepor_hw_write as *const () as usize,

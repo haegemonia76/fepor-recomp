@@ -111,12 +111,31 @@ fn dump_log() {
     }
 }
 
+/// SPRs the OS does not keep in an OSContext (HID0/1/2, WPAR, the locked-cache DMA pair, L2CR): they belong
+/// to the CPU, not to a thread, so they follow the running thread across switches.
+const CPU_SPRS: [usize; 7] = [920, 921, 922, 923, 1008, 1009, 1017];
+
+fn save_cpu_sprs(c: &Context) {
+    let g = &mut machine().cpu_sprs;
+    for (i, &n) in CPU_SPRS.iter().enumerate() {
+        g[i] = c.spr[n];
+    }
+}
+
+fn load_cpu_sprs(c: &mut Context) {
+    let g = &machine().cpu_sprs;
+    for (i, &n) in CPU_SPRS.iter().enumerate() {
+        c.spr[n] = g[i];
+    }
+}
+
 /// OSLoadContext(context): switch to the thread that owns `context`.
 #[no_mangle]
 pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
     // SAFETY: the generated stub passes its live context.
     let c = unsafe { &mut *c };
     let target = c.r[3];
+    save_cpu_sprs(c);
     if target == 0 {
         let mut sp = c.r[1];
         let mut chain = format!("lr={:08x}", c.lr);
@@ -157,6 +176,7 @@ pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
         let ram = machine().ram_ptr();
         let mut ctx = Context::new(ram);
         restore(&mut ctx, target);
+        load_cpu_sprs(&mut ctx);
         let entry = rd32(target + OFF_SRR0);
         sched::spawn_and_switch(me, token, ctx, move |cp| {
             // SAFETY: the context was boxed for this thread and is only used by it.
@@ -180,6 +200,7 @@ pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
         Some((ctx, kind)) => {
             log_switch(format!("thread#{me} resumed from {ctx:#x} as {kind:?}"));
             restore(c, ctx);
+            load_cpu_sprs(c);
             c.spr[HLE_STATUS] = (kind == ParkKind::AfterIrq) as u32;
         }
         None => die_str("a thread without a context was resumed"),

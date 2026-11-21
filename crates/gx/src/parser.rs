@@ -23,6 +23,7 @@ pub struct Gx {
     pub bp: Bp,
     pub tluts: Tluts,
     pub stats: Stats,
+    log_frame: Option<u64>,
     buf: Vec<u8>,
     snapshot: Option<Arc<RenderState>>,
     trace: bool,
@@ -48,6 +49,9 @@ impl Gx {
             stats: Stats::default(),
             buf: Vec::new(),
             snapshot: None,
+            log_frame: std::env::var("FEPOR_GX_LOG")
+                .ok()
+                .and_then(|v| v.parse().ok()),
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gx" || x == "all")),
         }
@@ -77,6 +81,26 @@ impl Gx {
 
     fn exec(&mut self, d: &[u8], ram: &[u8], sink: &mut dyn Sink) -> Step {
         let op = d[0];
+        if self.log_frame == Some(self.stats.copies) && d.len() >= 5 {
+            match op {
+                0x61 => eprintln!(
+                    "gxlog: BP {:#04x} <- {:#08x}",
+                    d[1],
+                    be32(&d[1..]) & 0xFF_FFFF
+                ),
+                0x10 => eprintln!(
+                    "gxlog: XF load {:#06x} (+{})",
+                    be32(&d[1..]) & 0xFFFF,
+                    (be32(&d[1..]) >> 16) + 1
+                ),
+                0x08 => eprintln!("gxlog: CP {:#04x} <- {:#010x}", d[1], be32(&d[2..])),
+                0x80..=0xBF => eprintln!(
+                    "gxlog: draw op {op:#04x} count {}",
+                    u16::from_be_bytes([d[1], d[2]])
+                ),
+                _ => eprintln!("gxlog: op {op:#04x}"),
+            }
+        }
         match op {
             0x00 | 0x48 => Step::Done(1),
             0x08 => {

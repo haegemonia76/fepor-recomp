@@ -18,6 +18,8 @@ pub struct Trace {
     /// offset happened, so a crash/watchdog report lists the code that ran after it.
     mark_di: Option<u32>,
     pub mark: Option<usize>,
+    /// The first calls after the mark, in order.
+    pub after_mark: Vec<u32>,
 }
 
 impl Trace {
@@ -41,6 +43,7 @@ impl Trace {
                 .ok()
                 .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
             mark: None,
+            after_mark: Vec::new(),
         }
     }
 
@@ -52,6 +55,9 @@ impl Trace {
     }
 
     pub fn enter(&mut self, addr: u32) {
+        if self.mark.is_some() && self.after_mark.len() < 6000 {
+            self.after_mark.push(addr);
+        }
         if self.seen.insert(addr) {
             self.first_seen.push(addr);
         }

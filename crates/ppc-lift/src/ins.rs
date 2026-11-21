@@ -802,6 +802,11 @@ impl<'a> Fx<'a> {
                         self.emit(format!("ctr = {rs};"));
                     }
                     22 => self.emit(format!("fepor_mtdec({rs});")),
+                    923 => {
+                        // DMA_L: the locked-cache DMA starts when the trigger bit is written
+                        self.emit(format!("c.spr[923] = {rs};"));
+                        self.emit("fepor_lc_dma(&c);".to_string());
+                    }
                     n => self.emit(format!("c.spr[{n}] = {rs};")),
                 }
             }

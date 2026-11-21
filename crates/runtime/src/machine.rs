@@ -16,6 +16,8 @@ pub struct Machine {
     pub started: Instant,
     /// Function entries seen (interrupt polling cadence).
     pub enter_count: u32,
+    /// CPU-wide SPRs carried between guest threads (see `hle::CPU_SPRS`).
+    pub cpu_sprs: [u32; 7],
     /// Time base value at which the decrementer next expires (set by `mtdec`).
     pub dec_deadline: Option<u64>,
 }
@@ -28,6 +30,7 @@ impl Machine {
             trace: Trace::from_env(),
             started: Instant::now(),
             enter_count: 0,
+            cpu_sprs: [0; 7],
             dec_deadline: None,
         }
     }

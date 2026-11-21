@@ -179,6 +179,7 @@ pub fn wgsl(s: &RenderState) -> String {
     ];
 
     for n in 0..s.num_tev_stages as usize {
+        o.push_str("  {\n");
         let st = &s.tev[n];
         let (ce, ae) = (st.color_env, st.alpha_env);
         let _ = writeln!(o, "  // stage {n}");
@@ -319,6 +320,7 @@ pub fn wgsl(s: &RenderState) -> String {
             REGS[cdest as usize], REGS[cdest as usize], REGS[cdest as usize]
         );
         let _ = writeln!(o, "  {}.a = ares;", REGS[adest as usize]);
+        o.push_str("  }\n");
     }
 
     // alpha test: comp0/ref0 and comp1/ref1 combined with and/or/xor/xnor

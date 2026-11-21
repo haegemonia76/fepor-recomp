@@ -209,6 +209,20 @@ impl Hw {
         self.pe_finish_pending |= finish;
     }
 
+    /// Locked-cache DMA (`mtspr DMA_L` with the trigger bit): `blocks` 32-byte blocks between main memory
+    /// and the locked cache; `load` copies memory into the cache.
+    pub fn lc_dma(&mut self, mem: u32, lc: u32, blocks: usize, load: bool, ram: &mut [u8]) {
+        let (m, l) = ((mem & 0x03FF_FFFF) as usize, (lc & 0x3FFF) as usize);
+        let n = (blocks * 32)
+            .min(LOCKED_SIZE - l)
+            .min(ram.len().saturating_sub(m));
+        if load {
+            self.locked[l..l + n].copy_from_slice(&ram[m..m + n]);
+        } else {
+            ram[m..m + n].copy_from_slice(&self.locked[l..l + n]);
+        }
+    }
+
     /// Replace the default (counting) video backend.
     pub fn set_sink(&mut self, sink: Box<dyn Sink>) {
         self.sink = sink;
