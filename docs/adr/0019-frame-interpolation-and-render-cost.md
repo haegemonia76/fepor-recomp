@@ -32,6 +32,14 @@ build with symbols showed `wgpu` buffer tracking and the driver's buffer-list ha
 - Per-thread scheduler condvars (one host thread wake per guest switch instead of all).
 - Stale parked threads are dropped when OSCreateThread rewrites the context they were parked on.
 
+- **Internal resolution (`FEPOR_RES=n`, 1..4).** Colour/depth targets and EFB-to-texture copies are
+  `n` times the GameCube's 640x528; viewport and scissor scale with them. Geometry and 3D edges get
+  sharper; textures and the 2D UI (bitmaps) stay at their native detail. Verified at 3x with a headless
+  dump (1824x1344 for the 608x448 frame).
+- **Aspect (`FEPOR_ASPECT=fit|stretch|W:H`).** `fit` (default) letterboxes to the frame's 4:3, `stretch`
+  fills the window, `16:9` shows the 4:3 picture stretched into a 16:9 box. There is no true widescreen:
+  the game's projection is 4:3 and extending it would change what is visible (and break the UI).
+
 ## Consequences
 
 - Interpolation is an option for now (env var); the in-game overlay (#20) will own it.
