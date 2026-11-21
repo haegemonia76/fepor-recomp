@@ -144,7 +144,11 @@ impl Hw {
                 }
             }
             if self.trace_vi && self.retraces % 60 == 0 {
-                eprintln!("vi: {} retraces", self.retraces);
+                eprintln!(
+                    "vi: {} retraces, {} thread switches",
+                    self.retraces,
+                    crate::sched::switches()
+                );
             }
         }
     }

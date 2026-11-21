@@ -63,6 +63,25 @@ impl Trace {
         }
         self.ring[self.next % RING] = addr;
         self.next += 1;
+        if self.next.is_multiple_of(1 << 24) {
+            self.print_hot();
+        }
+    }
+
+    /// The most frequent callees among the last `RING` entries: where the guest spends its time.
+    fn print_hot(&self) {
+        let mut h: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for a in &self.ring {
+            *h.entry(*a).or_default() += 1;
+        }
+        let mut v: Vec<_> = h.into_iter().collect();
+        v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let top: Vec<String> = v
+            .iter()
+            .take(10)
+            .map(|(a, n)| format!("{a:08x}x{n}"))
+            .collect();
+        eprintln!("hot: {}", top.join(" "));
     }
 
     /// The most recent function entries, oldest first.

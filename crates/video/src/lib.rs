@@ -53,13 +53,68 @@ struct Dump {
     every: u64,
 }
 
+const VBUF_SIZE: usize = 16 << 20;
+const IBUF_SIZE: usize = 8 << 20;
+const UBUF_SIZE: usize = 4 << 20;
+const UNIFORM_BYTES: usize = tev::UNIFORM_FLOATS * 4;
+/// Dynamic uniform offsets must be 256-aligned.
+const UNIFORM_STRIDE: usize = UNIFORM_BYTES.div_ceil(256) * 256;
+
+/// Texture bind group identity: the view pointers and the sampler state of the eight maps.
+type TexBindKey = ([usize; 8], [(u8, u8, bool, bool); 8]);
+
+/// Per-submit draw data: filled on the CPU while draws are recorded, uploaded once before the submit.
+struct Stream {
+    vbuf: wgpu::Buffer,
+    ibuf: wgpu::Buffer,
+    ubuf: wgpu::Buffer,
+    ubind: wgpu::BindGroup,
+    vdata: Vec<u8>,
+    idata: Vec<u8>,
+    udata: Vec<u8>,
+}
+
+impl Stream {
+    fn new(device: &wgpu::Device, uniform_layout: &wgpu::BindGroupLayout) -> Stream {
+        let buf = |size: usize, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gx stream"),
+                size: size as u64,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let ubuf = buf(UBUF_SIZE, wgpu::BufferUsages::UNIFORM);
+        let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tev uniforms"),
+            layout: uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &ubuf,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(UNIFORM_BYTES as u64),
+                }),
+            }],
+        });
+        Stream {
+            vbuf: buf(VBUF_SIZE, wgpu::BufferUsages::VERTEX),
+            ibuf: buf(IBUF_SIZE, wgpu::BufferUsages::INDEX),
+            ubuf,
+            ubind,
+            vdata: Vec::new(),
+            idata: Vec::new(),
+            udata: Vec::new(),
+        }
+    }
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     efb: wgpu::Texture,
     efb_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
-    uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     shaders: HashMap<u64, wgpu::ShaderModule>,
@@ -69,6 +124,10 @@ pub struct Renderer {
     efb_textures: Vec<EfbTexture>,
     white: Rc<wgpu::TextureView>,
     encoder: Option<wgpu::CommandEncoder>,
+    /// The open render pass: consecutive draws share it until something else needs the encoder.
+    pass: Option<wgpu::RenderPass<'static>>,
+    stream: Stream,
+    tex_binds: HashMap<TexBindKey, (wgpu::BindGroup, Vec<Rc<wgpu::TextureView>>)>,
     pending_clear: Option<([f64; 4], f32)>,
     frame: u64,
     dump: Option<Dump>,
@@ -172,8 +231,8 @@ impl Renderer {
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: std::num::NonZeroU64::new(UNIFORM_BYTES as u64),
                 },
                 count: None,
             }],
@@ -206,6 +265,7 @@ impl Renderer {
             bind_group_layouts: &[&uniform_layout, &texture_layout],
             push_constant_ranges: &[],
         });
+        let stream = Stream::new(&device, &uniform_layout);
 
         let white_tex = device.create_texture_with_data(
             &queue,
@@ -244,7 +304,6 @@ impl Renderer {
             efb,
             efb_view,
             depth_view,
-            uniform_layout,
             texture_layout,
             pipeline_layout,
             shaders: HashMap::new(),
@@ -254,6 +313,9 @@ impl Renderer {
             efb_textures: Vec::new(),
             white,
             encoder: None,
+            pass: None,
+            stream,
+            tex_binds: HashMap::new(),
             pending_clear: Some(([0.0; 4], 1.0)),
             frame: 0,
             dump,
@@ -273,10 +335,23 @@ impl Renderer {
         })
     }
 
+    fn end_pass(&mut self) {
+        self.pass = None;
+    }
+
     fn flush(&mut self) {
+        self.end_pass();
         if let Some(e) = self.encoder.take() {
+            let s = &mut self.stream;
+            self.queue.write_buffer(&s.vbuf, 0, &s.vdata);
+            self.queue.write_buffer(&s.ibuf, 0, &s.idata);
+            self.queue.write_buffer(&s.ubuf, 0, &s.udata);
+            s.vdata.clear();
+            s.idata.clear();
+            s.udata.clear();
             self.queue.submit([e.finish()]);
         }
+        self.tex_binds.clear();
     }
 
     fn sampler(&mut self, d: &TextureDesc) -> wgpu::Sampler {
@@ -592,35 +667,27 @@ impl Renderer {
         let shader_hash = hash_str(&src);
         let pipeline = self.pipeline(&state, shader_hash, &src, topology);
 
-        let vbuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let ibuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-        let ubuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&tev::uniforms(&state)),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let ubind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: ubuf.as_entire_binding(),
-            }],
-        });
+        // Draw data goes into per-submit staging vectors, uploaded once in `flush` (one buffer each, not
+        // three buffers per draw: the buffer count dominated the frame time).
+        let vbytes: &[u8] = bytemuck::cast_slice(&verts);
+        let ibytes: &[u8] = bytemuck::cast_slice(&indices);
+        if vbytes.len() > VBUF_SIZE || ibytes.len() > IBUF_SIZE {
+            return;
+        }
+        let s = &self.stream;
+        if s.vdata.len() + vbytes.len() > VBUF_SIZE
+            || s.idata.len() + ibytes.len() > IBUF_SIZE
+            || s.udata.len() + UNIFORM_STRIDE > UBUF_SIZE
+        {
+            self.flush();
+        }
+        let s = &mut self.stream;
+        let (voff, ioff, uoff) = (s.vdata.len(), s.idata.len(), s.udata.len());
+        s.vdata.extend_from_slice(vbytes);
+        s.idata.extend_from_slice(ibytes);
+        s.udata
+            .extend_from_slice(bytemuck::cast_slice(&tev::uniforms(&state)));
+        s.udata.resize(uoff + UNIFORM_STRIDE, 0);
 
         // textures: only the maps a stage reads are fetched
         let mut used = [false; 8];
@@ -638,63 +705,83 @@ impl Renderer {
                 }
             })
             .collect();
-        let samplers: Vec<wgpu::Sampler> =
-            (0..8).map(|m| self.sampler(&state.textures[m])).collect();
-        let mut entries = Vec::new();
-        for m in 0..8 {
-            entries.push(wgpu::BindGroupEntry {
-                binding: m as u32,
-                resource: wgpu::BindingResource::TextureView(&views[m]),
+        let key: TexBindKey = (
+            std::array::from_fn(|m| Rc::as_ptr(&views[m]) as usize),
+            std::array::from_fn(|m| {
+                let t = &state.textures[m];
+                (t.wrap_s, t.wrap_t, t.mag_linear, t.min_linear)
+            }),
+        );
+        if !self.tex_binds.contains_key(&key) {
+            let samplers: Vec<wgpu::Sampler> =
+                (0..8).map(|m| self.sampler(&state.textures[m])).collect();
+            let mut entries = Vec::new();
+            for m in 0..8 {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: m as u32,
+                    resource: wgpu::BindingResource::TextureView(&views[m]),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 8 + m as u32,
+                    resource: wgpu::BindingResource::Sampler(&samplers[m]),
+                });
+            }
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.texture_layout,
+                entries: &entries,
             });
-            entries.push(wgpu::BindGroupEntry {
-                binding: 8 + m as u32,
-                resource: wgpu::BindingResource::Sampler(&samplers[m]),
-            });
+            // the views stay alive with the bind group, so their pointers stay unique keys
+            self.tex_binds.insert(key, (bind, views));
         }
-        let tbind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.texture_layout,
-            entries: &entries,
-        });
 
         let clear = self.pending_clear.take();
-        let (efb_view, depth_view) = (&self.efb_view, &self.depth_view);
-        let enc = self
-            .encoder
-            .get_or_insert_with(|| self.device.create_command_encoder(&Default::default()));
-        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("gx"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: efb_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: match clear {
-                        Some((c, _)) => wgpu::LoadOp::Clear(wgpu::Color {
-                            r: c[0],
-                            g: c[1],
-                            b: c[2],
-                            a: c[3],
+        if clear.is_some() {
+            self.pass = None; // a clear is a load op: it needs a fresh pass
+        }
+        if self.pass.is_none() {
+            let (efb_view, depth_view) = (&self.efb_view, &self.depth_view);
+            let enc = self
+                .encoder
+                .get_or_insert_with(|| self.device.create_command_encoder(&Default::default()));
+            self.pass = Some(
+                enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("gx"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: efb_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: match clear {
+                                Some((c, _)) => wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: c[0],
+                                    g: c[1],
+                                    b: c[2],
+                                    a: c[3],
+                                }),
+                                None => wgpu::LoadOp::Load,
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: match clear {
+                                Some((_, z)) => wgpu::LoadOp::Clear(z),
+                                None => wgpu::LoadOp::Load,
+                            },
+                            store: wgpu::StoreOp::Store,
                         }),
-                        None => wgpu::LoadOp::Load,
-                    },
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: match clear {
-                        Some((_, z)) => wgpu::LoadOp::Clear(z),
-                        None => wgpu::LoadOp::Load,
-                    },
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+                .forget_lifetime(),
+            );
+        }
+        let pass = self.pass.as_mut().expect("render pass");
         let [vx, vy, vw, vh, _, _] = state.viewport;
         let (x0, y0) = (vx.max(0.0), vy.max(0.0));
         let (x1, y1) = (
@@ -722,14 +809,25 @@ impl Renderer {
             );
         }
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &ubind, &[]);
-        pass.set_bind_group(1, &tbind, &[]);
-        pass.set_vertex_buffer(0, vbuf.slice(..));
-        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_bind_group(0, &self.stream.ubind, &[uoff as u32]);
+        pass.set_bind_group(1, &self.tex_binds[&key].0, &[]);
+        pass.set_vertex_buffer(
+            0,
+            self.stream
+                .vbuf
+                .slice(voff as u64..(voff + vbytes.len()) as u64),
+        );
+        pass.set_index_buffer(
+            self.stream
+                .ibuf
+                .slice(ioff as u64..(ioff + ibytes.len()) as u64),
+            wgpu::IndexFormat::Uint32,
+        );
         pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
     }
 
     fn clear_pass(&mut self, color: [f64; 4], z: f32, color_update: bool, z_update: bool) {
+        self.end_pass();
         let efb_view = &self.efb_view;
         let depth_view = &self.depth_view;
         let enc = self
@@ -872,6 +970,7 @@ impl Renderer {
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
+            self.end_pass();
             let efb = &self.efb;
             let enc = self
                 .encoder

@@ -278,13 +278,17 @@ pub extern "C" fn fepor_enter(addr: u32) {
         // SAFETY: the running thread's context.
         let c = unsafe { &*crate::sched::current_context() };
         eprintln!(
-            "watch: {addr:08x} thread#{} r3={:08x} r4={:08x} r5={:08x} r6={:08x} lr={:08x}",
+            "watch: {addr:08x} thread#{} r3={:08x} r4={:08x} r5={:08x} r6={:08x} lr={:08x} f1..f4={} {} {} {}",
             crate::sched::current(),
             c.r[3],
             c.r[4],
             c.r[5],
             c.r[6],
-            c.lr
+            c.lr,
+            c.f[1].ps0,
+            c.f[2].ps0,
+            c.f[3].ps0,
+            c.f[4].ps0
         );
     }
     // Function entry is the safe point where interrupts are delivered (registers are synced here).

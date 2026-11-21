@@ -6,7 +6,7 @@
 //! point) or the context the interrupt handler saved for it (resume where it was interrupted).
 
 use std::collections::HashMap;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::context::Context;
 
@@ -23,6 +23,7 @@ struct Thread {
     last_save: Option<u32>,
     irq_ctx: Option<u32>,
     park: Option<(u32, ParkKind)>,
+    cv: Arc<Condvar>,
 }
 
 struct State {
@@ -35,7 +36,12 @@ struct State {
 unsafe impl Send for State {}
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
-static CV: Condvar = Condvar::new();
+static SWITCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Host thread switches so far (a cost indicator: each one is two futex operations).
+pub fn switches() -> u64 {
+    SWITCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -51,6 +57,7 @@ pub fn init(main_ctx: *mut Context) {
             last_save: None,
             irq_ctx: None,
             park: None,
+            cv: Arc::new(Condvar::new()),
         }],
         running: 0,
         parked: HashMap::new(),
@@ -112,20 +119,27 @@ pub fn parked_at(ctx: u32) -> Option<usize> {
 /// The part of an OSContext a parked thread cannot change: PC, stack pointer, LR, CR and r3 as saved.
 fn fingerprint(ctx: u32) -> u64 {
     let m = crate::machine::machine();
-    [0x198, 0x4, 0x84, 0x80, 0xC].iter().fold(0xcbf2_9ce4_8422_2325u64, |h, off| (h ^ m.read_u32(ctx + off) as u64).wrapping_mul(0x100_0000_01b3))
+    [0x198, 0x4, 0x84, 0x80, 0xC]
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, off| {
+            (h ^ m.read_u32(ctx + off) as u64).wrapping_mul(0x100_0000_01b3)
+        })
 }
 
 fn wait_for_turn(me: usize) {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let cv = g.as_ref().unwrap().threads[me].cv.clone();
     while g.as_ref().unwrap().running != me {
-        g = CV.wait(g).unwrap_or_else(|e| e.into_inner());
+        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
     }
     crate::abi::set_current(g.as_ref().unwrap().threads[me].ctx);
 }
 
 /// Park `me` (resumable from `token`, if any) and run `other`. Returns when `me` is resumed.
+/// Only `other` is woken: a shared condvar would wake every parked host thread on each switch.
 pub fn switch_to(me: usize, other: usize, token: Option<(u32, ParkKind)>) {
-    with(|s| {
+    SWITCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let wake = with(|s| {
         if let Some((ctx, kind)) = token {
             s.threads[me].park = Some((ctx, kind));
             s.parked.insert(ctx, (me, fingerprint(ctx)));
@@ -134,8 +148,9 @@ pub fn switch_to(me: usize, other: usize, token: Option<(u32, ParkKind)>) {
             s.parked.remove(&ctx);
         }
         s.running = other;
+        s.threads[other].cv.clone()
     });
-    CV.notify_all();
+    wake.notify_one();
     wait_for_turn(me);
 }
 
@@ -154,6 +169,7 @@ pub fn spawn_and_switch(
             last_save: None,
             irq_ctx: None,
             park: None,
+            cv: Arc::new(Condvar::new()),
         });
         s.threads.len() - 1
     });
