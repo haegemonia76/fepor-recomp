@@ -410,6 +410,10 @@ impl Ax {
                         "ax: frame {} voices run {} (cmdlist {} words)",
                         self.frames, self.voices_run, self.cmd_size
                     );
+                    eprintln!(
+                        "ax: cmdlist {:04x?}",
+                        &self.cmdlist[..self.cmd_size.min(512)]
+                    );
                     self.voices_run = 0;
                 }
                 self.state = MailState::WaitingForNextTask;

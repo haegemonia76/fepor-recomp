@@ -31,6 +31,8 @@ const PI_INTSR: u32 = 0x3000;
 const PI_INTMSK: u32 = 0x3004;
 /// VI display interrupt registers DI0..DI3.
 const VI_DI: u32 = 0x2030;
+/// VI display configuration register (enable in bit 0, video format in bits 8-9).
+const VI_DCR: u32 = 0x2002;
 const VI_DI_END: u32 = 0x2040;
 const VI_INT_STATUS: u32 = 1 << 31;
 const VI_INT_ENABLE: u32 = 1 << 28;
@@ -352,6 +354,10 @@ impl Hw {
                 size * 8,
                 block_name(off)
             );
+        }
+        if off == VI_DCR && size == 2 && value & 1 != 0 {
+            // DCR.FMT: 1 = PAL timing (50 Hz); NTSC, MPAL and EURGB60 all run at 59.94 Hz
+            self.set_video_mode(value >> 8 & 3 == 1);
         }
         if off >= FIFO_START {
             // the write-gather pipe: big-endian bytes, handed to the command processor in 32-byte bursts
