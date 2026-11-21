@@ -582,6 +582,7 @@ version = "0.1.0"
 dependencies = [
  "fepor-audio",
  "fepor-core",
+ "fepor-input",
  "fepor-runtime",
  "fepor-video",
  "winit",
@@ -590,6 +591,17 @@ dependencies = [
 [[package]]
 name = "fepor-gx"
 version = "0.1.0"
+
+[[package]]
+name = "fepor-input"
+version = "0.1.0"
+dependencies = [
+ "fepor-runtime",
+ "sdl3",
+ "serde",
+ "tempfile",
+ "toml",
+]
 
 [[package]]
 name = "fepor-ppc-lift"
