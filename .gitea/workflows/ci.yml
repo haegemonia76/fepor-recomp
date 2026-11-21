@@ -1,19 +1,33 @@
 name: ci
 on: [push, pull_request]
 
+env:
+  FEPOR_REQUIRE_CLANG: "1"
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # x64 and arm64: the arm64 entries run the same instruction vectors natively.
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Rust build and tests
+      - name: Install clang, cmake, ninja (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build
+      - name: Install clang, cmake, ninja (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: choco install llvm cmake ninja -y --no-progress
+      - name: Install cmake, ninja (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: brew install cmake ninja
+      - name: Rust build and tests (lifter, instruction vectors)
         run: cargo test --workspace
-      - name: Runtime configure and build
+      - name: Runtime build and helper tests
         run: |
-          cmake -S runtime -B build/runtime -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/runtime --config Release
+          cmake -S runtime -B build/runtime -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+          cmake --build build/runtime
+          ctest --test-dir build/runtime --output-on-failure

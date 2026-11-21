@@ -237,10 +237,48 @@ inline v2d round_single(v2d x) { return __builtin_convertvector(__builtin_conver
 inline v2d fill(double x) { return v2d{x, x}; }
 inline double force25(double d) {
     uint64_t b = std::bit_cast<uint64_t>(d);
+    if ((b >> 52 & 0x7FF) == 0x7FF) return d;  // inf/NaN pass through unchanged
     uint64_t integral = b & 0xFFFFFFFFF8000000ull;
     return std::bit_cast<double>(integral + (b & 0x8000000ull));
 }
 inline v2d force25(v2d d) { return v2d{force25(d.x), force25(d.y)}; }
+
+// Arithmetic with PowerPC NaN rules: a NaN operand is returned quieted (priority A, B, C), an invalid
+// operation produces the default NaN 0x7FF8000000000000. Host defaults differ (x86 yields 0xFFF8...).
+inline double quiet_nan(double x) { return std::bit_cast<double>(std::bit_cast<uint64_t>(x) | 0x0008000000000000ull); }
+inline double default_nan() { return std::bit_cast<double>(0x7FF8000000000000ull); }
+inline double nan_fix(double r, double a, double b) {
+    if (__builtin_expect(!std::isnan(r), 1)) return r;
+    return std::isnan(a) ? quiet_nan(a) : std::isnan(b) ? quiet_nan(b) : default_nan();
+}
+inline double nan_fix(double r, double a, double b, double c) {
+    if (__builtin_expect(!std::isnan(r), 1)) return r;
+    return std::isnan(a) ? quiet_nan(a) : std::isnan(b) ? quiet_nan(b) : std::isnan(c) ? quiet_nan(c) : default_nan();
+}
+inline double pfadd(double a, double b) { return nan_fix(a + b, a, b); }
+inline double pfsub(double a, double b) { return nan_fix(a - b, a, b); }
+inline double pfmul(double a, double c) { return nan_fix(a * c, a, c); }
+inline double pfdiv(double a, double b) { return nan_fix(a / b, a, b); }
+/// Fused a*c + b (single rounding, as on Gekko). NaN priority follows the instruction: A, B, C.
+inline double pfmadd(double a, double c, double b) { return nan_fix(std::fma(a, c, b), a, b, c); }
+inline double pfmsub(double a, double c, double b) { return nan_fix(std::fma(a, c, -b), a, b, c); }
+
+#define FEPOR_PS2(name, expr)                                  \
+    inline v2d name(v2d a, v2d b) {                            \
+        auto lane = [](double x, double y) { return expr; };   \
+        return v2d{lane(a.x, b.x), lane(a.y, b.y)};            \
+    }
+FEPOR_PS2(ps_add, round_single(pfadd(x, y)))
+FEPOR_PS2(ps_sub, round_single(pfsub(x, y)))
+FEPOR_PS2(ps_div, round_single(pfdiv(x, y)))
+#undef FEPOR_PS2
+inline v2d ps_mul(v2d a, v2d c) { return v2d{round_single(pfmul(a.x, force25(c.x))), round_single(pfmul(a.y, force25(c.y)))}; }
+inline v2d ps_madd(v2d a, v2d c, v2d b) {
+    return v2d{round_single(pfmadd(a.x, force25(c.x), b.x)), round_single(pfmadd(a.y, force25(c.y), b.y))};
+}
+inline v2d ps_msub(v2d a, v2d c, v2d b) {
+    return v2d{round_single(pfmsub(a.x, force25(c.x), b.x)), round_single(pfmsub(a.y, force25(c.y), b.y))};
+}
 
 double fres(double v);
 double frsqrte(double v);
@@ -281,9 +319,28 @@ inline CRF fcmp(double a, double b) {
 }
 inline double fsel(double a, double b, double c) { return a >= -0.0 ? c : b; }
 
-inline double ldfs(uint8_t* m, uint32_t ea) { return (double)std::bit_cast<float>(ld32(m, ea)); }
+/// lfs conversion: exact, and NaN payloads (including signalling NaNs) are kept as is.
+inline double single_to_double(uint32_t x) {
+    if ((x >> 23 & 0xFF) == 0xFF)
+        return std::bit_cast<double>((uint64_t)(x & 0x80000000u) << 32 | 0x7FF0000000000000ull | (uint64_t)(x & 0x7FFFFF) << 29);
+    return (double)std::bit_cast<float>(x);
+}
+/// stfs conversion: the mantissa is truncated (not rounded); values below the single range become
+/// denormals or zero. Out-of-range exponents wrap like the hardware does.
+inline uint32_t double_to_single(double d) {
+    uint64_t x = std::bit_cast<uint64_t>(d);
+    uint32_t exp = (uint32_t)(x >> 52 & 0x7FF);
+    if (exp > 896 || (x & 0x7FFFFFFFFFFFFFFFull) == 0) return (uint32_t)((x >> 32 & 0xC0000000u) | (x >> 29 & 0x3FFFFFFFu));
+    if (exp >= 874) {
+        uint64_t t = (x & 0x000FFFFFFFFFFFFFull) | 0x0010000000000000ull;
+        t >>= 926 - exp;  // denormal single: mantissa = 1.f * 2^(exp - 874), truncated
+        return (uint32_t)((x >> 32 & 0x80000000u) | t);
+    }
+    return (uint32_t)(x >> 32 & 0x80000000u);
+}
+inline double ldfs(uint8_t* m, uint32_t ea) { return single_to_double(ld32(m, ea)); }
 inline double ldfd(uint8_t* m, uint32_t ea) { return std::bit_cast<double>(ld64(m, ea)); }
-inline void stfs(uint8_t* m, uint32_t ea, double v) { st32(m, ea, std::bit_cast<uint32_t>((float)v)); }
+inline void stfs(uint8_t* m, uint32_t ea, double v) { st32(m, ea, double_to_single(v)); }
 inline void stfd(uint8_t* m, uint32_t ea, double v) { st64(m, ea, std::bit_cast<uint64_t>(v)); }
 inline void stfiwx(uint8_t* m, uint32_t ea, double v) { st32(m, ea, (uint32_t)std::bit_cast<uint64_t>(v)); }
 
@@ -315,7 +372,7 @@ inline v2d psq_ld(uint8_t* m, uint32_t ea, uint32_t gqr, uint32_t w) {
 inline uint32_t quant(double v, uint32_t type, int scale, uint32_t* size) {
     if (type < 4 || type > 7) {
         *size = 4;
-        return std::bit_cast<uint32_t>((float)v);
+        return double_to_single(v);
     }
     v = std::ldexp(v, scale);
     switch (type) {

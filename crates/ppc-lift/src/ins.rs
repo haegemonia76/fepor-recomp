@@ -799,14 +799,14 @@ impl<'a> Fx<'a> {
             Fadd | Fsub | Fmul | Fdiv | Fadds | Fsubs | Fmuls | Fdivs => {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
                 let (e, single) = match ins.op {
-                    Fadd => (format!("{ra}.x + {rb}.x"), false),
-                    Fsub => (format!("{ra}.x - {rb}.x"), false),
-                    Fmul => (format!("{ra}.x * {rc}.x"), false),
-                    Fdiv => (format!("{ra}.x / {rb}.x"), false),
-                    Fadds => (format!("{ra}.x + {rb}.x"), true),
-                    Fsubs => (format!("{ra}.x - {rb}.x"), true),
-                    Fmuls => (format!("{ra}.x * force25({rc}.x)"), true),
-                    _ => (format!("{ra}.x / {rb}.x"), true),
+                    Fadd => (format!("pfadd({ra}.x, {rb}.x)"), false),
+                    Fsub => (format!("pfsub({ra}.x, {rb}.x)"), false),
+                    Fmul => (format!("pfmul({ra}.x, {rc}.x)"), false),
+                    Fdiv => (format!("pfdiv({ra}.x, {rb}.x)"), false),
+                    Fadds => (format!("pfadd({ra}.x, {rb}.x)"), true),
+                    Fsubs => (format!("pfsub({ra}.x, {rb}.x)"), true),
+                    Fmuls => (format!("pfmul({ra}.x, force25({rc}.x))"), true),
+                    _ => (format!("pfdiv({ra}.x, {rb}.x)"), true),
                 };
                 if single {
                     self.emit(format!("{x} = fill(round_single({e}));"));
@@ -820,12 +820,12 @@ impl<'a> Fx<'a> {
                 let single = matches!(ins.op, Fmadds | Fmsubs | Fnmadds | Fnmsubs);
                 let c = if single { format!("force25({rc}.x)") } else { format!("{rc}.x") };
                 let (op, neg) = match ins.op {
-                    Fmadd | Fmadds => ("+", false),
-                    Fmsub | Fmsubs => ("-", false),
-                    Fnmadd | Fnmadds => ("+", true),
-                    _ => ("-", true),
+                    Fmadd | Fmadds => ("pfmadd", false),
+                    Fmsub | Fmsubs => ("pfmsub", false),
+                    Fnmadd | Fnmadds => ("pfmadd", true),
+                    _ => ("pfmsub", true),
                 };
-                let mut e = format!("{ra}.x * {c} {op} {rb}.x");
+                let mut e = format!("{op}({ra}.x, {c}, {rb}.x)");
                 if single {
                     e = format!("round_single({e})");
                 }
@@ -879,14 +879,14 @@ impl<'a> Fx<'a> {
             PsAdd | PsSub | PsMul | PsDiv | PsMadd | PsMsub | PsNmadd | PsNmsub => {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
                 let e = match ins.op {
-                    PsAdd => format!("round_single({ra} + {rb})"),
-                    PsSub => format!("round_single({ra} - {rb})"),
-                    PsMul => format!("round_single({ra} * force25({rc}))"),
-                    PsDiv => format!("round_single({ra} / {rb})"),
-                    PsMadd => format!("round_single({ra} * force25({rc}) + {rb})"),
-                    PsMsub => format!("round_single({ra} * force25({rc}) - {rb})"),
-                    PsNmadd => format!("neg_nonan(round_single({ra} * force25({rc}) + {rb}))"),
-                    _ => format!("neg_nonan(round_single({ra} * force25({rc}) - {rb}))"),
+                    PsAdd => format!("ps_add({ra}, {rb})"),
+                    PsSub => format!("ps_sub({ra}, {rb})"),
+                    PsMul => format!("ps_mul({ra}, {rc})"),
+                    PsDiv => format!("ps_div({ra}, {rb})"),
+                    PsMadd => format!("ps_madd({ra}, {rc}, {rb})"),
+                    PsMsub => format!("ps_msub({ra}, {rc}, {rb})"),
+                    PsNmadd => format!("neg_nonan(ps_madd({ra}, {rc}, {rb}))"),
+                    _ => format!("neg_nonan(ps_msub({ra}, {rc}, {rb}))"),
                 };
                 self.emit(format!("{x} = {e};"));
                 self.rc1(ins);
@@ -895,16 +895,16 @@ impl<'a> Fx<'a> {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
                 let lane = if matches!(ins.op, PsMuls0 | PsMadds0) { "xx" } else { "yy" };
                 let e = if matches!(ins.op, PsMuls0 | PsMuls1) {
-                    format!("round_single({ra} * force25({rc}.{lane}))")
+                    format!("ps_mul({ra}, {rc}.{lane})")
                 } else {
-                    format!("round_single({ra} * force25({rc}.{lane}) + {rb})")
+                    format!("ps_madd({ra}, {rc}.{lane}, {rb})")
                 };
                 self.emit(format!("{x} = {e};"));
                 self.rc1(ins);
             }
             PsSum0 | PsSum1 => {
                 let (x, ra, rb, rc) = (self.f(fd), self.f(fa), self.f(fb), self.f(fc));
-                let sum = format!("round_single({ra}.x + {rb}.y)");
+                let sum = format!("round_single(pfadd({ra}.x, {rb}.y))");
                 let e = if ins.op == PsSum0 { format!("v2d{{{sum}, {rc}.y}}") } else { format!("v2d{{{rc}.x, {sum}}}") };
                 self.emit(format!("{x} = {e};"));
                 self.rc1(ins);

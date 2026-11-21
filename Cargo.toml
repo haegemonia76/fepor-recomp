@@ -10,7 +10,7 @@ license = "GPL-2.0-or-later"
 [workspace.dependencies]
 fepor-core = { path = "crates/core" }
 fepor-ppc-lift = { path = "crates/ppc-lift" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 sha1 = "0.10"

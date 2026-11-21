@@ -8,3 +8,4 @@ license.workspace = true
 fepor-core.workspace = true
 fepor-ppc-lift.workspace = true
 clap.workspace = true
+ppc750cl.workspace = true

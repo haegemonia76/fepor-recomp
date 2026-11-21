@@ -199,6 +199,7 @@ dependencies = [
  "clap",
  "fepor-core",
  "fepor-ppc-lift",
+ "ppc750cl",
 ]
 
 [[package]]

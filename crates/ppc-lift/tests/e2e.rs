@@ -28,8 +28,11 @@ fn dol(text: &[u32], data: &[u32]) -> Dol {
     Dol::parse(h).unwrap()
 }
 
+/// CI sets FEPOR_REQUIRE_CLANG so a missing compiler fails instead of silently skipping.
 fn have_clang() -> bool {
-    Command::new("clang++").arg("--version").output().is_ok()
+    let found = Command::new("clang++").arg("--version").output().is_ok();
+    assert!(found || std::env::var_os("FEPOR_REQUIRE_CLANG").is_none(), "clang++ is required but not found");
+    found
 }
 
 /// Build the generated code plus `main_cpp` with clang and return the program's stdout.

@@ -19,6 +19,8 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **Virtual pad**: GameCube controller abstraction fed by the input layer (remapping, glyph sets Xbox/Nintendo/PlayStation).
 - **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler.
 - **Start / Origin**: a function start found by analysis and why (`Entry`, `Config`, `Call`, `TailCall`, `DataPointer`, `AddressLoad`, `Gap`). Untrusted origins are rejected when preceding code runs straight into them (mid-function labels).
+- **Data folder**: the single directory (`--data`, `RECOMPLAUNCHER_DATA`) where generated code, the build, saves, config, cache and logs live (ADR 0010).
+- **Prepare**: the setup step (`fepor-recomp prepare`) that builds the game from the player's copy; **profile**: `packaging/recomplauncher.json`, the RecompLauncher integration file.
 - **Config**: shared TOML file read by CLI and GUI (disc path, output dir, function/jump-table overrides, runtime options).
 - **Trace**: opt-in (`FEPOR_TRACE`) log of guest calls, hardware register writes and GX commands, comparable with Dolphin.
 - **Version table**: per-region address tables; only GFEP01 at first.

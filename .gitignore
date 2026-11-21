@@ -3,3 +3,5 @@
 /build/
 *.iso
 *.dol
+.venv-tools/
+.cache/
