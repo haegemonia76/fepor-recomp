@@ -13,6 +13,7 @@ pub mod hw;
 pub mod intr;
 pub mod machine;
 pub mod sched;
+pub mod si;
 pub mod trace;
 
 pub use context::Context;

@@ -9,6 +9,7 @@ use crate::ai::Ai;
 use crate::di::Di;
 use crate::dsp::Dsp;
 use crate::exi::Exi;
+use crate::si::Si;
 use fepor_gx::{Event, Gx, Sink};
 
 pub const PHYS_BASE: u32 = 0x0C00_0000;
@@ -23,6 +24,8 @@ const DSP_END: u32 = 0x5100;
 const EXI_START: u32 = 0x6800;
 const EXI_END: u32 = 0x6C00;
 const FIFO_START: u32 = 0x8000;
+const SI_START: u32 = 0x6400;
+const SI_END: u32 = 0x6500;
 const PI_CHIPID: u32 = 0x3024;
 const PI_INTSR: u32 = 0x3000;
 const PI_INTMSK: u32 = 0x3004;
@@ -44,6 +47,7 @@ pub struct Hw {
     dsp: Dsp,
     di: Di,
     ai: Ai,
+    pub si: Si,
     vi_di: [u32; 4],
     vi_next: Instant,
     vi_period: Duration,
@@ -92,6 +96,7 @@ impl Hw {
             dsp: Dsp::new(),
             di: Di::new(),
             ai: Ai::new(),
+            si: Si::new(),
             vi_di: [0; 4],
             vi_next: Instant::now(),
             vi_period: Duration::from_micros(16_683),
@@ -125,6 +130,7 @@ impl Hw {
         while now >= self.vi_next {
             self.vi_next += self.vi_period;
             self.retraces += 1;
+            self.si.retrace(self.retraces);
             for di in &mut self.vi_di {
                 if *di & VI_INT_ENABLE != 0 {
                     *di |= VI_INT_STATUS;
@@ -147,6 +153,9 @@ impl Hw {
         let mut cause = 0;
         if self.di.interrupt_pending() {
             cause |= 1 << 2;
+        }
+        if self.si.interrupt_pending() {
+            cause |= 1 << 3;
         }
         if self.dsp.interrupt_pending() {
             cause |= 1 << 6;
@@ -245,6 +254,8 @@ impl Hw {
         let off = Self::offset(ea);
         let v = if (EXI_START..EXI_END).contains(&off) {
             self.exi.read(off - EXI_START, size)
+        } else if (SI_START..SI_END).contains(&off) {
+            self.si.read(off - SI_START, size)
         } else if (DSP_START..DSP_END).contains(&off) {
             self.dsp.read(off - DSP_START, size)
         } else if (DI_START..DI_END).contains(&off) {
@@ -314,6 +325,8 @@ impl Hw {
             }
         } else if (EXI_START..EXI_END).contains(&off) {
             self.exi.write(off - EXI_START, value, ram);
+        } else if (SI_START..SI_END).contains(&off) {
+            self.si.write(off - SI_START, value, size);
         } else if (DSP_START..DSP_END).contains(&off) {
             self.dsp.write(off - DSP_START, value, size, ram);
         } else if (DI_START..DI_END).contains(&off) {

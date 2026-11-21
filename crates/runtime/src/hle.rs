@@ -123,7 +123,7 @@ pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
             let cp = unsafe { &mut *cp };
             let Some(f) = guest_function(entry) else {
                 die_str(&format!(
-                    "new thread entry {entry:#010x} has no generated function"
+                    "new thread entry {entry:#010x} (context {target:#010x}) has no generated function"
                 ))
             };
             run(f, cp);
