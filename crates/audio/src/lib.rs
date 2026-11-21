@@ -101,8 +101,14 @@ fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Resu
             }
         }
         if let Some(s) = &stream {
+            let queued = s.queued_bytes().unwrap_or(0);
+            if queued == 0 {
+                // start or underrun: refill a 60 ms cushion so that late frames from the guest do not crackle
+                let silence = vec![0i16; (rate as usize * 60 / 1000) * 2];
+                let _ = s.put_data_i16(&silence);
+            }
             // keep the queue short: drop audio when the device falls behind (about 200 ms)
-            if s.queued_bytes().unwrap_or(0) < (rate as i32 * 4 / 5) {
+            if queued < (rate as i32 * 4 / 5) {
                 let _ = s.put_data_i16(&samples);
             }
         }
