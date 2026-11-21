@@ -42,6 +42,7 @@ impl Presenter {
         device: &wgpu::Device,
         surface: wgpu::Surface<'static>,
         window: Arc<winit::window::Window>,
+        low_latency: bool,
     ) -> Presenter {
         let caps = surface.get_capabilities(adapter);
         // the EFB holds gamma-space values: write them as they are
@@ -57,7 +58,15 @@ impl Presenter {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: if low_latency {
+                // images are paced by the renderer: the present call must not wait for the display
+                [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+                    .into_iter()
+                    .find(|m| caps.present_modes.contains(m))
+                    .unwrap_or(wgpu::PresentMode::Fifo)
+            } else {
+                wgpu::PresentMode::Fifo
+            },
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],

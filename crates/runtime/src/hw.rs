@@ -156,6 +156,7 @@ impl Hw {
     /// Interrupt cause bits as the PI reports them.
     fn pi_cause(&mut self) -> u32 {
         self.vi_tick();
+        self.sink.tick();
         self.dsp.tick(self.ai.rate() as u32);
         if self.pe_finish_pending && self.pe_intsr & 4 == 0 {
             self.pe_finish_pending = false;

@@ -128,6 +128,9 @@ pub enum Event {
 /// Receives events together with main memory (textures are read from it).
 pub trait Sink {
     fn event(&mut self, event: Event, ram: &[u8], tluts: &Tluts);
+
+    /// Called often from the guest's poll points: lets a sink do timed work (interpolated frames).
+    fn tick(&mut self) {}
 }
 
 /// Palette memory: TLUT data by TMEM offset.

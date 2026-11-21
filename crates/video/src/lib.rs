@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
 use fepor_gx::state::{CopyEfb, DrawCall, Event, Primitive, RenderState, Sink, TextureDesc, Tluts};
@@ -109,6 +110,78 @@ impl Stream {
     }
 }
 
+/// One draw as it was submitted, with everything needed to submit it again with other vertices.
+struct RecDraw {
+    verts: Vec<GpuVertex>,
+    indices: Vec<u32>,
+    uniforms: [f32; tev::UNIFORM_FLOATS],
+    pipeline: wgpu::RenderPipeline,
+    tbind: wgpu::BindGroup,
+    viewport: [f32; 6],
+    scissor: [i32; 4],
+    /// Same shader, vertex/index counts and textures: the same object in the next frame.
+    sig: u64,
+}
+
+enum Rec {
+    Clear {
+        color: [f64; 4],
+        z: f32,
+        color_update: bool,
+        z_update: bool,
+    },
+    Draw(RecDraw),
+}
+
+/// The images still to be shown for one guest frame: `mult - 1` interpolated ones between `prev` and
+/// `cur`, then the real frame.
+struct Plan {
+    prev: Rc<Vec<Rec>>,
+    cur: Rc<Vec<Rec>>,
+    copy: CopyEfb,
+    start: Instant,
+    period: Duration,
+    /// The next image, 1-based.
+    j: u32,
+}
+
+fn mix(h: u64, v: u64) -> u64 {
+    (h ^ v).wrapping_mul(0x100_0000_01b3)
+}
+
+/// Vertices of `cur` moved `t` of the way from where `prev` had them. Anything that jumps across the
+/// screen (a cut, a teleport) or has no counterpart is left as it is in `cur`.
+fn lerp_verts(prev: Option<&RecDraw>, cur: &RecDraw, t: f32) -> Vec<GpuVertex> {
+    let Some(p) = prev.filter(|p| p.sig == cur.sig) else {
+        return cur.verts.clone();
+    };
+    let ndc = |v: &GpuVertex| (v.pos[0] / v.pos[3], v.pos[1] / v.pos[3]);
+    let jumps = p.verts.iter().zip(&cur.verts).any(|(a, b)| {
+        if a.pos[3] <= 0.0 || b.pos[3] <= 0.0 {
+            return true;
+        }
+        let ((ax, ay), (bx, by)) = (ndc(a), ndc(b));
+        (ax - bx).abs() > MAX_MOVE || (ay - by).abs() > MAX_MOVE
+    });
+    if jumps {
+        return cur.verts.clone();
+    }
+    p.verts
+        .iter()
+        .zip(&cur.verts)
+        .map(|(a, b)| {
+            let mut v = *b;
+            for k in 0..4 {
+                v.pos[k] = a.pos[k] + (b.pos[k] - a.pos[k]) * t;
+            }
+            v
+        })
+        .collect()
+}
+
+/// Largest per-frame movement (in NDC units; the screen is 2 wide) still treated as motion.
+const MAX_MOVE: f32 = 0.4;
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -129,6 +202,27 @@ pub struct Renderer {
     stream: Stream,
     tex_binds: HashMap<TexBindKey, (wgpu::BindGroup, Vec<Rc<wgpu::TextureView>>)>,
     pending_clear: Option<([f64; 4], f32)>,
+    /// Images shown per guest frame (1 = every frame as it comes).
+    mult: u32,
+    /// Draws and clears go to the interpolation target (`alt_*`) while a frame is replayed.
+    use_alt: bool,
+    alt_view: wgpu::TextureView,
+    alt: wgpu::Texture,
+    /// `read_efb` reads the interpolation target instead (frame dumps).
+    read_alt: bool,
+    alt_depth_view: wgpu::TextureView,
+    /// The last real frame, kept so it can be shown after the interpolated ones.
+    xfb: wgpu::Texture,
+    xfb_view: wgpu::TextureView,
+    /// The frame being drawn, and the one before it (only recorded when `mult > 1`).
+    rec: Vec<Rec>,
+    prev: Option<Rc<Vec<Rec>>>,
+    plan: Option<Plan>,
+    last_present: Option<Instant>,
+    stat_frames: u32,
+    stat_images: u32,
+    stat_since: Instant,
+    period: Duration,
     frame: u64,
     dump: Option<Dump>,
     cull: bool,
@@ -136,6 +230,8 @@ pub struct Renderer {
     dump_textures: Option<PathBuf>,
     trace: bool,
     trace_draws: bool,
+    /// `FEPOR_TRACE=gxhash`: print a hash of every presented frame (how often the picture really changes).
+    trace_hash: bool,
     /// Draws since the last presented frame.
     pub draws: u64,
     presenter: Option<present::Presenter>,
@@ -182,12 +278,23 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|e| format!("device: {e}"))?;
+        // `FEPOR_FPS_MULT=n`: show n images per guest frame (interpolated between consecutive frames).
+        let mult: u32 = if window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok() {
+            std::env::var("FEPOR_FPS_MULT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1)
+                .clamp(1, 8)
+        } else {
+            1
+        };
         let presenter = surface.map(|s| {
             present::Presenter::new(
                 &adapter,
                 &device,
                 s,
                 window.clone().expect("surface implies window"),
+                mult > 1,
             )
         });
 
@@ -223,6 +330,55 @@ impl Renderer {
         });
         let efb_view = efb.create_view(&Default::default());
         let depth_view = depth.create_view(&Default::default());
+        // A second colour/depth target for interpolated frames, and a copy of the last real frame.
+        let alt = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("efb interp"),
+            size: wgpu::Extent3d {
+                width: EFB_WIDTH,
+                height: EFB_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let alt_view = alt.create_view(&Default::default());
+        let alt_depth_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("efb interp depth"),
+                size: wgpu::Extent3d {
+                    width: EFB_WIDTH,
+                    height: EFB_HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let xfb = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("xfb"),
+            size: wgpu::Extent3d {
+                width: EFB_WIDTH,
+                height: EFB_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let xfb_view = xfb.create_view(&Default::default());
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("tev uniforms"),
@@ -316,6 +472,22 @@ impl Renderer {
             pass: None,
             stream,
             tex_binds: HashMap::new(),
+            mult,
+            use_alt: false,
+            alt_view,
+            alt_depth_view,
+            xfb,
+            alt,
+            read_alt: false,
+            xfb_view,
+            rec: Vec::new(),
+            prev: None,
+            plan: None,
+            last_present: None,
+            stat_frames: 0,
+            stat_images: 0,
+            stat_since: Instant::now(),
+            period: Duration::from_micros(16_683),
             pending_clear: Some(([0.0; 4], 1.0)),
             frame: 0,
             dump,
@@ -327,6 +499,8 @@ impl Renderer {
                 .inspect(|d| {
                     let _ = std::fs::create_dir_all(d);
                 }),
+            trace_hash: std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "gxhash")),
             trace_draws: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gxdraw")),
             trace: std::env::var("FEPOR_TRACE")
@@ -667,27 +841,7 @@ impl Renderer {
         let shader_hash = hash_str(&src);
         let pipeline = self.pipeline(&state, shader_hash, &src, topology);
 
-        // Draw data goes into per-submit staging vectors, uploaded once in `flush` (one buffer each, not
-        // three buffers per draw: the buffer count dominated the frame time).
-        let vbytes: &[u8] = bytemuck::cast_slice(&verts);
-        let ibytes: &[u8] = bytemuck::cast_slice(&indices);
-        if vbytes.len() > VBUF_SIZE || ibytes.len() > IBUF_SIZE {
-            return;
-        }
-        let s = &self.stream;
-        if s.vdata.len() + vbytes.len() > VBUF_SIZE
-            || s.idata.len() + ibytes.len() > IBUF_SIZE
-            || s.udata.len() + UNIFORM_STRIDE > UBUF_SIZE
-        {
-            self.flush();
-        }
-        let s = &mut self.stream;
-        let (voff, ioff, uoff) = (s.vdata.len(), s.idata.len(), s.udata.len());
-        s.vdata.extend_from_slice(vbytes);
-        s.idata.extend_from_slice(ibytes);
-        s.udata
-            .extend_from_slice(bytemuck::cast_slice(&tev::uniforms(&state)));
-        s.udata.resize(uoff + UNIFORM_STRIDE, 0);
+        let uniforms = tev::uniforms(&state);
 
         // textures: only the maps a stage reads are fetched
         let mut used = [false; 8];
@@ -734,13 +888,62 @@ impl Renderer {
             // the views stay alive with the bind group, so their pointers stay unique keys
             self.tex_binds.insert(key, (bind, views));
         }
+        let tbind = self.tex_binds[&key].0.clone();
+
+        // what makes two draws of consecutive frames "the same object" for interpolation
+        let mut sig = mix(mix(shader_hash, verts.len() as u64), indices.len() as u64);
+        for m in (0..8).filter(|m| used[*m]) {
+            sig = mix(sig, state.textures[m].addr as u64);
+        }
+        let rec = RecDraw {
+            verts,
+            indices,
+            uniforms,
+            pipeline,
+            tbind,
+            viewport: state.viewport,
+            scissor: state.scissor,
+            sig,
+        };
+        self.emit(&rec, &rec.verts);
+        if self.mult > 1 && !self.use_alt {
+            self.rec.push(Rec::Draw(rec));
+        }
+    }
+
+    /// Record `r` (with `verts` as its vertices) into the open render pass.
+    fn emit(&mut self, r: &RecDraw, verts: &[GpuVertex]) {
+        // Draw data goes into per-submit staging vectors, uploaded once in `flush` (one buffer each, not
+        // three buffers per draw: the buffer count dominated the frame time).
+        let vbytes: &[u8] = bytemuck::cast_slice(verts);
+        let ibytes: &[u8] = bytemuck::cast_slice(&r.indices);
+        if vbytes.len() > VBUF_SIZE || ibytes.len() > IBUF_SIZE {
+            return;
+        }
+        let s = &self.stream;
+        if s.vdata.len() + vbytes.len() > VBUF_SIZE
+            || s.idata.len() + ibytes.len() > IBUF_SIZE
+            || s.udata.len() + UNIFORM_STRIDE > UBUF_SIZE
+        {
+            self.flush();
+        }
+        let s = &mut self.stream;
+        let (voff, ioff, uoff) = (s.vdata.len(), s.idata.len(), s.udata.len());
+        s.vdata.extend_from_slice(vbytes);
+        s.idata.extend_from_slice(ibytes);
+        s.udata.extend_from_slice(bytemuck::cast_slice(&r.uniforms));
+        s.udata.resize(uoff + UNIFORM_STRIDE, 0);
 
         let clear = self.pending_clear.take();
         if clear.is_some() {
             self.pass = None; // a clear is a load op: it needs a fresh pass
         }
         if self.pass.is_none() {
-            let (efb_view, depth_view) = (&self.efb_view, &self.depth_view);
+            let (efb_view, depth_view) = if self.use_alt {
+                (&self.alt_view, &self.alt_depth_view)
+            } else {
+                (&self.efb_view, &self.depth_view)
+            };
             let enc = self
                 .encoder
                 .get_or_insert_with(|| self.device.create_command_encoder(&Default::default()));
@@ -782,7 +985,7 @@ impl Renderer {
             );
         }
         let pass = self.pass.as_mut().expect("render pass");
-        let [vx, vy, vw, vh, _, _] = state.viewport;
+        let [vx, vy, vw, vh, _, _] = r.viewport;
         let (x0, y0) = (vx.max(0.0), vy.max(0.0));
         let (x1, y1) = (
             (vx + vw).min(EFB_WIDTH as f32),
@@ -791,7 +994,7 @@ impl Renderer {
         if x1 > x0 && y1 > y0 {
             pass.set_viewport(x0, y0, x1 - x0, y1 - y0, 0.0, 1.0);
         }
-        let [sx, sy, sw, sh] = state.scissor;
+        let [sx, sy, sw, sh] = r.scissor;
         let (sx0, sy0) = (
             sx.clamp(0, EFB_WIDTH as i32),
             sy.clamp(0, EFB_HEIGHT as i32),
@@ -808,9 +1011,9 @@ impl Renderer {
                 (sy1 - sy0) as u32,
             );
         }
-        pass.set_pipeline(&pipeline);
+        pass.set_pipeline(&r.pipeline);
         pass.set_bind_group(0, &self.stream.ubind, &[uoff as u32]);
-        pass.set_bind_group(1, &self.tex_binds[&key].0, &[]);
+        pass.set_bind_group(1, &r.tbind, &[]);
         pass.set_vertex_buffer(
             0,
             self.stream
@@ -823,13 +1026,24 @@ impl Renderer {
                 .slice(ioff as u64..(ioff + ibytes.len()) as u64),
             wgpu::IndexFormat::Uint32,
         );
-        pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        pass.draw_indexed(0..r.indices.len() as u32, 0, 0..1);
     }
 
     fn clear_pass(&mut self, color: [f64; 4], z: f32, color_update: bool, z_update: bool) {
+        if self.mult > 1 && !self.use_alt {
+            self.rec.push(Rec::Clear {
+                color,
+                z,
+                color_update,
+                z_update,
+            });
+        }
         self.end_pass();
-        let efb_view = &self.efb_view;
-        let depth_view = &self.depth_view;
+        let (efb_view, depth_view) = if self.use_alt {
+            (&self.alt_view, &self.alt_depth_view)
+        } else {
+            (&self.efb_view, &self.depth_view)
+        };
         let enc = self
             .encoder
             .get_or_insert_with(|| self.device.create_command_encoder(&Default::default()));
@@ -887,7 +1101,7 @@ impl Renderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.efb,
+                texture: if self.read_alt { &self.alt } else { &self.efb },
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -926,10 +1140,16 @@ impl Renderer {
                 self.frame, c.width, c.height, c.x, c.y, self.draws
             );
         }
-        self.draws = 0;
-        if let Some(p) = &mut self.presenter {
-            p.show(&self.device, &self.queue, &self.efb_view, c);
+        if self.trace_hash {
+            let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+            let px = self.read_efb(c.x, c.y, w, h);
+            let h = px.iter().fold(0xcbf2_9ce4_8422_2325u64, |a, b| {
+                (a ^ *b as u64).wrapping_mul(0x100_0000_01b3)
+            });
+            eprintln!("gx: hash {} {h:016x}", self.frame);
         }
+        self.draws = 0;
+        self.show_frame(c);
         let Some(d) = &self.dump else { return };
         if self.frame % d.every != 0 {
             return;
@@ -942,6 +1162,132 @@ impl Renderer {
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         write_png(&path, w, h, png::ColorType::Rgb, &rgb);
+    }
+
+    /// Show a finished frame: right away, or (with `mult > 1`) as the plan of interpolated images
+    /// followed by the real one.
+    fn show_frame(&mut self, c: &CopyEfb) {
+        if self.presenter.is_none() && self.dump.is_none() {
+            return;
+        }
+        if self.mult <= 1 {
+            if let Some(p) = &mut self.presenter {
+                p.show(&self.device, &self.queue, &self.efb_view, c);
+            }
+            return;
+        }
+        let now = Instant::now();
+        if let Some(l) = self.last_present {
+            let dt = (now - l).clamp(Duration::from_millis(5), Duration::from_millis(50));
+            self.period = (self.period * 7 + dt) / 8;
+        }
+        self.last_present = Some(now);
+        self.stat_frames += 1;
+        if self.stat_frames == 120 {
+            if self.trace {
+                eprintln!(
+                    "gx: interpolation: {} images over 120 frames in {:?}",
+                    self.stat_images,
+                    now - self.stat_since
+                );
+            }
+            (self.stat_frames, self.stat_images, self.stat_since) = (0, 0, now);
+        }
+        let cur = Rc::new(std::mem::take(&mut self.rec));
+        // keep the real frame: the efb is redrawn by the next one while the interpolated images show
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_texture(
+            self.efb.as_image_copy(),
+            self.xfb.as_image_copy(),
+            wgpu::Extent3d {
+                width: EFB_WIDTH,
+                height: EFB_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([enc.finish()]);
+        match self.prev.replace(cur.clone()) {
+            Some(prev) => {
+                self.plan = Some(Plan {
+                    prev,
+                    cur,
+                    copy: c.clone(),
+                    start: now,
+                    period: self.period,
+                    j: 1,
+                });
+                self.tick_plan();
+            }
+            None => {
+                if let Some(p) = &mut self.presenter {
+                    p.show(&self.device, &self.queue, &self.xfb_view, c);
+                }
+            }
+        }
+    }
+
+    /// Show the next image of the current plan once it is due (called often, from the guest's poll points).
+    fn tick_plan(&mut self) {
+        let Some(p) = &self.plan else { return };
+        let due = p.start + p.period * (p.j - 1) / self.mult;
+        if Instant::now() < due {
+            return;
+        }
+        let p = self.plan.take().expect("plan");
+        self.stat_images += 1;
+        // the guest may be in the middle of a frame: hand its work to the GPU first
+        self.flush();
+        if p.j < self.mult {
+            self.show_interp(&p.prev, &p.cur, p.j as f32 / self.mult as f32, &p.copy);
+            self.plan = Some(Plan { j: p.j + 1, ..p });
+        } else if let Some(pr) = &mut self.presenter {
+            pr.show(&self.device, &self.queue, &self.xfb_view, &p.copy);
+        }
+    }
+
+    /// Draw the frame `cur` with every object `t` of the way from where it was in `prev`, and show it.
+    fn show_interp(&mut self, prev: &[Rec], cur: &[Rec], t: f32, c: &CopyEfb) {
+        self.use_alt = true;
+        let mut before = prev.iter().filter_map(|r| match r {
+            Rec::Draw(d) => Some(d),
+            Rec::Clear { .. } => None,
+        });
+        for r in cur {
+            match r {
+                Rec::Clear {
+                    color,
+                    z,
+                    color_update,
+                    z_update,
+                } => self.clear_pass(*color, *z, *color_update, *z_update),
+                Rec::Draw(d) => {
+                    let verts = lerp_verts(before.next(), d, t);
+                    self.emit(d, &verts);
+                }
+            }
+        }
+        self.flush();
+        self.use_alt = false;
+        if let Some(p) = &mut self.presenter {
+            p.show(&self.device, &self.queue, &self.alt_view, c);
+        }
+        if self
+            .dump
+            .as_ref()
+            .is_some_and(|d| self.frame % d.every == 0)
+        {
+            self.read_alt = true;
+            let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+            let rgba = self.read_efb(c.x, c.y, w, h);
+            self.read_alt = false;
+            let rgb: Vec<u8> = rgba
+                .chunks_exact(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
+            let name = format!("frame_{:05}_t{:02}.png", self.frame, (t * 100.0) as u32);
+            let path = self.dump.as_ref().expect("dump").dir.join(name);
+            write_png(&path, w, h, png::ColorType::Rgb, &rgb);
+        }
     }
 
     fn copy(&mut self, c: CopyEfb) {
@@ -1025,6 +1371,10 @@ impl Renderer {
 }
 
 impl Sink for Renderer {
+    fn tick(&mut self) {
+        self.tick_plan();
+    }
+
     fn event(&mut self, event: Event, ram: &[u8], tluts: &Tluts) {
         match event {
             Event::Draw(d) => self.draw(d, ram, tluts),
