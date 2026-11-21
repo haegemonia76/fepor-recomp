@@ -11,6 +11,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **Lifter**: Rust component turning Gekko instructions into C++ (`crates/ppc-lift`).
 - **Generated code**: C++ emitted by the lifter, grouped into configurable compilation units. Always regenerated locally, never committed.
 - **Runtime**: hand-written C++ in `runtime/` (os, dvd, gx, ax, input, ui) that the generated code links against.
+- **Context**: the guest CPU state struct (`runtime/include/fepor/ppc.h`). Generated functions copy registers into locals with `in()` and back with `out()` (ADR 0009).
 - **Dispatch table**: runtime map from guest address to host function, used for indirect calls (`bctr`, `bctrl`, callbacks, vtables) that static analysis cannot resolve. A miss is an explicit error with the address logged.
 - **HLE**: high-level emulation. Guest SDK functions (OS, DVD, PAD, CARD, AX, VI) replaced by native C++.
 - **LLE**: low-level emulation. Used only for the GX FIFO: guest code writes to the write-gather pipe and the runtime parses the CP/XF/BP command stream.
@@ -27,7 +28,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 ```
 crates/core      disc reading, DOL/FST parsing, analysis, config
 crates/ppc-lift  Gekko decode (ppc750cl) + C++ emission
-crates/cli       fepor-recomp subcommands: extract, analyze, generate, build, run
+crates/cli       fepor-recomp subcommands: extract, analyze, generate (build, run later)
 crates/gui       egui front-end over core
 runtime/         C++/cmake runtime
 docs/adr/        decisions

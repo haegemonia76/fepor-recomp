@@ -5,10 +5,11 @@ members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "GPL-2.0-or-later"
 
 [workspace.dependencies]
 fepor-core = { path = "crates/core" }
+fepor-ppc-lift = { path = "crates/ppc-lift" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

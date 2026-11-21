@@ -12,6 +12,7 @@ pub struct Config {
     pub output: Option<PathBuf>,
     /// Manual corrections for the static analysis.
     pub analysis: AnalysisConfig,
+    pub generate: GenerateConfig,
 }
 
 /// Overrides for function discovery. Addresses are guest addresses (TOML hex literals work).
@@ -36,6 +37,22 @@ impl AnalysisConfig {
         self.exclude.extend(defaults.exclude);
         self.jump_tables.extend(defaults.jump_tables);
         self
+    }
+}
+
+/// Options for the C++ generator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GenerateConfig {
+    /// Functions per generated compilation unit.
+    pub functions_per_unit: usize,
+    /// Runtime sources (CMake project); defaults to the `runtime/` directory of this repository.
+    pub runtime_dir: Option<PathBuf>,
+}
+
+impl Default for GenerateConfig {
+    fn default() -> Self {
+        GenerateConfig { functions_per_unit: 256, runtime_dir: None }
     }
 }
 

@@ -3,3 +3,11 @@ name = "fepor-ppc-lift"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+fepor-core.workspace = true
+ppc750cl.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

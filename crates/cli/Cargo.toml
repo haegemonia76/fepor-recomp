@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 fepor-core.workspace = true
+fepor-ppc-lift.workspace = true
 clap.workspace = true

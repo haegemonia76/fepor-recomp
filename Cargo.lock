@@ -185,6 +185,12 @@ dependencies = [
 [[package]]
 name = "fepor-ppc-lift"
 version = "0.1.0"
+dependencies = [
+ "fepor-core",
+ "ppc750cl",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "fepor-recomp"
@@ -192,6 +198,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "fepor-core",
+ "fepor-ppc-lift",
 ]
 
 [[package]]
