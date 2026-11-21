@@ -54,6 +54,8 @@ pub enum Command {
     Generate(commands::generate::GenerateArgs),
     /// Generate and build the game from the player's copy, printing `progress` lines (RecompLauncher setup step).
     Prepare(commands::generate::GenerateArgs),
+    /// List the disc's files with their disc offsets (for matching DVD reads in a trace).
+    Ls,
     /// Disassemble guest code from main.dol.
     Disasm {
         /// Guest address, e.g. 0x80003154.
@@ -91,6 +93,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Command::Analyze { report } => commands::analyze::run(&opts, report),
         Command::Generate(args) => commands::generate::run(&opts, &args, false),
         Command::Prepare(args) => commands::generate::run(&opts, &args, true),
+        Command::Ls => commands::inspect::ls(&opts),
         Command::Disasm { addr, count } => commands::inspect::disasm(&opts, addr, count),
         Command::Opcodes => commands::inspect::opcodes(&opts),
         Command::Find {

@@ -780,6 +780,8 @@ impl<'a> Fx<'a> {
                         self.used.ctr = true;
                         "ctr".to_string()
                     }
+                    // the decrementer counts down on its own: the runtime owns it
+                    22 => "fepor_mfdec()".to_string(),
                     n => format!("c.spr[{n}]"),
                 };
                 self.emit(format!("{rd} = {e};"));
@@ -799,6 +801,7 @@ impl<'a> Fx<'a> {
                         self.used.ctr = true;
                         self.emit(format!("ctr = {rs};"));
                     }
+                    22 => self.emit(format!("fepor_mtdec({rs});")),
                     n => self.emit(format!("c.spr[{n}] = {rs};")),
                 }
             }

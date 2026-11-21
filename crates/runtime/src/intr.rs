@@ -46,6 +46,15 @@ pub fn poll(c: *mut Context) {
         return;
     }
     let m = machine();
+    if m.dec_deadline.is_some_and(|d| m.timebase() >= d) {
+        // decrementer exception (vector 0x900); the OS reprograms it from its handler
+        m.dec_deadline = None;
+        if m.trace.irq {
+            eprintln!("irq: decrementer (msr {:#x}, lr {:#x})", c.msr, c.lr);
+        }
+        deliver(c, 8);
+        return;
+    }
     if !m.hw.interrupt_pending() {
         return;
     }

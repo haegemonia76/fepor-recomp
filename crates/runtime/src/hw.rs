@@ -65,6 +65,7 @@ pub struct Hw {
     fifo: Vec<u8>,
     sink: Box<dyn Sink>,
     pe_intsr: u16,
+    trace_gx: bool,
     pe_token: u16,
     /// A finish was reached while the token flag was still set; the SDK's token handler would clear
     /// both flags at once, so the finish is raised only after the token interrupt was acknowledged.
@@ -114,6 +115,8 @@ impl Hw {
             fifo: Vec::new(),
             sink: Box::new(CountingSink::default()),
             pe_intsr: 0,
+            trace_gx: std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "gxstats")),
             pe_token: 0,
             pe_finish_pending: false,
         }
@@ -196,6 +199,9 @@ impl Hw {
         };
         self.gx.feed(&bytes, ram, &mut tap);
         let (finish, token) = (tap.finish, tap.token);
+        if self.trace_gx && finish {
+            eprintln!("gx: draw done; parser so far: {:?}", self.gx.stats);
+        }
         if let Some(t) = token {
             self.pe_token = t;
             self.pe_intsr |= 4;

@@ -61,6 +61,8 @@ fepor::HostFn fepor_lookup(uint32_t from, uint32_t target);
 void fepor_syscall(fepor::Context* c, uint32_t addr);
 void fepor_rfi(fepor::Context* c, uint32_t addr);
 uint32_t fepor_mftb(uint32_t tbr);
+uint32_t fepor_mfdec(void);
+void fepor_mtdec(uint32_t value);
 uint32_t fepor_hw_read(uint32_t ea, int size);
 void fepor_hw_write(uint32_t ea, uint32_t value, int size);
 /// Function entry hook, emitted when generating with call tracing.

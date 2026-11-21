@@ -124,3 +124,12 @@ pub fn pointers(opts: &Options, target: u32) -> Result<(), Fail> {
     }
     Ok(())
 }
+
+/// Every file on the disc: disc offset, size and path.
+pub fn ls(opts: &Options) -> Result<(), Fail> {
+    let session = Session::open(opts)?;
+    for f in session.disc.files() {
+        println!("{:#011x} {:>10} {}", f.offset, f.size, f.path);
+    }
+    Ok(())
+}

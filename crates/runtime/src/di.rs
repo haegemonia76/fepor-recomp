@@ -87,6 +87,11 @@ impl Di {
     fn execute(&mut self, cr: u32, ram: &mut [u8]) {
         let cmd = self.regs[(DICMDBUF0 / 4) as usize];
         let dma = cr & 2 != 0;
+        if cmd >> 24 == 0xA8 {
+            crate::machine::machine()
+                .trace
+                .di_read(self.regs[(DICMDBUF1 / 4) as usize]);
+        }
         let mar = (self.regs[(DIMAR / 4) as usize] & 0x03FF_FFE0) as usize;
         let len = self.regs[(DILENGTH / 4) as usize] as usize;
         if self.trace {

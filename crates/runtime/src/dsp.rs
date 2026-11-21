@@ -28,8 +28,8 @@ const CR_DSPINT: u16 = 1 << 7;
 
 /// Mail the boot task sends once the SDK's ucode is running (DSP_INIT).
 const MAIL_DSP_INIT: u32 = 0xDCD1_0000;
-/// Reply to the SDK's audio-frame mail (0xBABExxxx).
-const MAIL_DSP_SYNC: u32 = 0xDCD1_0004;
+/// The AX ucode's answer after running a command list.
+const MAIL_DSP_YIELD: u32 = 0xDCD1_0002;
 const CR_AIDINT: u16 = 1 << 3;
 
 /// What the DSP ROM sends after reset to say it is ready for a boot task.
@@ -45,6 +45,7 @@ pub struct Dsp {
     trace: bool,
     /// The previous CPU mail was the boot task's "start vector" command.
     expect_start: bool,
+    expect_cmdlist: bool,
     /// Audio DMA: playing, buffer length in bytes and when the current buffer finishes.
     ai_dma_on: bool,
     ai_dma_len: u32,
@@ -62,6 +63,7 @@ impl Dsp {
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "dsp" || x == "all")),
             expect_start: false,
+            expect_cmdlist: false,
             ai_dma_on: false,
             ai_dma_len: 0,
             ai_next: None,
@@ -147,12 +149,16 @@ impl Dsp {
                     self.expect_start = false;
                     self.from_dsp = MAIL_DSP_INIT;
                     self.control |= CR_DSPINT;
+                } else if self.expect_cmdlist {
+                    // second mail of an AX frame: the command list address. The ucode runs the list and yields.
+                    self.expect_cmdlist = false;
+                    self.from_dsp = MAIL_DSP_YIELD;
+                    self.control |= CR_DSPINT;
                 } else if mail == 0x80F3_D001 {
                     self.expect_start = true;
                 } else if mail >> 16 == 0xBABE {
-                    // audio frame request: the AX ucode answers with a sync mail and an interrupt
-                    self.from_dsp = MAIL_DSP_SYNC;
-                    self.control |= CR_DSPINT;
+                    // AX frame: 0xBABE<size> then the command list address
+                    self.expect_cmdlist = true;
                 }
             }
             (AR_DMA_CNT, 4) => {

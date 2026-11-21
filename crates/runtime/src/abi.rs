@@ -35,7 +35,13 @@ pub fn start_watchdog() {
                 c.r[1], c.lr, c.ctr, c.r[3], c.msr
             );
         }
-        let recent = machine().trace.recent(32);
+        let recent = machine()
+            .trace
+            .recent(if std::env::var_os("FEPOR_RECENT").is_some() {
+                4096
+            } else {
+                32
+            });
         eprintln!(
             "  recent calls (oldest first): {}",
             recent
@@ -44,6 +50,22 @@ pub fn start_watchdog() {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
+        let fs = &machine().trace.first_seen;
+        if !fs.is_empty() {
+            let from = machine()
+                .trace
+                .mark
+                .unwrap_or(fs.len().saturating_sub(120))
+                .max(fs.len().saturating_sub(120));
+            let tail = &fs[from..];
+            eprintln!(
+                "  newest functions (first execution order): {}",
+                tail.iter()
+                    .map(|a| format!("{a:08x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
         // OS threads: __OSActiveThreadQueue head at 0x800000DC, linkActive at +0x2FC.
         let m = machine();
         if !c.is_null() {
@@ -184,6 +206,23 @@ pub extern "C" fn fepor_mftb(tbr: u32) -> u32 {
     }
 }
 
+/// `mtdec`: the decrementer raises exception 8 when it passes zero, `value + 1` ticks from now.
+#[no_mangle]
+pub extern "C" fn fepor_mtdec(value: u32) {
+    let m = machine();
+    m.dec_deadline = Some(m.timebase() + value as u64 + 1);
+}
+
+/// `mfdec`: ticks left until expiry (wraps negative once expired).
+#[no_mangle]
+pub extern "C" fn fepor_mfdec() -> u32 {
+    let m = machine();
+    match m.dec_deadline {
+        Some(d) => d.wrapping_sub(m.timebase()) as u32,
+        None => 0xFFFF_FFFF,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn fepor_hw_read(ea: u32, size: i32) -> u32 {
     machine()
@@ -204,6 +243,19 @@ pub extern "C" fn fepor_enter(addr: u32) {
     let m = machine();
     if m.trace.calls {
         m.trace.enter(addr);
+    }
+    if !m.trace.watch.is_empty() && m.trace.watch.contains(&addr) {
+        // SAFETY: the running thread's context.
+        let c = unsafe { &*crate::sched::current_context() };
+        eprintln!(
+            "watch: {addr:08x} thread#{} r3={:08x} r4={:08x} r5={:08x} r6={:08x} lr={:08x}",
+            crate::sched::current(),
+            c.r[3],
+            c.r[4],
+            c.r[5],
+            c.r[6],
+            c.lr
+        );
     }
     // Function entry is the safe point where interrupts are delivered (registers are synced here).
     m.enter_count = m.enter_count.wrapping_add(1);
@@ -278,6 +330,8 @@ pub fn exports() -> Vec<usize> {
         fepor_syscall as *const () as usize,
         fepor_rfi as *const () as usize,
         fepor_mftb as *const () as usize,
+        fepor_mtdec as *const () as usize,
+        fepor_mfdec as *const () as usize,
         fepor_hw_read as *const () as usize,
         fepor_hw_write as *const () as usize,
         fepor_enter as *const () as usize,

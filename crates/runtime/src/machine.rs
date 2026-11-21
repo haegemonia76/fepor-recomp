@@ -16,6 +16,8 @@ pub struct Machine {
     pub started: Instant,
     /// Function entries seen (interrupt polling cadence).
     pub enter_count: u32,
+    /// Time base value at which the decrementer next expires (set by `mtdec`).
+    pub dec_deadline: Option<u64>,
 }
 
 impl Machine {
@@ -26,6 +28,7 @@ impl Machine {
             trace: Trace::from_env(),
             started: Instant::now(),
             enter_count: 0,
+            dec_deadline: None,
         }
     }
 
