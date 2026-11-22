@@ -90,7 +90,7 @@ fn quit(ui: &mut egui::Ui) {
     }
 }
 
-const ACCENT: Color32 = Color32::from_rgb(120, 190, 255);
+const ACCENT: Color32 = crate::theme::GOLD;
 
 fn read_card(path: &std::path::Path) -> Result<(memcard::CardInfo, Vec<(String, usize)>), String> {
     let image = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -135,7 +135,8 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
         let rect = egui::Rect::from_min_size(egui::pos2(6.0, 6.0), egui::vec2(520.0, 700.0));
         let ui = &mut root.new_child(egui::UiBuilder::new().max_rect(rect));
         egui::Frame::new()
-            .fill(Color32::from_black_alpha(190))
+            .fill(crate::theme::BAR.gamma_multiply(0.85))
+            .stroke(egui::Stroke::new(1.0, crate::theme::GOLD_DARK))
             .corner_radius(4.0)
             .inner_margin(6.0)
             .show(ui, |ui| {
@@ -287,15 +288,15 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         st.page = Page::ALL[(i + step).rem_euclid(n) as usize];
         st.focus_tabs = true;
     }
-    let frame = egui::Frame::new()
-        .fill(Color32::from_black_alpha(215))
-        .inner_margin(14.0);
+    // the panel: green gradient, gold frame; its contents sit inside a margin
+    crate::theme::paint_panel(root.painter(), root.max_rect());
+    let frame = egui::Frame::new().inner_margin(egui::Margin::symmetric(34, 28));
     egui::CentralPanel::default().frame(frame).show(root, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("Settings").color(ACCENT));
-            ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.heading(RichText::new("Settings").color(crate::theme::GOLD));
+            ui.add_space(14.0);
             for p in Page::ALL {
-                let r = ui.selectable_label(st.page == p, p.label());
+                let r = crate::theme::tab(ui, st.page == p, p.label());
                 if r.clicked() && st.page != p {
                     st.page = p;
                 }
@@ -316,7 +317,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         ui.label(
             RichText::new("F1 / Guide: close   PgUp-PgDn / LB-RB: page   arrows + Enter / D-pad + A, or the mouse")
                 .small()
-                .weak(),
+                .color(crate::theme::DIM),
         );
     });
     st.focus_tabs = false;
@@ -325,7 +326,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
 fn video(ui: &mut egui::Ui, shared: &Shared) {
     let before = shared.settings.get();
     let mut s = before.clone();
-    ui.label("Frame multiplier");
+    ui.label(crate::theme::caption("Frame multiplier"));
     ui.add(
         egui::Slider::new(&mut s.video.frame_multiplier, 1..=8).custom_formatter(|v, _| {
             if v < 1.5 {
@@ -349,13 +350,13 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
         );
     }
     ui.add_space(8.0);
-    ui.label("Internal resolution");
+    ui.label(crate::theme::caption("Internal resolution"));
     ui.add(
         egui::Slider::new(&mut s.video.resolution, 1..=4)
             .custom_formatter(|v, _| format!("x{v:.0}  ({}x{})", 640 * v as u32, 528 * v as u32)),
     );
     ui.add_space(8.0);
-    ui.label("Picture shape");
+    ui.label(crate::theme::caption("Picture shape"));
     for a in Aspect::ALL {
         ui.radio_value(&mut s.video.aspect, a, a.label());
     }
@@ -366,12 +367,12 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
         "Vsync (no tearing; off = lower latency)",
     );
     ui.add_space(8.0);
-    ui.label("Statistics in the corner (F2)");
+    ui.label(crate::theme::caption("Statistics in the corner (F2)"));
     for m in fepor_core::settings::StatsMode::ALL {
         ui.radio_value(&mut s.video.stats, m, m.label());
     }
     ui.add_space(8.0);
-    ui.label("Overlay size");
+    ui.label(crate::theme::caption("Overlay size"));
     ui.add(
         egui::Slider::new(&mut s.video.overlay_scale, 0.0..=3.0).custom_formatter(|v, _| {
             if v < 0.05 {
@@ -389,14 +390,14 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
 fn audio(ui: &mut egui::Ui, shared: &Shared) {
     let before = shared.settings.get();
     let mut pct = (before.audio.volume * 100.0).round() as u32;
-    ui.label("Master volume");
+    ui.label(crate::theme::caption("Master volume"));
     ui.add(egui::Slider::new(&mut pct, 0..=100).suffix("%"));
     let volume = pct as f32 / 100.0;
     if (volume - before.audio.volume).abs() > 0.004 {
         shared.settings.update(|x| x.audio.volume = volume);
     }
     ui.add_space(8.0);
-    ui.label("Output device");
+    ui.label(crate::theme::caption("Output device"));
     let devices = shared
         .audio_devices
         .lock()
@@ -445,7 +446,7 @@ fn controls(ui: &mut egui::Ui, shared: &Shared) {
     }
     let cfg = c.config().clone();
     ui.horizontal(|ui| {
-        ui.label("Button names");
+        ui.label(crate::theme::caption("Button names"));
         for g in [
             GlyphSet::GameCube,
             GlyphSet::Xbox,
@@ -459,7 +460,7 @@ fn controls(ui: &mut egui::Ui, shared: &Shared) {
     });
     let mut dz = cfg.deadzone;
     ui.horizontal(|ui| {
-        ui.label("Stick dead zone");
+        ui.label(crate::theme::caption("Stick dead zone"));
         ui.add(egui::Slider::new(&mut dz, 0.0..=0.9));
     });
     if (dz - cfg.deadzone).abs() > 1e-4 {
@@ -471,10 +472,10 @@ fn controls(ui: &mut egui::Ui, shared: &Shared) {
         .striped(true)
         .num_columns(5)
         .show(ui, |ui| {
-            ui.label(RichText::new("GameCube").strong());
-            ui.label(RichText::new("Keyboard").strong());
+            ui.label(crate::theme::caption("GameCube"));
+            ui.label(crate::theme::caption("Keyboard"));
             ui.label("");
-            ui.label(RichText::new("Gamepad").strong());
+            ui.label(crate::theme::caption("Gamepad"));
             ui.label("");
             ui.end_row();
             for a in Action::ALL {
@@ -670,7 +671,7 @@ fn start_picker(st: &mut UiState) {
 }
 
 fn import_section(ui: &mut egui::Ui, st: &mut UiState, imports: &Path) {
-    ui.label(RichText::new("Import saves").strong());
+    ui.label(crate::theme::caption("Import saves"));
     let choosing = st.picker.is_some();
     if ui
         .add_enabled(

@@ -7,6 +7,7 @@ pub mod glyphs;
 mod paint;
 mod shared;
 mod stats;
+mod theme;
 mod ui;
 
 use std::sync::Arc;
@@ -35,8 +36,10 @@ impl Overlay {
         if wanted.is_some() {
             shared.set_open(true);
         }
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
         Overlay {
-            ctx: egui::Context::default(),
+            ctx,
             shared,
             painter: None,
             start: Instant::now(),
