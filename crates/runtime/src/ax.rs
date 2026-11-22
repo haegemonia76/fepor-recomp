@@ -4,8 +4,8 @@
 //! command list: the CPU sends `0xBABE0000 | size`, then the command list address; the ucode walks the list
 //! (voice parameter blocks, mixing, aux sends, output) and answers `DSP_YIELD`. This module reproduces that
 //! behaviour on guest RAM and ARAM. Structure and arithmetic follow Dolphin's DSPHLE AX implementation
-//! (GPL-2.0-or-later) so results match it sample for sample, except that the DROM polyphase coefficients
-//! are not available here: polyphase voices use linear interpolation, as Dolphin does without `dsp_coef.bin`.
+//! (GPL-2.0-or-later) so results match it sample for sample. The polyphase resampler's coefficient table
+//! is a DSP ROM dump that cannot be shipped: its three sets are regenerated from a windowed-sinc fit.
 
 const FRAME: usize = 5 * 32;
 const PB_WORDS: usize = 122;
@@ -232,6 +232,61 @@ impl Accel {
     }
 }
 
+/// `FEPOR_AX_DUMP_VOICE=<hex PB address>`: print what the resampler of that voice consumed and produced.
+static DUMP_VOICE: std::sync::LazyLock<Option<u32>> = std::sync::LazyLock::new(|| {
+    let v = std::env::var("FEPOR_AX_DUMP_VOICE").ok()?;
+    u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()
+});
+
+/// The ucode's polyphase resampler has one set of 128 four-tap filters per cutoff (0.5, 0.8 and 1.0 of the
+/// output rate). The hardware table (`dsp_coef.bin` in Dolphin) is a DSP ROM dump and cannot be shipped;
+/// measured against it, and against Dolphin's own output for a one-shot sound effect, every set is a
+/// Hamming-windowed sinc, regenerated here (parameters fitted to the table: max deviation < 1 %).
+static POLY: std::sync::LazyLock<[[[i16; 4]; 128]; 3]> = std::sync::LazyLock::new(|| {
+    // (cutoff, window offset `a` in a + (1 - a) cos(pi x / 2), overall gain)
+    const SETS: [(f64, f64, f64); 3] = [
+        (0.510, 0.55, 0.9998),
+        (0.785, 0.48, 1.0002),
+        (1.005, 0.56, 0.9837),
+    ];
+    let mut t = [[[0i16; 4]; 128]; 3];
+    for (s, (fc, a, gain)) in SETS.into_iter().enumerate() {
+        for (p, row) in t[s].iter_mut().enumerate() {
+            let phase = p as f64 / 128.0;
+            let mut h = [0f64; 4];
+            for (k, v) in h.iter_mut().enumerate() {
+                let x = k as f64 - 1.0 - phase;
+                let sinc = if x == 0.0 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * fc * x).sin() / (std::f64::consts::PI * fc * x)
+                };
+                let window = if x.abs() <= 2.0 {
+                    a + (1.0 - a) * (std::f64::consts::PI * x / 2.0).cos()
+                } else {
+                    0.0
+                };
+                *v = fc * sinc * window;
+            }
+            let sum: f64 = h.iter().sum();
+            for (k, v) in h.iter().enumerate() {
+                row[k] = (v / sum * gain * 32768.0).round() as i16;
+            }
+        }
+    }
+    t
+});
+
+/// Which filter set a voice's resampling ratio uses (the smallest cutoff that covers it); none above 1.0.
+fn poly_set(ratio: u32) -> Option<usize> {
+    match ratio {
+        0..=0x8000 => Some(0),
+        0x8001..=0xCCCC => Some(1),
+        0xCCCD..=0x10000 => Some(2),
+        _ => None,
+    }
+}
+
 /// Resample `count` samples (`input` yields the source samples), returns the new fractional position.
 fn resample(
     mut input: impl FnMut() -> i16,
@@ -258,7 +313,17 @@ fn resample(
             }
             let frac = (pos & 0xFFFF) as u16;
             let inv = frac.wrapping_neg();
-            let sample = if frac != 0 {
+            let sample = if let (0, Some(set)) = (srctype, poly_set(ratio)) {
+                // 4-tap polyphase: the window is the last four source samples, centred between
+                // the middle two; 128 phases per set
+                let taps = &POLY[set][(frac >> 9) as usize];
+                let mut acc = 0i32;
+                for (k, w) in taps.iter().enumerate() {
+                    acc += *w as i32 * temp[(idx + k) & 3] as i32;
+                }
+                idx += 4;
+                (acc >> 15).clamp(-0x8000, 0x7FFF) as i16
+            } else if frac != 0 {
                 let s0 = temp[idx & 3] as i32;
                 idx += 1;
                 let s1 = temp[idx & 3] as i32;
@@ -677,8 +742,16 @@ impl Ax {
         let frac = pb[85] as u32;
         let src_type = pb[4];
         let mut pb_tmp = *pb;
+        let dump = *DUMP_VOICE == Some(hilo(pb[2], pb[3]));
+        let (last_in, mut consumed) = (last, Vec::new());
         let pos = resample(
-            || acc.read_sample(&mut pb_tmp, mem),
+            || {
+                let s = acc.read_sample(&mut pb_tmp, mem);
+                if dump {
+                    consumed.push(s);
+                }
+                s
+            },
             &mut samples,
             COUNT,
             &mut last,
@@ -686,6 +759,12 @@ impl Ax {
             ratio,
             src_type,
         );
+        if dump {
+            eprintln!(
+                "axv: frame {} ms {} frac {} last {:?} ratio {} in {:?} out {:?}",
+                self.frames, ms, frac, last_in, ratio, consumed, samples
+            );
+        }
         *pb = pb_tmp;
         pb[85] = (pos & 0xFFFF) as u16;
         pb[86..90].copy_from_slice(&[
@@ -1016,5 +1095,43 @@ mod tests {
         render(&mut ram, &aram);
         let running = u16::from_be_bytes([ram[(PB + 14) as usize], ram[(PB + 15) as usize]]);
         assert_eq!(running, 0);
+    }
+
+    #[test]
+    fn polyphase_resampler_has_unity_dc_gain_and_picks_the_cutoff_set() {
+        for ratio in [0x8000u32, 0xb060, 0x10000] {
+            let mut last = [10_000i16; 4];
+            let mut out = [0i16; 32];
+            resample(|| 10_000, &mut out, 32, &mut last, 0, ratio, 0);
+            for o in out {
+                // the three sets have gains 1.0, 1.0 and 0.984 (the hardware table's own)
+                assert!((9_800..=10_020).contains(&o), "ratio {ratio:#x}: {o}");
+            }
+        }
+        assert_eq!(poly_set(0x8000), Some(0));
+        assert_eq!(poly_set(0xb060), Some(1));
+        assert_eq!(poly_set(0x10000), Some(2));
+        assert_eq!(poly_set(0x10001), None);
+        // a tone near the input Nyquist is attenuated more than by linear interpolation at a 0.5 ratio
+        let (mut last, mut poly, mut lin) = ([0i16; 4], [0i16; 32], [0i16; 32]);
+        let mut k = 0;
+        let tone = |k: &mut i32| {
+            *k += 1;
+            if *k % 2 == 0 {
+                8_000
+            } else {
+                -8_000
+            }
+        };
+        resample(|| tone(&mut k), &mut poly, 32, &mut last, 0, 0x8000, 0);
+        let (mut last, mut k) = ([0i16; 4], 0);
+        resample(|| tone(&mut k), &mut lin, 32, &mut last, 0, 0x8000, 1);
+        let peak = |v: &[i16]| v[8..].iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(
+            peak(&poly) < peak(&lin) / 2,
+            "{} vs {}",
+            peak(&poly),
+            peak(&lin)
+        );
     }
 }
