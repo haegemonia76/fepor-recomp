@@ -58,7 +58,6 @@ pub struct UiState {
     card: Option<CardView>,
     card_message: String,
     focus_tabs: bool,
-    confirm_quit: bool,
 }
 
 impl UiState {
@@ -68,33 +67,17 @@ impl UiState {
             card: None,
             card_message: String::new(),
             focus_tabs: true,
-            confirm_quit: false,
         }
     }
 }
 
-/// Quit page: two steps, so that a stray Enter does not end the session.
-fn quit(ui: &mut egui::Ui, st: &mut UiState) {
-    if !st.confirm_quit {
-        ui.label("Leave the game and close the window.");
-        if ui.button("Quit the game").clicked() {
-            st.confirm_quit = true;
-        }
-        return;
+/// Quit page: one button, no confirmation.
+fn quit(ui: &mut egui::Ui) {
+    ui.label("Leave the game and close the window.");
+    if ui.button("Quit the game").clicked() {
+        // memory card writes already went to the file; nothing else needs flushing
+        std::process::exit(0);
     }
-    ui.colored_label(
-        Color32::LIGHT_RED,
-        "Anything not saved in the game is lost. Quit now?",
-    );
-    ui.horizontal(|ui| {
-        if ui.button("No, go back").clicked() {
-            st.confirm_quit = false;
-        }
-        if ui.button("Yes, quit").clicked() {
-            // memory card writes already went to the file; nothing else needs flushing
-            std::process::exit(0);
-        }
-    });
 }
 
 const ACCENT: Color32 = Color32::from_rgb(120, 190, 255);
@@ -316,7 +299,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Controls => controls(ui, shared),
             Page::Card => card(ui, st, shared),
             Page::Help => help(ui, shared),
-            Page::Quit => quit(ui, st),
+            Page::Quit => quit(ui),
         });
         ui.separator();
         ui.label(
