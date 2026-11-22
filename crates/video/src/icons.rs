@@ -91,8 +91,8 @@ pub enum Anchor {
     /// Next to the icon of this GameCube button: the label sits beside it, on the outer side of the
     /// diamond, at this offset from the cluster centre in the GameCube layout.
     Icon(Action, (f32, f32)),
-    /// Moves by this many pixels whenever the diamond is in use (the C-stick's dot and caption move to the
-    /// right side, which has no label, to leave the left for the X button's caption).
+    /// Moves by this many pixels whenever the diamond is in use (the C-stick's dot and "Cond" caption go
+    /// up, into the free band between "Map Menu" and the X button's caption).
     Fixed((f32, f32)),
 }
 
@@ -121,19 +121,19 @@ pub const LABELS: &[KnownLabel] = &[
         height: 32,
         anchor: Anchor::Icon(Action::X, (67.0, -6.0)),
     },
-    // "Cond" caption
+    // "Cond" caption, now at (-64, -28): top left, between "Map Menu" and "Next Unit"
     KnownLabel {
         sample: 0x9da3_0589_66e9_502f,
         width: 40,
         height: 16,
-        anchor: Anchor::Fixed((109.0, 17.0)),
+        anchor: Anchor::Fixed((-8.0, -9.0)),
     },
-    // the grey dot under the "Cond" caption (the C-stick)
+    // the grey dot after the "Cond" caption (the C-stick), now at (-34, -28)
     KnownLabel {
         sample: 0xe100_f3c3_acc3_391c,
         width: 16,
         height: 16,
-        anchor: Anchor::Fixed((107.0, 17.0)),
+        anchor: Anchor::Fixed((21.0, -25.0)),
     },
 ];
 
