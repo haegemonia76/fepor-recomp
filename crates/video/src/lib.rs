@@ -17,6 +17,56 @@ mod present;
 pub const EFB_WIDTH: u32 = 640;
 pub const EFB_HEIGHT: u32 = 528;
 
+/// A multiply-rotate hasher (the maps here are keyed by small plain values hashed several times per draw;
+/// SipHash was 4 % of the guest thread in a battle).
+#[derive(Default, Clone, Copy)]
+struct Fx(u64);
+
+impl Fx {
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for c in bytes.chunks(8) {
+            let mut v = 0u64;
+            for (i, b) in c.iter().enumerate() {
+                v |= (*b as u64) << (8 * i);
+            }
+            self.add(v);
+        }
+    }
+    fn write_u8(&mut self, v: u8) {
+        self.add(v as u64);
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+
+/// The state recorded into the open render pass, to skip repeating it for every draw.
+#[derive(Default)]
+struct PassState {
+    viewport: Option<[f32; 4]>,
+    scissor: Option<[u32; 4]>,
+    pipeline: Option<wgpu::RenderPipeline>,
+    tbind: Option<wgpu::BindGroup>,
+    buffers_bound: bool,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuVertex {
@@ -194,19 +244,21 @@ pub struct Renderer {
     depth_view: wgpu::TextureView,
     texture_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
-    shaders: HashMap<u64, wgpu::ShaderModule>,
+    shaders: FastMap<u64, wgpu::ShaderModule>,
     /// Generated WGSL by `tev::shader_key`, with its hash: most draws repeat a shader seen before.
-    shader_srcs: HashMap<u64, (u64, Rc<str>)>,
-    pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
-    samplers: HashMap<(u8, u8, bool, bool), wgpu::Sampler>,
-    textures: HashMap<TexKey, Rc<wgpu::TextureView>>,
+    shader_srcs: FastMap<u64, (u64, Rc<str>)>,
+    pipelines: FastMap<PipelineKey, wgpu::RenderPipeline>,
+    samplers: FastMap<(u8, u8, bool, bool), wgpu::Sampler>,
+    textures: FastMap<TexKey, Rc<wgpu::TextureView>>,
     efb_textures: Vec<EfbTexture>,
     white: Rc<wgpu::TextureView>,
     encoder: Option<wgpu::CommandEncoder>,
     /// The open render pass: consecutive draws share it until something else needs the encoder.
     pass: Option<wgpu::RenderPass<'static>>,
     stream: Stream,
-    tex_binds: HashMap<TexBindKey, (wgpu::BindGroup, Vec<Rc<wgpu::TextureView>>)>,
+    tex_binds: FastMap<TexBindKey, (wgpu::BindGroup, Vec<Rc<wgpu::TextureView>>)>,
+    /// What the open pass already has set (see `emit`).
+    pstate: PassState,
     pending_clear: Option<([f64; 4], f32)>,
     /// Images shown per guest frame (1 = every frame as it comes).
     mult: u32,
@@ -479,17 +531,18 @@ impl Renderer {
             depth_view,
             texture_layout,
             pipeline_layout,
-            shaders: HashMap::new(),
-            shader_srcs: HashMap::new(),
-            pipelines: HashMap::new(),
-            samplers: HashMap::new(),
-            textures: HashMap::new(),
+            shaders: FastMap::default(),
+            shader_srcs: FastMap::default(),
+            pipelines: FastMap::default(),
+            samplers: FastMap::default(),
+            textures: FastMap::default(),
             efb_textures: Vec::new(),
             white,
             encoder: None,
             pass: None,
             stream,
-            tex_binds: HashMap::new(),
+            tex_binds: FastMap::default(),
+            pstate: PassState::default(),
             mult,
             scale,
             use_alt: false,
@@ -1014,8 +1067,10 @@ impl Renderer {
                 })
                 .forget_lifetime(),
             );
+            self.pstate = PassState::default();
         }
         let pass = self.pass.as_mut().expect("render pass");
+        let st = &mut self.pstate;
         let s = self.scale as f32;
         let [vx, vy, vw, vh, _, _] = r.viewport;
         let (x0, y0) = (vx.max(0.0), vy.max(0.0));
@@ -1024,7 +1079,11 @@ impl Renderer {
             (vy + vh).min(EFB_HEIGHT as f32),
         );
         if x1 > x0 && y1 > y0 {
-            pass.set_viewport(x0 * s, y0 * s, (x1 - x0) * s, (y1 - y0) * s, 0.0, 1.0);
+            let vp = [x0 * s, y0 * s, (x1 - x0) * s, (y1 - y0) * s];
+            if st.viewport != Some(vp) {
+                pass.set_viewport(vp[0], vp[1], vp[2], vp[3], 0.0, 1.0);
+                st.viewport = Some(vp);
+            }
         }
         let [sx, sy, sw, sh] = r.scissor;
         let (sx0, sy0) = (
@@ -1037,29 +1096,40 @@ impl Renderer {
         );
         if sx1 > sx0 && sy1 > sy0 {
             let k = self.scale;
-            pass.set_scissor_rect(
+            let sc = [
                 sx0 as u32 * k,
                 sy0 as u32 * k,
                 (sx1 - sx0) as u32 * k,
                 (sy1 - sy0) as u32 * k,
-            );
+            ];
+            if st.scissor != Some(sc) {
+                pass.set_scissor_rect(sc[0], sc[1], sc[2], sc[3]);
+                st.scissor = Some(sc);
+            }
         }
-        pass.set_pipeline(&r.pipeline);
+        // Most draws in a row share pipeline and textures: only changes are recorded. The vertex and index
+        // buffers are bound whole, once per pass; each draw addresses its slice with first_index/base_vertex.
+        if st.pipeline.as_ref() != Some(&r.pipeline) {
+            pass.set_pipeline(&r.pipeline);
+            st.pipeline = Some(r.pipeline.clone());
+        }
         pass.set_bind_group(0, &self.stream.ubind, &[uoff as u32]);
-        pass.set_bind_group(1, &r.tbind, &[]);
-        pass.set_vertex_buffer(
-            0,
-            self.stream
-                .vbuf
-                .slice(voff as u64..(voff + vbytes.len()) as u64),
+        if st.tbind.as_ref() != Some(&r.tbind) {
+            pass.set_bind_group(1, &r.tbind, &[]);
+            st.tbind = Some(r.tbind.clone());
+        }
+        if !st.buffers_bound {
+            pass.set_vertex_buffer(0, self.stream.vbuf.slice(..));
+            pass.set_index_buffer(self.stream.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            st.buffers_bound = true;
+        }
+        let first_index = (ioff / 4) as u32;
+        let base_vertex = (voff / std::mem::size_of::<GpuVertex>()) as i32;
+        pass.draw_indexed(
+            first_index..first_index + r.indices.len() as u32,
+            base_vertex,
+            0..1,
         );
-        pass.set_index_buffer(
-            self.stream
-                .ibuf
-                .slice(ioff as u64..(ioff + ibytes.len()) as u64),
-            wgpu::IndexFormat::Uint32,
-        );
-        pass.draw_indexed(0..r.indices.len() as u32, 0, 0..1);
     }
 
     fn clear_pass(&mut self, color: [f64; 4], z: f32, color_update: bool, z_update: bool) {
