@@ -151,6 +151,70 @@ pub fn decode(
         ram.get(at..).unwrap_or(&[])
     };
 
+    // what does not change from one vertex to the next, read once per draw
+    struct Chan {
+        vertex_colour: bool,
+        vertex_alpha: bool,
+        vertex_ambient: bool,
+        lit: bool,
+        diffuse_func: u32,
+        mat: [f32; 4],
+        amb: [f32; 4],
+        /// The enabled lights: position (or direction) in view space and colour.
+        lights: [([f32; 3], [f32; 3]); 8],
+        n_lights: usize,
+    }
+    let chans: [Chan; 2] = std::array::from_fn(|c| {
+        let ctrl = xf.reg(0x100E + c);
+        let mask = (ctrl >> 2 & 15) | (ctrl >> 11 & 15) << 4;
+        let mut lights = [([0.0f32; 3], [0.0f32; 3]); 8];
+        let mut n_lights = 0;
+        for l in 0..8 {
+            if mask >> l & 1 == 0 {
+                continue;
+            }
+            let lb = 0x600 + l * 16;
+            let lc = packed_rgba(xf.mem[lb + 3]);
+            lights[n_lights] = (
+                [xf.f(lb + 10), xf.f(lb + 11), xf.f(lb + 12)],
+                [lc[0], lc[1], lc[2]],
+            );
+            n_lights += 1;
+        }
+        Chan {
+            vertex_colour: ctrl & 1 != 0,
+            vertex_alpha: xf.reg(0x1010 + c) & 1 != 0,
+            vertex_ambient: ctrl >> 6 & 1 != 0,
+            lit: ctrl >> 1 & 1 != 0,
+            diffuse_func: ctrl >> 7 & 3,
+            mat: packed_rgba(xf.reg(0x100C + c)),
+            amb: packed_rgba(xf.reg(0x100A + c)),
+            lights,
+            n_lights,
+        }
+    });
+    let lighting = (0..num_chan).any(|c| chans[c].lit);
+    struct TexGen {
+        stq: bool,
+        abc1: bool,
+        ty: u32,
+        row: u32,
+    }
+    let texgens: [TexGen; 8] = std::array::from_fn(|n| {
+        let info = xf.reg(0x1040 + n.min(7));
+        TexGen {
+            stq: info >> 1 & 1 != 0,
+            abc1: info >> 2 & 1 != 0,
+            ty: info >> 4 & 7,
+            row: info >> 7 & 31,
+        }
+    });
+    // matrices are read again only when the index changes (a skinned mesh changes it per bone, not per vertex)
+    let (mut pm_idx, mut pm) = (usize::MAX, [[0.0f32; 4]; 3]);
+    let (mut nm_idx, mut nm) = (usize::MAX, [[0.0f32; 3]; 3]);
+    let mut tm_idx = [usize::MAX; 8];
+    let mut tm = [[[0.0f32; 4]; 3]; 8];
+
     for v in 0..count {
         let mut r = Reader {
             data: data.get(v * size..).unwrap_or(&[]),
@@ -246,7 +310,10 @@ pub fn decode(
         }
 
         // transform
-        let pm = xf.pos_matrix(pos_mtx);
+        if pm_idx != pos_mtx {
+            pm = xf.pos_matrix(pos_mtx);
+            pm_idx = pos_mtx;
+        }
         let view = mul34(&pm, [p[0], p[1], p[2], 1.0]);
         let clip: [f32; 4] = std::array::from_fn(|r| {
             proj[r][0] * view[0] + proj[r][1] * view[1] + proj[r][2] * view[2] + proj[r][3]
@@ -260,9 +327,15 @@ pub fn decode(
             },
         );
         let depth = ((ndc_z * zr + zf) / 16_777_215.0).clamp(0.0, 1.0);
-        let nm = xf.normal_matrix(pos_mtx);
-        let n_view: [f32; 3] =
-            std::array::from_fn(|r| nm[r][0] * nrm[0] + nm[r][1] * nrm[1] + nm[r][2] * nrm[2]);
+        let n_view: [f32; 3] = if lighting {
+            if nm_idx != pos_mtx {
+                nm = xf.normal_matrix(pos_mtx);
+                nm_idx = pos_mtx;
+            }
+            std::array::from_fn(|r| nm[r][0] * nrm[0] + nm[r][1] * nrm[1] + nm[r][2] * nrm[2])
+        } else {
+            [0.0; 3]
+        };
 
         let mut vert = Vertex {
             pos: [clip[0], clip[1], depth * w, w],
@@ -276,52 +349,40 @@ pub fn decode(
                 vert.col[c] = [1.0; 4];
                 continue;
             }
-            let ctrl = xf.reg(0x100E + c);
-            let actrl = xf.reg(0x1010 + c);
-            let mat = packed_rgba(xf.reg(0x100C + c));
-            let amb = packed_rgba(xf.reg(0x100A + c));
-            let base_rgb = if ctrl & 1 != 0 {
+            let ch = &chans[c];
+            let base_rgb = if ch.vertex_colour {
                 vcol[c]
                     .map(|v| [v[0], v[1], v[2]])
-                    .unwrap_or([mat[0], mat[1], mat[2]])
+                    .unwrap_or([ch.mat[0], ch.mat[1], ch.mat[2]])
             } else {
-                [mat[0], mat[1], mat[2]]
+                [ch.mat[0], ch.mat[1], ch.mat[2]]
             };
-            let alpha = if actrl & 1 != 0 {
-                vcol[c].map(|v| v[3]).unwrap_or(mat[3])
+            let alpha = if ch.vertex_alpha {
+                vcol[c].map(|v| v[3]).unwrap_or(ch.mat[3])
             } else {
-                mat[3]
+                ch.mat[3]
             };
             let mut rgb = base_rgb;
-            if ctrl >> 1 & 1 != 0 {
-                let amb_rgb = if ctrl >> 6 & 1 != 0 {
+            if ch.lit {
+                let mut lit = if ch.vertex_ambient {
                     vcol[c]
                         .map(|v| [v[0], v[1], v[2]])
-                        .unwrap_or([amb[0], amb[1], amb[2]])
+                        .unwrap_or([ch.amb[0], ch.amb[1], ch.amb[2]])
                 } else {
-                    [amb[0], amb[1], amb[2]]
+                    [ch.amb[0], ch.amb[1], ch.amb[2]]
                 };
-                let mask = (ctrl >> 2 & 15) | (ctrl >> 11 & 15) << 4;
-                let mut lit = amb_rgb;
-                for l in 0..8 {
-                    if mask >> l & 1 == 0 {
-                        continue;
-                    }
-                    let lb = 0x600 + l * 16;
-                    let lc = packed_rgba(xf.mem[lb + 3]);
-                    // dpos holds the light position (point) or direction (directional) in view space
-                    let d = [xf.f(lb + 10), xf.f(lb + 11), xf.f(lb + 12)];
-                    let mut ldir = [d[0] - view[0], d[1] - view[1], d[2] - view[2]];
+                for (lpos, lcol) in &ch.lights[..ch.n_lights] {
+                    // lpos is the light position (point) or direction (directional) in view space
+                    let mut ldir = [lpos[0] - view[0], lpos[1] - view[1], lpos[2] - view[2]];
                     let len = (ldir[0] * ldir[0] + ldir[1] * ldir[1] + ldir[2] * ldir[2])
                         .sqrt()
                         .max(1e-6);
                     ldir = [ldir[0] / len, ldir[1] / len, ldir[2] / len];
                     let ndotl =
                         (n_view[0] * ldir[0] + n_view[1] * ldir[1] + n_view[2] * ldir[2]).max(0.0);
-                    let dfunc = ctrl >> 7 & 3;
-                    let diff = if dfunc == 0 { 1.0 } else { ndotl };
+                    let diff = if ch.diffuse_func == 0 { 1.0 } else { ndotl };
                     for k in 0..3 {
-                        lit[k] += lc[k] * diff;
+                        lit[k] += lcol[k] * diff;
                     }
                 }
                 rgb = [
@@ -335,38 +396,38 @@ pub fn decode(
 
         // texture coordinate generation
         for n in 0..num_tex {
-            let info = xf.reg(0x1040 + n);
-            let stq = info >> 1 & 1 != 0;
-            let abc1 = info >> 2 & 1 != 0;
-            let ty = info >> 4 & 7;
-            let row = info >> 7 & 31;
-            let src: [f32; 3] = match row {
+            let g = &texgens[n];
+            let src: [f32; 3] = match g.row {
                 0 => p,
                 1 => nrm,
                 2 => [vert.col[0][0], vert.col[0][1], vert.col[0][2]],
-                5..=12 => tc[(row - 5) as usize],
+                5..=12 => tc[(g.row - 5) as usize],
                 _ => [0.0; 3],
             };
-            if ty != 0 {
+            if g.ty != 0 {
                 // emboss/colour generation is not modelled: pass the source through
                 vert.uv[n] = [src[0], src[1], 1.0];
                 continue;
             }
-            let input = [src[0], src[1], if abc1 { src[2] } else { 1.0 }, 1.0];
-            let tm = xf.pos_matrix(tex_mtx[n]);
-            let s = tm[0][0] * input[0]
-                + tm[0][1] * input[1]
-                + tm[0][2] * input[2]
-                + tm[0][3] * input[3];
-            let t = tm[1][0] * input[0]
-                + tm[1][1] * input[1]
-                + tm[1][2] * input[2]
-                + tm[1][3] * input[3];
-            let q = if stq {
-                tm[2][0] * input[0]
-                    + tm[2][1] * input[1]
-                    + tm[2][2] * input[2]
-                    + tm[2][3] * input[3]
+            let input = [src[0], src[1], if g.abc1 { src[2] } else { 1.0 }, 1.0];
+            if tm_idx[n] != tex_mtx[n] {
+                tm[n] = xf.pos_matrix(tex_mtx[n]);
+                tm_idx[n] = tex_mtx[n];
+            }
+            let tmx = &tm[n];
+            let s = tmx[0][0] * input[0]
+                + tmx[0][1] * input[1]
+                + tmx[0][2] * input[2]
+                + tmx[0][3] * input[3];
+            let t = tmx[1][0] * input[0]
+                + tmx[1][1] * input[1]
+                + tmx[1][2] * input[2]
+                + tmx[1][3] * input[3];
+            let q = if g.stq {
+                tmx[2][0] * input[0]
+                    + tmx[2][1] * input[1]
+                    + tmx[2][2] * input[2]
+                    + tmx[2][3] * input[3]
             } else {
                 1.0
             };

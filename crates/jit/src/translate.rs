@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     types, AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value,
 };
@@ -963,11 +963,248 @@ impl<'a, 'm> Tr<'a, 'm> {
     }
 
     fn fp_exec(&mut self, ins: Ins) {
+        if self.inline_fp(ins) {
+            return;
+        }
+        self.fp_helper(ins);
+    }
+
+    fn fp_helper(&mut self, ins: Ins) {
         let w = self.c32(ins.code);
         self.call("fepor_jit_fp", &[self.ptr, I32], None, &[self.ctx, w]);
         if let Some(n) = fp::cr_field_written(ins) {
             self.reload_cr_field(n);
         }
+    }
+
+    fn fpr(&mut self, n: u8, lane: i32) -> Value {
+        self.b.ins().load(
+            types::F64,
+            flags(),
+            self.ctx,
+            128 + 16 * n as i32 + 8 * lane,
+        )
+    }
+
+    fn set_fpr(&mut self, n: u8, lane: i32, v: Value) {
+        self.b
+            .ins()
+            .store(flags(), v, self.ctx, 128 + 16 * n as i32 + 8 * lane);
+    }
+
+    /// `round_single`: to single precision and back.
+    fn round_single(&mut self, v: Value) -> Value {
+        let s = self.b.ins().fdemote(types::F32, v);
+        self.b.ins().fpromote(types::F64, s)
+    }
+
+    /// The multiplier of a single-precision multiply keeps its top 25 mantissa bits (infinities and NaNs pass).
+    fn force25(&mut self, v: Value) -> Value {
+        let b = self.b.ins().bitcast(I64, MemFlagsData::new(), v);
+        let exp = self.b.ins().ushr_imm_s(b, 52);
+        let exp = self.b.ins().band_imm_s(exp, 0x7FF);
+        let special = self.b.ins().icmp_imm_s(IntCC::Equal, exp, 0x7FF);
+        let hi = self.b.ins().band_imm_s(b, 0xFFFF_FFFF_F800_0000u64 as i64);
+        let lo = self.b.ins().band_imm_s(b, 0x0800_0000);
+        let forced = self.b.ins().iadd(hi, lo);
+        let r = self.b.ins().select(special, b, forced);
+        self.b.ins().bitcast(types::F64, MemFlagsData::new(), r)
+    }
+
+    /// Instructions whose result is the plain IEEE one unless it is a NaN (the PowerPC rules for which NaN
+    /// comes out are in the helper): compute, and when any result is a NaN run the helper instead.
+    /// Returns false for the ones left to the helper (record forms, estimates, selects, compares, FPSCR).
+    fn inline_fp(&mut self, ins: Ins) -> bool {
+        use Opcode::*;
+        if ins.field_rc() {
+            return false;
+        }
+        let (fd, fa, fb, fc) = (
+            ins.field_frd(),
+            ins.field_fra(),
+            ins.field_frb(),
+            ins.field_frc(),
+        );
+        let single = matches!(
+            ins.op,
+            Fadds | Fsubs | Fmuls | Fdivs | Fmadds | Fmsubs | Fnmadds | Fnmsubs
+        );
+        // moves and sign changes: no arithmetic, no NaN rules
+        match ins.op {
+            Fmr | Fneg | Fabs | Fnabs => {
+                let y = self.fpr(fb, 0);
+                let v = match ins.op {
+                    Fmr => y,
+                    Fneg => self.b.ins().fneg(y),
+                    Fabs => self.b.ins().fabs(y),
+                    _ => {
+                        let a = self.b.ins().fabs(y);
+                        self.b.ins().fneg(a)
+                    }
+                };
+                self.set_fpr(fd, 0, v);
+                return true;
+            }
+            PsMr | PsNeg | PsAbs | PsNabs => {
+                for lane in 0..2 {
+                    let y = self.fpr(fb, lane);
+                    let v = match ins.op {
+                        PsMr => y,
+                        PsNeg => self.b.ins().fneg(y),
+                        PsAbs => self.b.ins().fabs(y),
+                        _ => {
+                            let a = self.b.ins().fabs(y);
+                            self.b.ins().fneg(a)
+                        }
+                    };
+                    self.set_fpr(fd, lane, v);
+                }
+                return true;
+            }
+            PsMerge00 | PsMerge01 | PsMerge10 | PsMerge11 => {
+                let (la, lb) = match ins.op {
+                    PsMerge00 => (0, 0),
+                    PsMerge01 => (0, 1),
+                    PsMerge10 => (1, 0),
+                    _ => (1, 1),
+                };
+                let (x, y) = (self.fpr(fa, la), self.fpr(fb, lb));
+                self.set_fpr(fd, 0, x);
+                self.set_fpr(fd, 1, y);
+                return true;
+            }
+            _ => {}
+        }
+        // lanes computed: (result lane 0, result lane 1 for the paired ones)
+        let paired = matches!(
+            ins.op,
+            PsAdd
+                | PsSub
+                | PsMul
+                | PsDiv
+                | PsMadd
+                | PsMsub
+                | PsNmadd
+                | PsNmsub
+                | PsMuls0
+                | PsMuls1
+                | PsMadds0
+                | PsMadds1
+        );
+        let scalar = matches!(
+            ins.op,
+            Fadd | Fsub
+                | Fmul
+                | Fdiv
+                | Fadds
+                | Fsubs
+                | Fmuls
+                | Fdivs
+                | Fmadd
+                | Fmsub
+                | Fnmadd
+                | Fnmsub
+                | Fmadds
+                | Fmsubs
+                | Fnmadds
+                | Fnmsubs
+        );
+        if !paired && !scalar {
+            return false;
+        }
+        let lanes = if paired { 2 } else { 1 };
+        let mut results = Vec::new();
+        for lane in 0..lanes {
+            let (a, b) = (self.fpr(fa, lane), self.fpr(fb, lane));
+            // the multiplier: the register C itself, or one lane of it for the `s0`/`s1` forms
+            let cl = match ins.op {
+                PsMuls0 | PsMadds0 => 0,
+                PsMuls1 | PsMadds1 => 1,
+                _ => lane,
+            };
+            let mut c = self.fpr(fc, cl);
+            if single || paired {
+                c = self.force25(c);
+            }
+            let mut r = match ins.op {
+                Fadd | Fadds | PsAdd => self.b.ins().fadd(a, b),
+                Fsub | Fsubs | PsSub => self.b.ins().fsub(a, b),
+                Fdiv | Fdivs | PsDiv => self.b.ins().fdiv(a, b),
+                Fmul | Fmuls | PsMul | PsMuls0 | PsMuls1 => {
+                    let m = if matches!(ins.op, Fmul) {
+                        self.fpr(fc, lane)
+                    } else {
+                        c
+                    };
+                    self.b.ins().fmul(a, m)
+                }
+                Fmadd | Fmadds | Fnmadd | Fnmadds | PsMadd | PsNmadd | PsMadds0 | PsMadds1 => {
+                    let m = if matches!(ins.op, Fmadd | Fnmadd) {
+                        self.fpr(fc, lane)
+                    } else {
+                        c
+                    };
+                    self.b.ins().fma(a, m, b)
+                }
+                _ => {
+                    // msub, nmsub: a * c - b
+                    let m = if matches!(ins.op, Fmsub | Fnmsub) {
+                        self.fpr(fc, lane)
+                    } else {
+                        c
+                    };
+                    let nb = self.b.ins().fneg(b);
+                    self.b.ins().fma(a, m, nb)
+                }
+            };
+            if single || paired {
+                r = self.round_single(r);
+            }
+            if matches!(
+                ins.op,
+                Fnmadd | Fnmadds | Fnmsub | Fnmsubs | PsNmadd | PsNmsub
+            ) {
+                // negated unless it is a NaN, which goes to the helper anyway
+                r = self.b.ins().fneg(r);
+            }
+            results.push(r);
+        }
+        // a NaN anywhere: the PowerPC rules pick which one, the helper knows them
+        let mut bad = self
+            .b
+            .ins()
+            .fcmp(FloatCC::Unordered, results[0], results[0]);
+        if lanes == 2 {
+            let b1 = self
+                .b
+                .ins()
+                .fcmp(FloatCC::Unordered, results[1], results[1]);
+            bad = self.b.ins().bor(bad, b1);
+        }
+        let (slow, store, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        self.b.set_cold_block(slow);
+        self.b.ins().brif(bad, slow, &[], store, &[]);
+        self.b.switch_to_block(slow);
+        self.fp_helper(ins);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(store);
+        if paired {
+            self.set_fpr(fd, 0, results[0]);
+            self.set_fpr(fd, 1, results[1]);
+        } else if single {
+            // single-precision scalars fill both halves
+            self.set_fpr(fd, 0, results[0]);
+            self.set_fpr(fd, 1, results[0]);
+        } else {
+            self.set_fpr(fd, 0, results[0]);
+        }
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        true
     }
 
     fn fp_mem(&mut self, ins: Ins, ea: Value, update: Option<u8>) {

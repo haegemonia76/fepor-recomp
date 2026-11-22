@@ -430,6 +430,9 @@ pub struct Renderer {
     stale_efb: u64,
     /// Hash of the texture data at (address, size), valid until the end of the frame.
     hash_memo: FastMap<(usize, usize), u64>,
+    /// Index and vertex bytes of the draw being built, kept between draws to avoid allocating for each.
+    scratch_idx: Vec<u32>,
+    scratch_vb: Vec<u8>,
     stats: StatsState,
     /// Whether the statistics overlay is shown (the settings' `show_stats`, applied each frame).
     show_stats: bool,
@@ -670,6 +673,8 @@ impl Renderer {
             stale_palette: 0,
             stale_efb: 0,
             hash_memo: FastMap::default(),
+            scratch_idx: Vec::new(),
+            scratch_vb: Vec::new(),
             trace_icons: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "icons")),
             draws: 0,
@@ -1161,42 +1166,46 @@ impl Renderer {
 
     fn draw(&mut self, d: DrawCall, ram: &[u8], tluts: &Tluts) {
         let n = d.vertices.len();
-        let (indices, topology) = match d.prim {
-            Primitive::Triangles => (
-                (0..n as u32 / 3 * 3).collect::<Vec<_>>(),
-                wgpu::PrimitiveTopology::TriangleList,
-            ),
-            Primitive::Quads => (
-                (0..n as u32 / 4)
-                    .flat_map(|q| [4 * q, 4 * q + 1, 4 * q + 2, 4 * q, 4 * q + 2, 4 * q + 3])
-                    .collect(),
-                wgpu::PrimitiveTopology::TriangleList,
-            ),
-            Primitive::TriangleStrip => (
-                (2..n as u32)
-                    .flat_map(|i| {
-                        if i % 2 == 0 {
-                            [i - 2, i - 1, i]
-                        } else {
-                            [i - 1, i - 2, i]
-                        }
-                    })
-                    .collect(),
-                wgpu::PrimitiveTopology::TriangleList,
-            ),
-            Primitive::TriangleFan => (
-                (2..n as u32).flat_map(|i| [0, i - 1, i]).collect(),
-                wgpu::PrimitiveTopology::TriangleList,
-            ),
-            Primitive::Lines => (
-                (0..n as u32 / 2 * 2).collect(),
-                wgpu::PrimitiveTopology::LineList,
-            ),
-            Primitive::LineStrip => (
-                (1..n as u32).flat_map(|i| [i - 1, i]).collect(),
-                wgpu::PrimitiveTopology::LineList,
-            ),
-            Primitive::Points => ((0..n as u32).collect(), wgpu::PrimitiveTopology::PointList),
+        let mut indices = std::mem::take(&mut self.scratch_idx);
+        indices.clear();
+        let topology = match d.prim {
+            Primitive::Triangles => {
+                indices.extend(0..n as u32 / 3 * 3);
+                wgpu::PrimitiveTopology::TriangleList
+            }
+            Primitive::Quads => {
+                indices.extend(
+                    (0..n as u32 / 4)
+                        .flat_map(|q| [4 * q, 4 * q + 1, 4 * q + 2, 4 * q, 4 * q + 2, 4 * q + 3]),
+                );
+                wgpu::PrimitiveTopology::TriangleList
+            }
+            Primitive::TriangleStrip => {
+                indices.extend((2..n as u32).flat_map(|i| {
+                    if i % 2 == 0 {
+                        [i - 2, i - 1, i]
+                    } else {
+                        [i - 1, i - 2, i]
+                    }
+                }));
+                wgpu::PrimitiveTopology::TriangleList
+            }
+            Primitive::TriangleFan => {
+                indices.extend((2..n as u32).flat_map(|i| [0, i - 1, i]));
+                wgpu::PrimitiveTopology::TriangleList
+            }
+            Primitive::Lines => {
+                indices.extend(0..n as u32 / 2 * 2);
+                wgpu::PrimitiveTopology::LineList
+            }
+            Primitive::LineStrip => {
+                indices.extend((1..n as u32).flat_map(|i| [i - 1, i]));
+                wgpu::PrimitiveTopology::LineList
+            }
+            Primitive::Points => {
+                indices.extend(0..n as u32);
+                wgpu::PrimitiveTopology::PointList
+            }
         };
         if indices.is_empty() {
             return;
@@ -1220,7 +1229,9 @@ impl Renderer {
         let n_uv = tev::tex_inputs(&state);
         let stride = tev::vertex_stride(n_uv);
         let quant = |c: [f32; 4]| c.map(|x| (x * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
-        let mut vb: Vec<u8> = Vec::with_capacity(nverts * stride);
+        let mut vb = std::mem::take(&mut self.scratch_vb);
+        vb.clear();
+        vb.reserve(nverts * stride);
         for v in &d.vertices {
             vb.extend_from_slice(bytemuck::cast_slice(&v.pos));
             vb.extend_from_slice(&quant(v.col[0]));
@@ -1323,6 +1334,10 @@ impl Renderer {
         self.emit(&rec, &rec.verts);
         if self.mult > 1 && !self.use_alt {
             self.rec.push(Rec::Draw(rec));
+        } else {
+            // not kept for interpolation: the buffers serve the next draw
+            self.scratch_idx = rec.indices;
+            self.scratch_vb = rec.verts;
         }
     }
 
