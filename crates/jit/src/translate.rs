@@ -87,6 +87,8 @@ pub(crate) fn register_symbols(jb: &mut JITBuilder, hle: &HleSymbols) {
         ("fepor_jit_fpmem", fp::fepor_jit_fpmem as *const u8),
         ("fepor_jit_dcbz", fp::fepor_jit_dcbz as *const u8),
         ("fepor_jit_tw", fp::fepor_jit_tw as *const u8),
+        ("fepor_jit_s2d", fp::fepor_jit_s2d as *const u8),
+        ("fepor_jit_d2s", fp::fepor_jit_d2s as *const u8),
     ];
     for &(n, p) in syms {
         jb.symbol(n, p);
@@ -1208,13 +1210,109 @@ impl<'a, 'm> Tr<'a, 'm> {
     }
 
     fn fp_mem(&mut self, ins: Ins, ea: Value, update: Option<u8>) {
-        let w = self.c32(ins.code);
-        self.call(
-            "fepor_jit_fpmem",
-            &[self.ptr, I32, I32],
-            None,
-            &[self.ctx, w, ea],
-        );
+        use Opcode::*;
+        match ins.op {
+            Lfs | Lfsu | Lfsx | Lfsux => {
+                let bits = self.ld(ea, 4);
+                // an infinity or NaN keeps its payload bits (the helper), everything else is a plain widening
+                let exp = self.b.ins().ushr_imm_s(bits, 23);
+                let exp = self.b.ins().band_imm_s(exp, 0xFF);
+                let special = self.b.ins().icmp_imm_s(IntCC::Equal, exp, 0xFF);
+                let (slow, fast, merge) = (
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                );
+                self.b.append_block_param(merge, types::F64);
+                self.b.set_cold_block(slow);
+                self.b.ins().brif(special, slow, &[], fast, &[]);
+                self.b.switch_to_block(fast);
+                let s = self.b.ins().bitcast(types::F32, MemFlagsData::new(), bits);
+                let v = self.b.ins().fpromote(types::F64, s);
+                self.b.ins().jump(merge, &[v.into()]);
+                self.b.switch_to_block(slow);
+                let r = self
+                    .call("fepor_jit_s2d", &[I32], Some(I64), &[bits])
+                    .expect("s2d result");
+                let v = self.b.ins().bitcast(types::F64, MemFlagsData::new(), r);
+                self.b.ins().jump(merge, &[v.into()]);
+                self.b.switch_to_block(merge);
+                let v = self.b.block_params(merge)[0];
+                let fd = ins.field_frd();
+                self.set_fpr(fd, 0, v);
+                self.set_fpr(fd, 1, v);
+            }
+            Lfd | Lfdu | Lfdx | Lfdux => {
+                let hi = self.ld(ea, 4);
+                let ea4 = self.b.ins().iadd_imm_s(ea, 4);
+                let lo = self.ld(ea4, 4);
+                let hi = self.b.ins().uextend(I64, hi);
+                let lo = self.b.ins().uextend(I64, lo);
+                let hi = self.b.ins().ishl_imm_s(hi, 32);
+                let bits = self.b.ins().bor(hi, lo);
+                let v = self.b.ins().bitcast(types::F64, MemFlagsData::new(), bits);
+                self.set_fpr(ins.field_frd(), 0, v);
+            }
+            Stfs | Stfsu | Stfsx | Stfsux => {
+                let d = self.fpr(ins.field_frs(), 0);
+                let x = self.b.ins().bitcast(I64, MemFlagsData::new(), d);
+                // normal range, zero: the single is the top bits (truncated, as the hardware does); the
+                // small values that become denormal singles go to the helper
+                let exp = self.b.ins().ushr_imm_s(x, 52);
+                let exp = self.b.ins().band_imm_s(exp, 0x7FF);
+                let big = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::UnsignedGreaterThan, exp, 896);
+                let twice = self.b.ins().ishl_imm_s(x, 1);
+                let zero = self.b.ins().icmp_imm_s(IntCC::Equal, twice, 0);
+                let plain = self.b.ins().bor(big, zero);
+                let (slow, fast, merge) = (
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                );
+                self.b.append_block_param(merge, I32);
+                self.b.set_cold_block(slow);
+                self.b.ins().brif(plain, fast, &[], slow, &[]);
+                self.b.switch_to_block(fast);
+                let top = self.b.ins().ushr_imm_s(x, 32);
+                let top = self.b.ins().ireduce(I32, top);
+                let sign_exp = self.b.ins().band_imm_s(top, 0xC000_0000u32 as i64);
+                let low = self.b.ins().ushr_imm_s(x, 29);
+                let low = self.b.ins().ireduce(I32, low);
+                let low = self.b.ins().band_imm_s(low, 0x3FFF_FFFF);
+                let v = self.b.ins().bor(sign_exp, low);
+                self.b.ins().jump(merge, &[v.into()]);
+                self.b.switch_to_block(slow);
+                let v = self
+                    .call("fepor_jit_d2s", &[I64], Some(I32), &[x])
+                    .expect("d2s result");
+                self.b.ins().jump(merge, &[v.into()]);
+                self.b.switch_to_block(merge);
+                let v = self.b.block_params(merge)[0];
+                self.st(ea, v, 4);
+            }
+            Stfd | Stfdu | Stfdx | Stfdux => {
+                let d = self.fpr(ins.field_frs(), 0);
+                let x = self.b.ins().bitcast(I64, MemFlagsData::new(), d);
+                let hi = self.b.ins().ushr_imm_s(x, 32);
+                let hi = self.b.ins().ireduce(I32, hi);
+                let lo = self.b.ins().ireduce(I32, x);
+                self.st(ea, hi, 4);
+                let ea4 = self.b.ins().iadd_imm_s(ea, 4);
+                self.st(ea4, lo, 4);
+            }
+            _ => {
+                let w = self.c32(ins.code);
+                self.call(
+                    "fepor_jit_fpmem",
+                    &[self.ptr, I32, I32],
+                    None,
+                    &[self.ctx, w, ea],
+                );
+            }
+        }
         if let Some(a) = update {
             self.set_r(a, ea);
         }

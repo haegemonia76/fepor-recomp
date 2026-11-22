@@ -688,3 +688,13 @@ pub extern "C" fn fepor_jit_tw(to: u32, a: u32, b: u32) -> u32 {
         || (a < b && to & 2 != 0)
         || (a > b && to & 1 != 0)) as u32
 }
+
+/// `lfs` of an infinity or NaN: the payload bits are kept (the generated code widens everything else).
+pub extern "C" fn fepor_jit_s2d(x: u32) -> u64 {
+    single_to_double(x).to_bits()
+}
+
+/// `stfs` of a value that is neither zero nor in the normal range of a single.
+pub extern "C" fn fepor_jit_d2s(x: u64) -> u32 {
+    double_to_single(f64::from_bits(x))
+}

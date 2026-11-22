@@ -289,7 +289,8 @@ pub fn path_in(data: &Path) -> PathBuf {
     data.join("settings.toml")
 }
 
-/// Copy into `file` every value that differs between `before` and `after`.
+/// Copy into `file` every value that differs between `before` and `after`. A value that `after` lacks
+/// (an `Option` set back to `None` is left out of the TOML) is removed from `file`.
 fn apply_changes(file: &mut toml::Value, before: &toml::Value, after: &toml::Value) {
     let (Some(f), Some(b), Some(a)) = (file.as_table_mut(), before.as_table(), after.as_table())
     else {
@@ -303,6 +304,9 @@ fn apply_changes(file: &mut toml::Value, before: &toml::Value, after: &toml::Val
                 f.insert(k.clone(), av.clone());
             }
         }
+    }
+    for k in b.keys().filter(|k| !a.contains_key(*k)) {
+        f.remove(k);
     }
 }
 
@@ -431,6 +435,20 @@ mod tests {
         h.update(|s| s.video.resolution = 3);
         assert_eq!(h.generation(), g0 + 1);
         assert_eq!(Settings::load(&path).video.resolution, 3);
+    }
+
+    #[test]
+    fn going_back_to_the_system_audio_device_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let h = SettingsHandle::new(Settings::default(), path.clone());
+        h.update(|s| s.audio.device = Some("Soundbar".into()));
+        assert_eq!(
+            Settings::load(&path).audio.device.as_deref(),
+            Some("Soundbar")
+        );
+        h.update(|s| s.audio.device = None);
+        assert_eq!(Settings::load(&path).audio.device, None);
     }
 
     #[test]

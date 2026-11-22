@@ -125,7 +125,11 @@ impl Gx {
                 for i in 0..count {
                     self.xf.write(addr + i, be32(&d[5 + 4 * i..]));
                 }
-                self.snapshot = None;
+                // the snapshot reads only XF registers (the viewport): matrix and light loads, which come
+                // before every object, keep it
+                if addr + count > 0x1000 {
+                    self.snapshot = None;
+                }
                 Step::Done(5 + 4 * count)
             }
             0x20 | 0x28 | 0x30 | 0x38 => {
@@ -146,7 +150,7 @@ impl Gx {
                         self.xf.write(addr + i, be32(w));
                     }
                 }
-                self.snapshot = None;
+                // indexed loads reach 0x0000..0x0FFF only (matrices, normals, lights): not part of the snapshot
                 Step::Done(5)
             }
             0x40 => {
