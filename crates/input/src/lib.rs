@@ -87,10 +87,32 @@ impl Action {
             Action::CRight => "C-stick right",
         }
     }
+
+    /// A few characters for a tag on a drawing of a pad.
+    pub fn short(self) -> &'static str {
+        match self {
+            Action::A | Action::B | Action::X | Action::Y | Action::Z | Action::L | Action::R => {
+                self.label()
+            }
+            Action::Start => "Start",
+            Action::DpadUp => "D-Up",
+            Action::DpadDown => "D-Dn",
+            Action::DpadLeft => "D-Lt",
+            Action::DpadRight => "D-Rt",
+            Action::StickUp => "S-Up",
+            Action::StickDown => "S-Dn",
+            Action::StickLeft => "S-Lt",
+            Action::StickRight => "S-Rt",
+            Action::CUp => "C-Up",
+            Action::CDown => "C-Dn",
+            Action::CLeft => "C-Lt",
+            Action::CRight => "C-Rt",
+        }
+    }
 }
 
 /// Which family of button icons to show for GameCube buttons the player has mapped.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum GlyphSet {
     #[default]
     GameCube,
@@ -703,6 +725,27 @@ impl Controls {
         self.cfg.bindings = Bindings::default();
         self.generation += 1;
         let _ = self.cfg.save(&self.path);
+    }
+
+    /// Bind the input `source` of the keyboard or the gamepad to `action` (the action's earlier source on that
+    /// device is released, as is the action the source had). Saved at once.
+    pub fn assign(&mut self, keyboard: bool, source: &str, action: Action) {
+        self.cfg.bind(keyboard, source, action);
+        self.generation += 1;
+        let _ = self.cfg.save(&self.path);
+    }
+
+    /// Leave `source` unbound.
+    pub fn unassign(&mut self, keyboard: bool, source: &str) {
+        let map = if keyboard {
+            &mut self.cfg.bindings.keyboard
+        } else {
+            &mut self.cfg.bindings.gamepad
+        };
+        if map.remove(source).is_some() {
+            self.generation += 1;
+            let _ = self.cfg.save(&self.path);
+        }
     }
 
     /// One input event. `keyboard` selects the device; `value` is 0 on release.

@@ -65,6 +65,9 @@ pub struct UiState {
     /// Saves waiting in the imports folder, re-read every couple of seconds.
     pending: Vec<String>,
     pending_at: Option<Instant>,
+    pad: crate::pad::PadView,
+    /// The gamepad input picked on the drawing of the pad.
+    pad_selected: Option<&'static str>,
 }
 
 impl UiState {
@@ -77,6 +80,8 @@ impl UiState {
             picker: None,
             pending: Vec::new(),
             pending_at: None,
+            pad: crate::pad::PadView::default(),
+            pad_selected: None,
         }
     }
 }
@@ -308,7 +313,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| match st.page {
             Page::Video => video(ui, shared),
             Page::Audio => audio(ui, shared),
-            Page::Controls => controls(ui, shared),
+            Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
             Page::Help => help(ui, shared),
             Page::Quit => quit(ui),
@@ -421,7 +426,7 @@ fn audio(ui: &mut egui::Ui, shared: &Shared) {
     }
 }
 
-fn controls(ui: &mut egui::Ui, shared: &Shared) {
+fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     let Ok(mut c) = shared.controls.lock() else {
         return;
     };
@@ -445,19 +450,53 @@ fn controls(ui: &mut egui::Ui, shared: &Shared) {
         ui.separator();
     }
     let cfg = c.config().clone();
-    ui.horizontal(|ui| {
-        ui.label(crate::theme::caption("Button names"));
-        for g in [
-            GlyphSet::GameCube,
-            GlyphSet::Xbox,
-            GlyphSet::Nintendo,
-            GlyphSet::PlayStation,
+    ui.horizontal_wrapped(|ui| {
+        ui.label(crate::theme::caption("Controller"));
+        for (g, name) in [
+            (GlyphSet::GameCube, "GameCube names"),
+            (GlyphSet::Xbox, "Xbox"),
+            (GlyphSet::Nintendo, "Nintendo"),
+            (GlyphSet::PlayStation, "PlayStation"),
         ] {
-            if ui.radio(cfg.glyphs == g, format!("{g:?}")).clicked() {
+            if ui.radio(cfg.glyphs == g, name).clicked() {
                 c.set_glyphs(g);
+                st.pad_selected = None;
             }
         }
     });
+    ui.add_space(4.0);
+    crate::pad::show(ui, &mut st.pad, &c, &mut st.pad_selected);
+    ui.add_space(4.0);
+    // the GameCube buttons to give to the input picked on the drawing
+    match st.pad_selected {
+        Some(source) => {
+            ui.label(crate::theme::caption(format!(
+                "{} does:",
+                cfg.glyphs.source_label(source)
+            )));
+            let current = cfg.bindings.gamepad.get(source).copied();
+            ui.horizontal_wrapped(|ui| {
+                for a in Action::ALL {
+                    if ui.selectable_label(current == Some(a), a.label()).clicked() {
+                        c.assign(false, source, a);
+                        st.pad_selected = None;
+                    }
+                }
+                if ui.button("Nothing").clicked() {
+                    c.unassign(false, source);
+                    st.pad_selected = None;
+                }
+            });
+        }
+        None => {
+            ui.label(
+                RichText::new("Click a button on the controller, then choose the GameCube button it stands for.")
+                    .small()
+                    .color(crate::theme::DIM),
+            );
+        }
+    }
+    ui.add_space(8.0);
     let mut dz = cfg.deadzone;
     ui.horizontal(|ui| {
         ui.label(crate::theme::caption("Stick dead zone"));
@@ -466,50 +505,34 @@ fn controls(ui: &mut egui::Ui, shared: &Shared) {
     if (dz - cfg.deadzone).abs() > 1e-4 {
         c.set_deadzone(dz);
     }
-    ui.add_space(6.0);
+    ui.add_space(8.0);
+    ui.label(crate::theme::caption("Keyboard"));
     let mut rebind = None;
     egui::Grid::new("bindings")
         .striped(true)
-        .num_columns(5)
+        .num_columns(3)
         .show(ui, |ui| {
-            ui.label(crate::theme::caption("GameCube"));
-            ui.label(crate::theme::caption("Keyboard"));
-            ui.label("");
-            ui.label(crate::theme::caption("Gamepad"));
-            ui.label("");
-            ui.end_row();
             for a in Action::ALL {
                 ui.label(a.label());
-                for keyboard in [true, false] {
-                    let names: Vec<String> = cfg
-                        .sources_of(keyboard, a)
-                        .into_iter()
-                        .map(|s| {
-                            if keyboard {
-                                s.to_string()
-                            } else {
-                                cfg.glyphs.source_label(s)
-                            }
-                        })
-                        .collect();
-                    ui.label(if names.is_empty() {
-                        "-".to_string()
-                    } else {
-                        names.join(", ")
-                    });
-                    if ui.small_button("Rebind").clicked() {
-                        rebind = Some((keyboard, a));
-                    }
+                let names: Vec<&str> = cfg.sources_of(true, a);
+                ui.label(if names.is_empty() {
+                    "-".to_string()
+                } else {
+                    names.join(", ")
+                });
+                if ui.small_button("Rebind").clicked() {
+                    rebind = Some(a);
                 }
                 ui.end_row();
             }
         });
-    if let Some((keyboard, a)) = rebind {
-        c.rebind(keyboard, a);
+    if let Some(a) = rebind {
+        c.rebind(true, a);
     }
     ui.add_space(6.0);
     if ui.button("Restore the default bindings").clicked() {
         c.reset_bindings();
+        st.pad_selected = None;
     }
 }
 
