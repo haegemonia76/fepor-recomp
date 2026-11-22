@@ -67,6 +67,7 @@ struct PassState {
     pipeline: Option<wgpu::RenderPipeline>,
     tbind: Option<wgpu::BindGroup>,
     buffers_bound: bool,
+    uoff: Option<usize>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -112,7 +113,7 @@ const UNIFORM_BYTES: usize = tev::UNIFORM_FLOATS * 4;
 const UNIFORM_STRIDE: usize = UNIFORM_BYTES.div_ceil(256) * 256;
 
 /// Texture bind group identity: the view pointers and the sampler state of the eight maps.
-type TexBindKey = ([usize; 8], [(u8, u8, bool, bool); 8]);
+type TexBindKey = ([usize; 8], [u8; 8]);
 
 /// Per-submit draw data: filled on the CPU while draws are recorded, uploaded once before the submit.
 struct Stream {
@@ -123,6 +124,8 @@ struct Stream {
     vdata: Vec<u8>,
     idata: Vec<u8>,
     udata: Vec<u8>,
+    /// Offset of the uniforms recorded last, for reuse.
+    last_u: Option<usize>,
 }
 
 impl Stream {
@@ -156,6 +159,7 @@ impl Stream {
             vdata: Vec::new(),
             idata: Vec::new(),
             udata: Vec::new(),
+            last_u: None,
         }
     }
 }
@@ -641,6 +645,7 @@ impl Renderer {
             s.vdata.clear();
             s.idata.clear();
             s.udata.clear();
+            s.last_u = None;
             self.queue.submit([e.finish()]);
         }
         self.tex_binds.clear();
@@ -1182,20 +1187,21 @@ impl Renderer {
                 }
             }
         }
-        let views: Vec<Rc<wgpu::TextureView>> = (0..8)
-            .map(|m| {
-                if used[m] {
-                    self.texture(&state.textures[m], ram, tluts)
-                } else {
-                    self.white.clone()
-                }
-            })
-            .collect();
+        let views: [Rc<wgpu::TextureView>; 8] = std::array::from_fn(|m| {
+            if used[m] {
+                self.texture(&state.textures[m], ram, tluts)
+            } else {
+                self.white.clone()
+            }
+        });
         let key: TexBindKey = (
             std::array::from_fn(|m| Rc::as_ptr(&views[m]) as usize),
             std::array::from_fn(|m| {
                 let t = &state.textures[m];
-                (t.wrap_s, t.wrap_t, t.mag_linear, t.min_linear)
+                t.wrap_s & 3
+                    | (t.wrap_t & 3) << 2
+                    | (t.mag_linear as u8) << 4
+                    | (t.min_linear as u8) << 5
             }),
         );
         if !self.tex_binds.contains_key(&key) {
@@ -1218,7 +1224,7 @@ impl Renderer {
                 entries: &entries,
             });
             // the views stay alive with the bind group, so their pointers stay unique keys
-            self.tex_binds.insert(key, (bind, views));
+            self.tex_binds.insert(key, (bind, views.to_vec()));
         }
         let tbind = self.tex_binds[&key].0.clone();
 
@@ -1265,11 +1271,21 @@ impl Renderer {
         // a vertex stream is addressed with base_vertex in units of this draw's stride: start on one
         let vpad = pad(s.vdata.len());
         s.vdata.resize(s.vdata.len() + vpad, 0);
-        let (voff, ioff, uoff) = (s.vdata.len(), s.idata.len(), s.udata.len());
+        let (voff, ioff) = (s.vdata.len(), s.idata.len());
         s.vdata.extend_from_slice(vbytes);
         s.idata.extend_from_slice(ibytes);
-        s.udata.extend_from_slice(bytemuck::cast_slice(&r.uniforms));
-        s.udata.resize(uoff + UNIFORM_STRIDE, 0);
+        // most draws in a row share their TEV state: keep one copy of identical uniforms
+        let ub: &[u8] = bytemuck::cast_slice(&r.uniforms);
+        let uoff = match s.last_u {
+            Some(o) if s.udata[o..o + ub.len()] == *ub => o,
+            _ => {
+                let o = s.udata.len();
+                s.udata.extend_from_slice(ub);
+                s.udata.resize(o + UNIFORM_STRIDE, 0);
+                s.last_u = Some(o);
+                o
+            }
+        };
 
         let clear = self.pending_clear.take();
         if clear.is_some() {
@@ -1366,7 +1382,10 @@ impl Renderer {
             pass.set_pipeline(&r.pipeline);
             st.pipeline = Some(r.pipeline.clone());
         }
-        pass.set_bind_group(0, &self.stream.ubind, &[uoff as u32]);
+        if st.uoff != Some(uoff) {
+            pass.set_bind_group(0, &self.stream.ubind, &[uoff as u32]);
+            st.uoff = Some(uoff);
+        }
         if st.tbind.as_ref() != Some(&r.tbind) {
             pass.set_bind_group(1, &r.tbind, &[]);
             st.tbind = Some(r.tbind.clone());

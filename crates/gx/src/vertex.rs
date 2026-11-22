@@ -34,18 +34,23 @@ impl Reader<'_> {
 }
 
 fn read_comp(src: &[u8], at: usize, c: Comp, shift: u32) -> f32 {
-    let g = |n: usize| src.get(at..at + n).unwrap_or(&[0; 4][..n]).to_vec();
+    // missing bytes read as zero
+    let mut b = [0u8; 4];
+    let n = c.size();
+    if let Some(s) = src.get(at..at + n) {
+        b[..n].copy_from_slice(s);
+    }
     let scale = if c == Comp::F32 {
         1.0
     } else {
         1.0 / (1u32 << shift) as f32
     };
     match c {
-        Comp::U8 => g(1)[0] as f32 * scale,
-        Comp::I8 => g(1)[0] as i8 as f32 * scale,
-        Comp::U16 => u16::from_be_bytes(g(2).try_into().unwrap()) as f32 * scale,
-        Comp::I16 => i16::from_be_bytes(g(2).try_into().unwrap()) as f32 * scale,
-        Comp::F32 => f32::from_be_bytes(g(4).try_into().unwrap()),
+        Comp::U8 => b[0] as f32 * scale,
+        Comp::I8 => b[0] as i8 as f32 * scale,
+        Comp::U16 => u16::from_be_bytes([b[0], b[1]]) as f32 * scale,
+        Comp::I16 => i16::from_be_bytes([b[0], b[1]]) as f32 * scale,
+        Comp::F32 => f32::from_be_bytes(b),
     }
 }
 
@@ -170,14 +175,12 @@ pub fn decode(
         let mut p = [0.0f32; 3];
         if f.pos.present() {
             let n = 2 + f.pos_xyz as usize;
-            let (src, base): (Vec<u8>, usize) = match f.pos {
-                Form::Direct => (r.take(n * f.pos_fmt.size()).to_vec(), 0),
+            let (src, base): (&[u8], usize) = match f.pos {
+                Form::Direct => (r.take(n * f.pos_fmt.size()), 0),
                 form => {
                     let idx = r.index(form);
-                    (
-                        array(0, idx)[..(n * f.pos_fmt.size()).min(array(0, idx).len())].to_vec(),
-                        0,
-                    )
+                    let a = array(0, idx);
+                    (&a[..(n * f.pos_fmt.size()).min(a.len())], 0)
                 }
             };
             for (i, c) in p.iter_mut().enumerate().take(n) {
@@ -193,12 +196,12 @@ pub fn decode(
                 Comp::I16 | Comp::U16 => 14,
                 _ => 0,
             };
-            let src: Vec<u8> = match f.normal {
-                Form::Direct => r.take(comps * f.normal_fmt.size()).to_vec(),
+            let src: &[u8] = match f.normal {
+                Form::Direct => r.take(comps * f.normal_fmt.size()),
                 form => {
                     let idx = r.index(form);
                     let a = array(1, idx);
-                    a[..(comps * f.normal_fmt.size()).min(a.len())].to_vec()
+                    &a[..(comps * f.normal_fmt.size()).min(a.len())]
                 }
             };
             for (i, c) in nrm.iter_mut().enumerate() {
@@ -210,12 +213,12 @@ pub fn decode(
         for c in 0..2 {
             if f.color[c].present() {
                 let sz = f.color_fmt[c].size();
-                let src: Vec<u8> = match f.color[c] {
-                    Form::Direct => r.take(sz).to_vec(),
+                let src: &[u8] = match f.color[c] {
+                    Form::Direct => r.take(sz),
                     form => {
                         let idx = r.index(form);
                         let a = array(2 + c, idx);
-                        a[..sz.min(a.len())].to_vec()
+                        &a[..sz.min(a.len())]
                     }
                 };
                 vcol[c] = Some(color(&src, f.color_fmt[c]));
@@ -227,12 +230,12 @@ pub fn decode(
             if f.tex[t].present() {
                 let n = 1 + f.tex_st[t] as usize;
                 let sz = n * f.tex_fmt[t].size();
-                let src: Vec<u8> = match f.tex[t] {
-                    Form::Direct => r.take(sz).to_vec(),
+                let src: &[u8] = match f.tex[t] {
+                    Form::Direct => r.take(sz),
                     form => {
                         let idx = r.index(form);
                         let a = array(4 + t, idx);
-                        a[..sz.min(a.len())].to_vec()
+                        &a[..sz.min(a.len())]
                     }
                 };
                 for i in 0..n {
