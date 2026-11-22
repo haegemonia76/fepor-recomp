@@ -205,6 +205,14 @@ fn mix(h: u64, v: u64) -> u64 {
     (h ^ v).wrapping_mul(0x100_0000_01b3)
 }
 
+/// `FEPOR_TRACE=interp`: report draws the interpolation moves in a suspicious way.
+fn trace_interp() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "interp"))
+    })
+}
+
 /// Vertices of `cur` moved `t` of the way from where `prev` had them. Anything that jumps across the
 /// screen (a cut, a teleport) or has no counterpart is left as it is in `cur`.
 fn lerp_verts(prev: Option<&RecDraw>, cur: &RecDraw, t: f32) -> Vec<u8> {
@@ -227,6 +235,31 @@ fn lerp_verts(prev: Option<&RecDraw>, cur: &RecDraw, t: f32) -> Vec<u8> {
             f32::from_le_bytes([v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]])
         })
     };
+    if trace_interp() {
+        // a small draw (a sprite) should move as one piece
+        let d: Vec<[f32; 2]> = p
+            .verts
+            .chunks_exact(s)
+            .zip(cur.verts.chunks_exact(s))
+            .filter_map(|(a, b)| {
+                let (a, b) = (pos(a), pos(b));
+                (a[3] > 0.0 && b[3] > 0.0)
+                    .then(|| [b[0] / b[3] - a[0] / a[3], b[1] / b[3] - a[1] / a[3]])
+            })
+            .collect();
+        if d.len() == cur.verts.len() / s
+            && d.len() <= 6
+            && d.iter()
+                .any(|x| (x[0] - d[0][0]).abs() > 0.01 || (x[1] - d[0][1]).abs() > 0.01)
+        {
+            eprintln!(
+                "interp: non-rigid {} verts, sig {:x}, NDC moves {:?}",
+                d.len(),
+                cur.sig,
+                d
+            );
+        }
+    }
     let mut out = cur.verts.clone();
     for (v, (a, b)) in out
         .chunks_exact_mut(s)

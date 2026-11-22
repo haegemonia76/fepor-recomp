@@ -135,6 +135,12 @@ fn deliver(c: &mut Context, number: u32) {
         // The handler returned normally: the interrupted code continues with its own registers.
         // SAFETY: same type, plain data.
         unsafe { std::ptr::copy_nonoverlapping(&*saved as *const Context, c as *mut Context, 1) };
+    } else {
+        // This thread was resumed by OSLoadContext, which restored the integer registers from the
+        // OSContext. The SDK's exception stub would have saved the floating-point registers (both halves
+        // of every pair) and loads them back here; the handler ran on this context and left its own in
+        // them, which broke whatever float code was interrupted (a column of the video's IDCT).
+        c.f = saved.f;
+        c.fpscr = saved.fpscr;
     }
-    // else: this thread was resumed by OSLoadContext, which already restored the registers.
 }
