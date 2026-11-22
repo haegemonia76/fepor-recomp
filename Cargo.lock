@@ -1302,10 +1302,13 @@ dependencies = [
 name = "fepor-overlay"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "bytemuck",
  "egui",
+ "epaint_default_fonts",
  "fepor-core",
  "fepor-input",
+ "png 0.17.16",
  "tempfile",
  "wgpu 26.0.1",
  "winit",
@@ -1358,6 +1361,7 @@ dependencies = [
  "bytemuck",
  "fepor-core",
  "fepor-gx",
+ "fepor-input",
  "fepor-overlay",
  "png 0.17.16",
  "pollster 0.4.0",

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::stats::StatsSnapshot;
 use fepor_core::settings::SettingsHandle;
-use fepor_input::Controls;
+use fepor_input::{Action, Controls};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -155,6 +155,31 @@ impl Shared {
     pub(crate) fn set_ui_ppp(&self, ppp: f32) {
         self.ui_ppp_x100
             .store((ppp * 100.0) as u32, Ordering::Relaxed);
+    }
+
+    /// Changes whenever the bindings or the button-name family change: icons made before are stale.
+    pub fn icon_generation(&self) -> u64 {
+        self.controls.lock().map_or(0, |c| c.generation())
+    }
+
+    /// The image to draw in place of the game's icon for GameCube button `action`, `w` x `h` pixels of
+    /// straight-alpha RGBA: the gamepad button it is bound to, in the style of the chosen family. `None`
+    /// when the game's own art should stay (GameCube family, or nothing bound on the gamepad).
+    pub fn button_icon(
+        &self,
+        action: Action,
+        w: u32,
+        h: u32,
+        shape: crate::glyphs::Shape,
+    ) -> Option<Vec<u8>> {
+        let (family, source) = {
+            let c = self.controls.lock().ok()?;
+            let cfg = c.config();
+            let mut sources = cfg.sources_of(false, action);
+            sources.sort_unstable();
+            (cfg.glyphs, sources.first()?.to_string())
+        };
+        crate::glyphs::render(family, &source, w, h, shape)
     }
 
     pub fn toggle(&self) {
@@ -392,7 +417,6 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fepor_input::Action;
 
     fn shared() -> (Arc<Shared>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();

@@ -12,6 +12,7 @@ use fepor_gx::state::{CopyEfb, DrawCall, Event, Primitive, RenderState, Sink, Te
 use fepor_gx::{tev, texture};
 use wgpu::util::DeviceExt;
 
+mod icons;
 mod present;
 mod sysstat;
 
@@ -373,6 +374,8 @@ pub struct Renderer {
     stats: StatsState,
     /// Whether the statistics overlay is shown (the settings' `show_stats`, applied each frame).
     show_stats: bool,
+    /// The `icon_generation` the cached textures were made for.
+    icon_gen: u64,
     /// Monotonic totals of the guest thread's time in draw/copy events and in interpolated images.
     tot_events: Duration,
     tot_interp: Duration,
@@ -580,6 +583,7 @@ impl Renderer {
             fps_since: Instant::now(),
             stats: StatsState::new(&adapter_info),
             show_stats: false,
+            icon_gen: 0,
             tot_events: Duration::ZERO,
             tot_interp: Duration::ZERO,
             cull: std::env::var("FEPOR_CULL").is_ok(),
@@ -685,13 +689,23 @@ impl Renderer {
             })
             .or_else(|| tluts.data.values().next())
             .map(|v| (v.as_slice(), d.tlut_format));
-        let rgba = texture::decode(d.format, d.width, d.height, data, tlut);
+        let mut rgba = texture::decode(d.format, d.width, d.height, data, tlut);
+        // the dump keeps the game's own art: it is how new icons are found
         if let Some(dir) = &self.dump_textures {
             let path = dir.join(format!(
                 "tex_{:08x}_{}x{}_f{}_{:016x}.png",
                 d.addr, d.width, d.height, d.format, sample
             ));
             write_png(&path, d.width, d.height, png::ColorType::Rgba, &rgba);
+        }
+        if let Some(icon) = icons::find(sample, d.width, d.height) {
+            let replacement = self.overlay.as_ref().and_then(|o| {
+                o.shared()
+                    .button_icon(icon.action, d.width, d.height, icon.shape)
+            });
+            if let Some(img) = replacement {
+                rgba = img;
+            }
         }
         let tex = self.device.create_texture_with_data(
             &self.queue,
@@ -1410,6 +1424,16 @@ impl Renderer {
     /// followed by the real one.
     fn show_frame(&mut self, c: &CopyEfb) {
         self.apply_settings();
+        // the player changed the bindings or the button-name family: icons made before are stale
+        let icon_gen = self
+            .overlay
+            .as_ref()
+            .map_or(0, |o| o.shared().icon_generation());
+        if icon_gen != self.icon_gen {
+            self.icon_gen = icon_gen;
+            self.textures.clear();
+            self.tex_binds.clear();
+        }
         if self.presenter.is_none() && self.dump.is_none() {
             return;
         }

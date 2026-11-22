@@ -11,7 +11,10 @@ fepor-input.workspace = true
 egui = { version = "0.37.0", default-features = false, features = ["default_fonts", "bytemuck"] }
 wgpu = "26"
 bytemuck = { version = "1", features = ["derive"] }
+ab_glyph = "0.2"
+epaint_default_fonts = "0.37"
 winit.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+png = "0.17"

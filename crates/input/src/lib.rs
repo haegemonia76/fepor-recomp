@@ -564,6 +564,7 @@ pub struct Controls {
     /// Sources of the device being remapped that are currently held down.
     held: std::collections::HashSet<String>,
     suspended: bool,
+    generation: u64,
 }
 
 impl Controls {
@@ -576,11 +577,18 @@ impl Controls {
             message: None,
             held: Default::default(),
             suspended: false,
+            generation: 1,
         }
     }
 
     pub fn config(&self) -> &InputConfig {
         &self.cfg
+    }
+
+    /// Bumped whenever the bindings or the glyph family change, so that whoever draws button icons knows
+    /// when to redraw them.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     fn publish(&self) {
@@ -681,6 +689,7 @@ impl Controls {
 
     pub fn set_glyphs(&mut self, glyphs: GlyphSet) {
         self.cfg.glyphs = glyphs;
+        self.generation += 1;
         let _ = self.cfg.save(&self.path);
     }
 
@@ -692,6 +701,7 @@ impl Controls {
     /// Back to the default bindings (glyph family and dead zone kept).
     pub fn reset_bindings(&mut self) {
         self.cfg.bindings = Bindings::default();
+        self.generation += 1;
         let _ = self.cfg.save(&self.path);
     }
 
@@ -710,6 +720,7 @@ impl Controls {
                     } else {
                         r.feed(&mut self.cfg, Some(source))
                     };
+                    self.generation += 1;
                     match step {
                         RemapStep::Done => {
                             let _ = self.cfg.save(&self.path);

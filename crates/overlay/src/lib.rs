@@ -3,6 +3,7 @@
 //! Threads: the window thread and the gamepad thread push input into [`Shared`]; the render thread owns the
 //! [`Overlay`], runs the UI once per presented image and paints it with our own wgpu painter.
 
+pub mod glyphs;
 mod paint;
 mod shared;
 mod stats;
