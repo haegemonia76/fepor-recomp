@@ -24,7 +24,7 @@ impl Cp {
             0x70 => self.vat_a[n & 7] = value,
             0x80 => self.vat_b[n & 7] = value,
             0x90 => self.vat_c[n & 7] = value,
-            0xA0 => self.array_base[n] = value & 0x03FF_FFFF,
+            0xA0 => self.array_base[n] = value & 0x01FF_FFFF,
             0xB0 => self.array_stride[n] = value & 0xFF,
             _ => {}
         }

@@ -27,6 +27,7 @@ pub struct Gx {
     buf: Vec<u8>,
     snapshot: Option<Arc<RenderState>>,
     trace: bool,
+    trace_tlut: bool,
 }
 
 enum Step {
@@ -52,6 +53,8 @@ impl Gx {
             log_frame: std::env::var("FEPOR_GX_LOG")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            trace_tlut: std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "tlut")),
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gx" || x == "all")),
         }
@@ -151,9 +154,12 @@ impl Gx {
                     return Step::NeedMore;
                 }
                 let (addr, size) = (
-                    (be32(&d[1..]) & 0x03FF_FFFF) as usize,
+                    (be32(&d[1..]) & 0x01FF_FFFF) as usize,
                     be32(&d[5..]) as usize,
                 );
+                if self.trace_tlut {
+                    eprintln!("tlut: display list {addr:08x} size {size:#x}");
+                }
                 if let Some(list) = ram.get(addr..addr + size) {
                     let list = list.to_vec();
                     let mut pos = 0;
@@ -229,6 +235,9 @@ impl Gx {
     }
 
     fn bp_write(&mut self, reg: usize, value: u32, ram: &[u8], sink: &mut dyn Sink) {
+        if self.trace_tlut && matches!(reg, 0x60..=0x6F | 0x98..=0x9B) {
+            eprintln!("tlut: bp {reg:#04x} <- {value:#08x}");
+        }
         self.bp.write(reg, value);
         match reg {
             bp::TRIGGER_COPY => {
@@ -267,9 +276,18 @@ impl Gx {
                 sink.event(Event::Token(value as u16), ram, &self.tluts)
             }
             bp::LOAD_TLUT1 => {
-                let src = ((self.bp.regs[bp::LOAD_TLUT0] & 0x00FF_FFFF) << 5) as usize;
+                // main memory is mirrored every 32 MiB: the register has junk bits above the address (the game sets
+                // them), which the hardware ignores
+                let src =
+                    (((self.bp.regs[bp::LOAD_TLUT0] & 0x00FF_FFFF) << 5) & 0x01FF_FFFF) as usize;
                 let (tmem, count) = (value & 0x3FF, (value >> 10 & 0x7FF) as usize);
                 if let Some(data) = ram.get(src..src + count * 32) {
+                    if self.trace_tlut {
+                        eprintln!(
+                            "tlut: load {src:08x} -> tmem {tmem:x}, {count} blocks, first entries {:02x?}",
+                            &data[..8.min(data.len())]
+                        );
+                    }
                     self.tluts.data.insert(tmem, data.to_vec());
                 }
             }

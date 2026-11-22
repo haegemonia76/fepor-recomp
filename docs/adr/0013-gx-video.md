@@ -14,3 +14,9 @@ Status: accepted
 - **Not yet**: gamepad input, fullscreen/scaling options, a GPU-independent software path, and a comparison against Dolphin frame dumps.
 
 Related device work done for this milestone: SI with one scripted controller (`FEPOR_PAD=A@400+8,...`), the DSP boot answering `DSP_INIT`/AX sync mails, AI DMA interrupts at the programmed buffer rate, and ARAM DMA triggered by the low half of the count register.
+
+## Addresses in BP and CP registers (flicker of the dialogue portraits)
+
+Main memory is mirrored every 32 MiB and the hardware ignores the bits above the address. The game leaves junk there: `LOAD_TLUT0` holds `0x23ed32` or `0x4668ce` where the address is `0x03ed32`/`0x0668ce`, for the loads that run right before a draw. Reading `src` unmasked fell outside RAM, the palette load was dropped silently, and the draw used the previous palette for one frame (the whole portrait in wrong colours, every 20 to 90 frames while a face animates). The TLUT source, the display-list address and the vertex array bases are now masked with `0x01FF_FFFF`, as texture addresses already were. In a scripted run of the first dialogues: about 25 one-frame flickers in 700 frames before, 1 small block after.
+
+Debugging aids that found it: `FEPOR_TRACE=tlut` (every palette load and palette-related BP write, display list call), `FEPOR_TEXWATCH=<hex address>` and `FEPOR_TEXWATCH_PAL=1` (each use of a texture, with its palette hash), `FEPOR_TRACE=texnew` (each texture decoded, with the palette memory).

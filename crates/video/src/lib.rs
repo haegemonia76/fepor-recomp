@@ -418,6 +418,12 @@ pub struct Renderer {
     fps_since: Instant,
     /// `FEPOR_TRACE=tex`: count the textures the old sampled key would have got wrong.
     trace_tex: bool,
+    /// `FEPOR_TRACE=texnew`: one line per texture decoded, with the frame number.
+    trace_texnew: bool,
+    /// `FEPOR_TEXWATCH=<hex address>`: print every use of a texture at that address.
+    tex_watch: Option<u32>,
+    /// `FEPOR_TEXWATCH_PAL=1`: the same for every palette texture.
+    tex_watch_pal: bool,
     seen_sampled: FastMap<(TextureDesc, u64), (u64, u64)>,
     stale_data: u64,
     stale_palette: u64,
@@ -653,6 +659,12 @@ impl Renderer {
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gx" || x == "all")),
             trace_tex: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "tex")),
+            trace_texnew: std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "texnew")),
+            tex_watch: std::env::var("FEPOR_TEXWATCH")
+                .ok()
+                .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
+            tex_watch_pal: std::env::var("FEPOR_TEXWATCH_PAL").is_ok(),
             seen_sampled: FastMap::default(),
             stale_data: 0,
             stale_palette: 0,
@@ -768,11 +780,42 @@ impl Renderer {
             content,
             palette,
         };
+        if self.tex_watch == Some(d.addr) || (self.tex_watch_pal && (8..=10).contains(&d.format)) {
+            eprintln!(
+                "texwatch: frame {} {:08x} {}x{} tlut {:x} content {:016x} palette {:016x} cached {}",
+                self.frame,
+                d.addr,
+                d.width,
+                d.height,
+                d.tlut_offset,
+                key.content,
+                key.palette,
+                self.textures.contains_key(&key)
+            );
+        }
         if let Some(t) = self.textures.get(&key) {
             return t.clone();
         }
         // the sampled fingerprint names the texture in dumps and finds the button icons
         let sample = Self::fingerprint(data, size);
+        if self.trace_texnew {
+            let mut loaded: Vec<(u32, usize)> =
+                tluts.data.iter().map(|(k, v)| (*k, v.len() / 2)).collect();
+            loaded.sort();
+            eprintln!(
+                "texnew: frame {} addr {:08x} {}x{} fmt {} tlut {:x} (exact {}) content {:016x} palette {:016x} loaded {:x?}",
+                self.frame,
+                d.addr,
+                d.width,
+                d.height,
+                d.format,
+                d.tlut_offset,
+                tluts.data.contains_key(&d.tlut_offset),
+                key.content,
+                key.palette,
+                loaded
+            );
+        }
         if self.trace_tex {
             // what the cache used to key on: a hit there with another content was a wrong texture
             let old = (*d, sample);
