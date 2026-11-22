@@ -54,6 +54,8 @@ pub enum Command {
     Generate(commands::generate::GenerateArgs),
     /// Generate and build the game from the player's copy, printing `progress` lines (RecompLauncher setup step).
     Prepare(commands::generate::GenerateArgs),
+    /// Start the built game (RecompLauncher's Play): logs to `<data>/logs`, exit code of the game.
+    Run,
     /// Check a raw memory card image (header/directory/BAT checksums) and list its saves.
     CardInfo {
         /// The `.raw` image.
@@ -107,6 +109,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Command::Analyze { report } => commands::analyze::run(&opts, report),
         Command::Generate(args) => commands::generate::run(&opts, &args, false),
         Command::Prepare(args) => commands::generate::run(&opts, &args, true),
+        Command::Run => commands::run::run(&opts),
         Command::Ls => commands::inspect::ls(&opts),
         Command::CardInfo { image } => commands::inspect::card_info(&image),
         Command::CardImport { image, gci } => commands::inspect::card_import(&image, &gci),

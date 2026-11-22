@@ -7,7 +7,7 @@ profile="${1:-$REPO_ROOT/packaging/recomplauncher.json}"
 schema="$REPO_ROOT/.cache/recomplauncher.schema.json"
 if [ ! -f "$schema" ]; then
     mkdir -p "$(dirname "$schema")"
-    curl -sSfL https://raw.githubusercontent.com/elripalda/RecompLauncher/main/docs/recomplauncher.schema.json -o "$schema"
+    curl -sSfL https://raw.githubusercontent.com/elripalda/RecompLauncher-SDK/main/schema/recomplauncher.json -o "$schema"
 fi
 "$TOOLS_PY" - "$profile" "$schema" <<'PY'
 import json, sys

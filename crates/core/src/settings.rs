@@ -269,6 +269,10 @@ impl Settings {
         {
             self.video.aspect = a;
         }
+        // started from the launcher's Big Picture mode: full screen, for this run
+        if std::env::var("RECOMPLAUNCHER_MODE").is_ok_and(|m| m == "bigpicture") {
+            self.video.fullscreen = true;
+        }
         if let Some(l) = std::env::var("FEPOR_LANG")
             .ok()
             .and_then(|v| Language::parse(&v))
@@ -285,27 +289,54 @@ pub fn path_in(data: &Path) -> PathBuf {
     data.join("settings.toml")
 }
 
+/// Copy into `file` every value that differs between `before` and `after`.
+fn apply_changes(file: &mut toml::Value, before: &toml::Value, after: &toml::Value) {
+    let (Some(f), Some(b), Some(a)) = (file.as_table_mut(), before.as_table(), after.as_table())
+    else {
+        return;
+    };
+    for (k, av) in a {
+        match (b.get(k), f.get_mut(k)) {
+            (Some(bv), Some(fv)) if av.is_table() => apply_changes(fv, bv, av),
+            (Some(bv), _) if bv == av => {}
+            _ => {
+                f.insert(k.clone(), av.clone());
+            }
+        }
+    }
+}
+
 /// Settings shared between the overlay (writer) and the renderer / audio thread (readers).
 #[derive(Clone)]
 pub struct SettingsHandle {
     inner: Arc<Mutex<Settings>>,
+    /// The settings as the file holds them.
+    file: Arc<Mutex<Settings>>,
     generation: Arc<AtomicU64>,
     path: Arc<PathBuf>,
 }
 
 impl SettingsHandle {
     pub fn new(settings: Settings, path: PathBuf) -> SettingsHandle {
+        SettingsHandle::with_file(settings.clone(), settings, path)
+    }
+
+    /// `file` is what `path` holds, `effective` what this run uses (the file plus overrides).
+    pub fn with_file(file: Settings, effective: Settings, path: PathBuf) -> SettingsHandle {
         SettingsHandle {
-            inner: Arc::new(Mutex::new(settings)),
+            inner: Arc::new(Mutex::new(effective)),
+            file: Arc::new(Mutex::new(file)),
             generation: Arc::new(AtomicU64::new(1)),
             path: Arc::new(path),
         }
     }
 
-    /// Loaded from `<data>/settings.toml` with the environment overrides applied.
+    /// Loaded from `<data>/settings.toml` with the environment overrides applied (for this run only: they
+    /// are not written back).
     pub fn load(data: &Path) -> SettingsHandle {
         let path = path_in(data);
-        SettingsHandle::new(Settings::load(&path).with_env_overrides(), path)
+        let file = Settings::load(&path);
+        SettingsHandle::with_file(file.clone(), file.with_env_overrides(), path)
     }
 
     pub fn get(&self) -> Settings {
@@ -324,7 +355,19 @@ impl SettingsHandle {
         edit(&mut g);
         g.clamp();
         if *g != before {
-            let _ = g.save(&self.path);
+            // what the player changed goes into the file; what only an environment override set does not
+            let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+            if let (Ok(mut f), Ok(b), Ok(a)) = (
+                toml::Value::try_from(&*file),
+                toml::Value::try_from(&before),
+                toml::Value::try_from(&*g),
+            ) {
+                apply_changes(&mut f, &b, &a);
+                if let Ok(s) = f.try_into::<Settings>() {
+                    *file = s;
+                }
+            }
+            let _ = file.save(&self.path);
             self.generation.fetch_add(1, Ordering::Release);
         }
     }
@@ -388,5 +431,26 @@ mod tests {
         h.update(|s| s.video.resolution = 3);
         assert_eq!(h.generation(), g0 + 1);
         assert_eq!(Settings::load(&path).video.resolution, 3);
+    }
+
+    #[test]
+    fn values_forced_for_one_run_are_not_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let file = Settings::default();
+        let mut forced = file.clone();
+        forced.video.fullscreen = true;
+        forced.video.frame_multiplier = 4;
+        let h = SettingsHandle::with_file(file, forced, path.clone());
+        h.update(|s| s.audio.volume = 0.5);
+        let saved = Settings::load(&path);
+        assert_eq!(saved.audio.volume, 0.5);
+        assert!(!saved.video.fullscreen);
+        assert_eq!(saved.video.frame_multiplier, 1);
+        // the run itself keeps what was forced
+        assert!(h.get().video.fullscreen);
+        // a change the player makes to a forced value does reach the file
+        h.update(|s| s.video.frame_multiplier = 2);
+        assert_eq!(Settings::load(&path).video.frame_multiplier, 2);
     }
 }

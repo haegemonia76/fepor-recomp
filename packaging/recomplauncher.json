@@ -16,10 +16,127 @@
     "done": ["{data}/prepared.json"]
   },
   "start": {
-    "program": ["fepor-game.exe", "fepor-game"],
-    "args": ["--data", "{data}"]
+    "program": ["fepor-recomp.exe", "fepor-recomp"],
+    "args": ["run", "--data", "{data}"]
   },
-  "saves": ["{data}/saves"],
+  "saves": ["{data}/memcards"],
+  "config": [
+    { "id": "main", "format": "toml", "file": [{ "path": "{data}/settings.toml" }] },
+    { "id": "input", "format": "toml", "file": [{ "path": "{data}/input.toml" }] }
+  ],
+  "settings": [
+    {
+      "id": "language",
+      "label": "Text language",
+      "group": "Game",
+      "help": "Menus, dialogue and windows. Applies the next time the game starts.",
+      "choices": [
+        { "label": "English", "set": { "game/language": "\"english\"" } },
+        { "label": "Deutsch", "set": { "game/language": "\"german\"" } },
+        { "label": "Français", "set": { "game/language": "\"french\"" } },
+        { "label": "Español", "set": { "game/language": "\"spanish\"" } },
+        { "label": "Italiano", "set": { "game/language": "\"italian\"" } }
+      ],
+      "defaults": { "game/language": "\"english\"" }
+    },
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "group": "Video",
+      "help": "What the game draws at. 1x is the console's own 640x528.",
+      "choices": [
+        { "label": "1x (native)", "set": { "video/resolution": "1" } },
+        { "label": "2x", "set": { "video/resolution": "2" } },
+        { "label": "3x", "set": { "video/resolution": "3" } },
+        { "label": "4x", "set": { "video/resolution": "4" } }
+      ],
+      "defaults": { "video/resolution": "1" }
+    },
+    {
+      "id": "frames",
+      "label": "Smoother motion",
+      "group": "Video",
+      "help": "Draws in-between images so that the 30 frame/s scenes move as smoothly as your screen allows. The game's own speed does not change.",
+      "choices": [
+        { "label": "Off (the game's own rate)", "set": { "video/frame_multiplier": "1" } },
+        { "label": "2x", "set": { "video/frame_multiplier": "2" } },
+        { "label": "3x", "set": { "video/frame_multiplier": "3" } },
+        { "label": "4x", "set": { "video/frame_multiplier": "4" } }
+      ],
+      "defaults": { "video/frame_multiplier": "1" }
+    },
+    {
+      "id": "aspect",
+      "label": "Picture shape",
+      "group": "Video",
+      "help": "The game is 4:3. The wide choices stretch it.",
+      "choices": [
+        { "label": "Original 4:3", "set": { "video/aspect": "\"fit\"" } },
+        { "label": "Fill the window", "set": { "video/aspect": "\"stretch\"" } },
+        { "label": "Stretched to 16:9", "set": { "video/aspect": "\"wide16x9\"" } },
+        { "label": "Stretched to 21:9", "set": { "video/aspect": "\"wide21x9\"" } }
+      ],
+      "defaults": { "video/aspect": "\"fit\"" }
+    },
+    {
+      "id": "fullscreen",
+      "label": "Window mode",
+      "group": "Video",
+      "choices": [
+        { "label": "Windowed", "set": { "video/fullscreen": "false" } },
+        { "label": "Full screen", "set": { "video/fullscreen": "true" } }
+      ],
+      "defaults": { "video/fullscreen": "false" }
+    },
+    {
+      "id": "vsync",
+      "label": "V-Sync",
+      "group": "Video",
+      "choices": [
+        { "label": "On", "set": { "video/vsync": "true" } },
+        { "label": "Off", "set": { "video/vsync": "false" } }
+      ],
+      "defaults": { "video/vsync": "true" }
+    },
+    {
+      "id": "stats",
+      "label": "Performance statistics",
+      "group": "Video",
+      "help": "Drawn over the game. F2 cycles them in the game.",
+      "advanced": true,
+      "choices": [
+        { "label": "Off", "set": { "video/stats": "\"off\"" } },
+        { "label": "Frame rate", "set": { "video/stats": "\"fps\"" } },
+        { "label": "Everything", "set": { "video/stats": "\"full\"" } }
+      ],
+      "defaults": { "video/stats": "\"off\"" }
+    },
+    {
+      "id": "volume",
+      "label": "Volume",
+      "group": "Audio",
+      "slider": { "key": "audio/volume", "min": 0, "max": 1, "step": 0.05, "format": "%.2f" },
+      "defaults": { "audio/volume": "1.0" }
+    },
+    {
+      "id": "glyphs",
+      "label": "Button names",
+      "group": "Controls",
+      "help": "Which controller's buttons the game's prompts show. Remapping is in the game's own overlay (F1, or the Guide button).",
+      "in": "input",
+      "choices": [
+        { "label": "GameCube", "set": { "glyphs": "\"GameCube\"" } },
+        { "label": "Xbox", "set": { "glyphs": "\"Xbox\"" } },
+        { "label": "Nintendo", "set": { "glyphs": "\"Nintendo\"" } },
+        { "label": "PlayStation", "set": { "glyphs": "\"PlayStation\"" } }
+      ],
+      "defaults": { "glyphs": "\"GameCube\"" }
+    }
+  ],
+  "groups": [{ "id": "Advanced", "advanced": true }],
+  "folders": {
+    "logs": [{ "path": "{data}/logs" }]
+  },
   "exit_codes": {
     "10": "The disc image could not be read. Pick the .iso, .rvz or .gcz of Fire Emblem: Path of Radiance (GFEP01).",
     "11": "This disc is not the European release (GFEP01) this recompilation supports.",

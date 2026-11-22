@@ -8,6 +8,7 @@ Reusable helpers. Extend these (or the `fepor-recomp` subcommands) instead of wr
 | `fepor-recomp analyze` | Function starts, jump tables and warnings; report in `<data>/analysis.txt`. |
 | `fepor-recomp generate` | Generate the C++ project into `<data>/generated`. |
 | `fepor-recomp prepare` | Generate and build; the RecompLauncher setup step (`progress` lines, stable exit codes). |
+| `fepor-recomp run --data <dir>` | Start the built game as RecompLauncher's Play does: log in `<data>/logs/fepor-game.log`, the game's exit code. Reads `RECOMPLAUNCHER_MODE` and `RECOMPLAUNCHER_PAD` (through the game). |
 | `fepor-recomp disasm --addr 0x80003154 --count 16` | Disassemble guest code from main.dol. |
 | `fepor-recomp opcodes` | Instruction histogram of main.dol (what the lifter must cover). |
 | `fepor-recomp find --op Rfi` | Every occurrence of an opcode with its function (locating SDK internals). |

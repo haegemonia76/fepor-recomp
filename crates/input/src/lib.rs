@@ -246,7 +246,13 @@ impl InputConfig {
                 }
             },
             Err(_) => {
-                let c = InputConfig::default();
+                let mut c = InputConfig::default();
+                // RecompLauncher tells which controller is plugged in: start with its button names
+                c.glyphs = match std::env::var("RECOMPLAUNCHER_PAD").as_deref() {
+                    Ok("xbox") => GlyphSet::Xbox,
+                    Ok("playstation") => GlyphSet::PlayStation,
+                    _ => c.glyphs,
+                };
                 let _ = c.save(path);
                 c
             }

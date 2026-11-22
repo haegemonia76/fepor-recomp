@@ -20,6 +20,8 @@ pub enum Fail {
     /// cmake, ninja or clang++ is missing.
     Toolchain(String),
     Build(String),
+    /// The game ran and exited with this code (`fepor-recomp run`).
+    Game(i32, String),
     Other(String),
 }
 
@@ -32,6 +34,7 @@ impl Fail {
             Fail::Version(_) => 11,
             Fail::Toolchain(_) => 20,
             Fail::Build(_) => 30,
+            Fail::Game(c, _) => (*c).clamp(1, 255) as u8,
         }
     }
     pub fn message(&self) -> &str {
@@ -41,6 +44,7 @@ impl Fail {
             | Fail::Version(m)
             | Fail::Toolchain(m)
             | Fail::Build(m)
+            | Fail::Game(_, m)
             | Fail::Other(m) => m,
         }
     }
