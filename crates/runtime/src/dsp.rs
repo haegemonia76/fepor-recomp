@@ -106,6 +106,17 @@ impl Dsp {
 
     /// Hand the finished audio DMA buffers to `sink` as interleaved left/right samples.
     pub fn drain_audio(&mut self, ram: &[u8], sink: &mut dyn AudioSink) {
+        // Once the AX ucode runs, its frames go to the sink exactly once, in order; the AI DMA clock only
+        // paces interrupts. (The clock re-reads the DMA address on every tick, so a guest that answers late
+        // made it replay the same buffer: 15 % of the frames in a busy scene.)
+        if self.ax.frames > 0 {
+            self.pending_audio.clear();
+            let produced = std::mem::take(&mut self.ax.out);
+            if !produced.is_empty() {
+                sink.push(32_000, &produced);
+            }
+            return;
+        }
         for (start, len, rate) in std::mem::take(&mut self.pending_audio) {
             let s = (start & 0x03FF_FFFF) as usize;
             let Some(buf) = ram.get(s..s + len as usize) else {

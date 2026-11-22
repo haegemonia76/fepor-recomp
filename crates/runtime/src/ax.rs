@@ -238,6 +238,26 @@ static DUMP_VOICE: std::sync::LazyLock<Option<u32>> = std::sync::LazyLock::new(|
     u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()
 });
 
+/// `FEPOR_AX_DUMP_CPU=<file>`: append (tag, frame, 160 words) records of what the ucode hands to the CPU (tag 1:
+/// main L uploaded) and what the CPU hands back (tag 3: aux B return, 4: aux A return).
+static CPU_DUMP: std::sync::LazyLock<Option<std::sync::Mutex<std::fs::File>>> =
+    std::sync::LazyLock::new(|| {
+        let p = std::env::var_os("FEPOR_AX_DUMP_CPU")?;
+        std::fs::File::create(p).ok().map(std::sync::Mutex::new)
+    });
+
+fn dump_cpu(tag: u8, frame: u64, words: impl Iterator<Item = i32>) {
+    use std::io::Write;
+    if let Some(f) = &*CPU_DUMP {
+        let mut b = vec![tag];
+        b.extend_from_slice(&frame.to_le_bytes());
+        for w in words {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+        let _ = f.lock().expect("dump").write_all(&b);
+    }
+}
+
 /// The ucode's polyphase resampler has one set of 128 four-tap filters per cutoff (0.5, 0.8 and 1.0 of the
 /// output rate). The hardware table (`dsp_coef.bin` in Dolphin) is a DSP ROM dump and cannot be shipped;
 /// measured against it, and against Dolphin's own output for a one-shot sound effect, every set is a
@@ -424,6 +444,12 @@ pub struct Ax {
     /// `FEPOR_AX_EVERY=n`: trace every n-th frame (default 20; 1 = every frame).
     trace_every: u64,
     voices_run: u64,
+    /// Trace state for `note_cpu_buffer`: (last hash, unchanged, seen) for the four CPU-returned buffers.
+    cpu_bufs: [(u64, u32, u32); 4],
+    /// Every frame the ucode output since the last `Dsp::drain_audio`, interleaved left/right at 32 kHz. The
+    /// sink is fed from here, not from the AI DMA clock: a guest that answers a few ms late must not make the
+    /// clock replay the previous buffer.
+    pub out: Vec<i16>,
 }
 
 impl Default for Ax {
@@ -452,6 +478,32 @@ impl Ax {
                 .filter(|n| *n > 0)
                 .unwrap_or(20),
             voices_run: 0,
+            cpu_bufs: [(0, 0, 0); 4],
+            out: Vec::new(),
+        }
+    }
+
+    /// Trace: how often a buffer the CPU hands back (aux return, surround) is word for word the one of the
+    /// previous frame, i.e. the CPU did not produce a new one in time. Reported every 400 frames.
+    fn note_cpu_buffer(&mut self, slot: usize, addr: u32, words: usize, mem: &Mem) {
+        if !self.trace {
+            return;
+        }
+        let h = (0..words).fold(0xcbf2_9ce4_8422_2325u64, |h, k| {
+            (h ^ mem.r32(addr + 4 * k as u32) as u64).wrapping_mul(0x100_0000_01b3)
+        });
+        let s = &mut self.cpu_bufs[slot];
+        s.2 += 1;
+        if s.0 == h {
+            s.1 += 1;
+        }
+        s.0 = h;
+        if self.frames % 400 == 0 && s.2 > 100 {
+            eprintln!(
+                "ax: frame {} cpu buffer {slot} unchanged since the previous frame in {} of {} frames",
+                self.frames, s.1, s.2
+            );
+            (s.1, s.2) = (0, 0);
         }
     }
 
@@ -540,6 +592,9 @@ impl Ax {
             }
             let cmd = self.cmdlist[idx];
             idx += 1;
+            if self.trace && self.frames % 400 == 0 {
+                eprintln!("ax: frame {} command {cmd:#x}", self.frames);
+            }
             let arg = |s: &Self, n: &mut usize| {
                 let v = s.cmdlist[*n % 512];
                 *n += 1;
@@ -840,6 +895,12 @@ impl Ax {
     }
 
     fn mix_aux(&mut self, aux_id: usize, write_addr: u32, read_addr: u32, mem: &mut Mem) {
+        self.note_cpu_buffer(if aux_id == 0 { 0 } else { 3 }, read_addr, FRAME, mem);
+        dump_cpu(
+            if aux_id == 0 { 4 } else { 3 },
+            self.frames,
+            (0..FRAME).map(|k| mem.r32(read_addr + 4 * k as u32) as i32),
+        );
         let base = if aux_id == 0 { AUXA_L } else { AUXB_L };
         if write_addr != 0 {
             let mut a = write_addr;
@@ -861,6 +922,7 @@ impl Ax {
     }
 
     fn upload_lrs(&mut self, mut dst: u32, mem: &mut Mem) {
+        dump_cpu(1, self.frames, (0..FRAME).map(|k| self.bufs[MAIN_L][k]));
         for ch in 0..3 {
             for k in 0..FRAME {
                 mem.w32(dst, self.bufs[MAIN_L + ch][k] as u32);
@@ -879,6 +941,7 @@ impl Ax {
     }
 
     fn set_opposite_lr(&mut self, src: u32, mem: &Mem) {
+        self.note_cpu_buffer(2, src, FRAME, mem);
         for k in 0..FRAME {
             let s = mem.r32(src + 4 * k as u32) as i32;
             self.bufs[MAIN_L][k] = s.wrapping_neg();
@@ -922,10 +985,12 @@ impl Ax {
             // interleaved R, L as the ucode writes them (the AI plays word 1 as the left channel)
             mem.w16(lr + 4 * k as u32, r as u16);
             mem.w16(lr + 4 * k as u32 + 2, l as u16);
+            self.out.extend_from_slice(&[l as i16, r as i16]);
         }
     }
 
     fn mix_auxb_lr(&mut self, ul: u32, dl: u32, mem: &mut Mem) {
+        self.note_cpu_buffer(1, dl, FRAME, mem);
         for k in 0..FRAME {
             mem.w32(ul + 4 * k as u32, self.bufs[AUXB_L][k] as u32);
             mem.w32(ul + 4 * (FRAME + k) as u32, self.bufs[AUXB_L + 1][k] as u32);

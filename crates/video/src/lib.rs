@@ -195,6 +195,8 @@ pub struct Renderer {
     texture_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     shaders: HashMap<u64, wgpu::ShaderModule>,
+    /// Generated WGSL by `tev::shader_key`, with its hash: most draws repeat a shader seen before.
+    shader_srcs: HashMap<u64, (u64, Rc<str>)>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     samplers: HashMap<(u8, u8, bool, bool), wgpu::Sampler>,
     textures: HashMap<TexKey, Rc<wgpu::TextureView>>,
@@ -475,6 +477,7 @@ impl Renderer {
             texture_layout,
             pipeline_layout,
             shaders: HashMap::new(),
+            shader_srcs: HashMap::new(),
             pipelines: HashMap::new(),
             samplers: HashMap::new(),
             textures: HashMap::new(),
@@ -850,8 +853,17 @@ impl Renderer {
             })
             .collect();
         let state = d.state;
-        let src = tev::wgsl(&state);
-        let shader_hash = hash_str(&src);
+        let key = tev::shader_key(&state);
+        let (shader_hash, src) = match self.shader_srcs.get(&key) {
+            Some((h, s)) => (*h, s.clone()),
+            None => {
+                let s = tev::wgsl(&state);
+                let h = hash_str(&s);
+                let s: Rc<str> = s.into();
+                self.shader_srcs.insert(key, (h, s.clone()));
+                (h, s)
+            }
+        };
         let pipeline = self.pipeline(&state, shader_hash, &src, topology);
 
         let uniforms = tev::uniforms(&state);

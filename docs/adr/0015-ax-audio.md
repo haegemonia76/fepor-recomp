@@ -13,3 +13,18 @@ under 1 %) and is regenerated at startup. The set is the smallest cutoff coverin
 Still open: a frame-edge discontinuity in busy scenes (about 7 % of the 5 ms frames, none in Dolphin's recording
 of the same game); it is not caused by the aux return, compressor, ramps, stopped voices or stream voices.
 `FEPOR_AX_DUMP_VOICE=<hex PB address>` prints a voice's resampler input and output for offline fits.
+
+## Update: the crackle was replayed frames (found by comparing with Dolphin)
+
+Frame-edge discontinuities (7-10 % of the 5 ms frames in dialogue scenes, 0.1 % in Dolphin's recording) turned
+out to be **frames played twice**: 15 % of the frames in the music segment were exact copies of the previous
+one. The sink was fed from the AI DMA clock, which re-reads the DMA start address every period; when the guest
+answered late the clock replayed the same buffer. The ucode now hands each frame it outputs to the sink once, in
+order (`Ax::out`, drained by `Dsp::drain_audio`); the AI clock only paces the interrupt.
+
+The guest answered late because the renderer rebuilt the WGSL source and its hash for every draw (about 15 % of
+the time in the busy scenes): AX production fell to 163 frames/s against 200 needed. Shader sources are now cached
+by `tev::shader_key`; production is 200 frames/s throughout. After both changes: edge glitches 0.03-0.08 %,
+no duplicated frame, audio length equal to wall time.
+
+`FEPOR_AX_DUMP_CPU=<file>` records the main bus the ucode uploads and the buffers the CPU hands back.

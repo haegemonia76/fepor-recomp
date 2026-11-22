@@ -11,6 +11,27 @@ use crate::state::RenderState;
 /// Uniform block layout (std140): 4 TEV registers, 4 konst colours, alpha test refs.
 pub const UNIFORM_FLOATS: usize = 4 * 4 + 4 * 4 + 4;
 
+/// Identity of the shader `wgsl` would generate for `s`: everything it reads, hashed without allocating.
+pub fn shader_key(s: &RenderState) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x100_0000_01b3);
+    mix(s.alpha_compare as u64);
+    mix(s.num_tev_stages as u64);
+    for st in &s.tev[..s.num_tev_stages as usize] {
+        mix(st.color_env as u64);
+        mix(st.alpha_env as u64);
+        mix(st.texmap as u64
+            | (st.texcoord as u64) << 8
+            | (st.tex_enable as u64) << 16
+            | (st.chan as u64) << 24);
+        mix(st.konst_color as u64 | (st.konst_alpha as u64) << 8);
+    }
+    for sw in s.swaps {
+        mix(u32::from_le_bytes(sw) as u64);
+    }
+    h
+}
+
 pub fn uniforms(s: &RenderState) -> [f32; UNIFORM_FLOATS] {
     let mut u = [0.0f32; UNIFORM_FLOATS];
     for (i, r) in s.tev_regs.iter().enumerate() {
