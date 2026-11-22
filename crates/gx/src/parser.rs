@@ -64,7 +64,7 @@ impl Gx {
     pub fn feed(&mut self, bytes: &[u8], ram: &[u8], sink: &mut dyn Sink) {
         self.stats.bytes += bytes.len() as u64;
         self.buf.extend_from_slice(bytes);
-        let data = std::mem::take(&mut self.buf);
+        let mut data = std::mem::take(&mut self.buf);
         let mut pos = 0;
         while pos < data.len() {
             match self.exec(&data[pos..], ram, sink) {
@@ -72,7 +72,9 @@ impl Gx {
                 Step::NeedMore => break,
             }
         }
-        self.buf = data[pos..].to_vec();
+        // what is left (a command split between two bursts) moves to the front: no new allocation
+        data.drain(..pos);
+        self.buf = data;
     }
 
     fn render_state(&mut self) -> Arc<RenderState> {

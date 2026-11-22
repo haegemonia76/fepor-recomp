@@ -203,13 +203,14 @@ impl Hw {
 
     /// Run the command processor on everything gathered so far.
     pub fn flush_fifo(&mut self, ram: &[u8]) {
-        let bytes = std::mem::take(&mut self.fifo);
         let mut tap = Tap {
             inner: &mut *self.sink,
             finish: false,
             token: None,
         };
-        self.gx.feed(&bytes, ram, &mut tap);
+        self.gx.feed(&self.fifo, ram, &mut tap);
+        // the buffer keeps its capacity: this runs for every 32 bytes the game sends
+        self.fifo.clear();
         let (finish, token) = (tap.finish, tap.token);
         if self.trace_gx && finish {
             eprintln!("gx: draw done; parser so far: {:?}", self.gx.stats);
