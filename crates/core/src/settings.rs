@@ -54,6 +54,39 @@ impl Aspect {
     }
 }
 
+/// How much of the performance statistics is drawn over the game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatsMode {
+    #[default]
+    Off,
+    /// Just the frame rate.
+    Fps,
+    /// Frame times, CPU, GPU, audio and the rest.
+    Full,
+}
+
+impl StatsMode {
+    pub const ALL: [StatsMode; 3] = [StatsMode::Off, StatsMode::Fps, StatsMode::Full];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StatsMode::Off => "Off",
+            StatsMode::Fps => "Frame rate only",
+            StatsMode::Full => "Full statistics",
+        }
+    }
+
+    /// Off, frame rate, full, off...
+    pub fn next(self) -> StatsMode {
+        match self {
+            StatsMode::Off => StatsMode::Fps,
+            StatsMode::Fps => StatsMode::Full,
+            StatsMode::Full => StatsMode::Off,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Video {
@@ -65,8 +98,11 @@ pub struct Video {
     pub fullscreen: bool,
     /// Wait for the display's refresh (no tearing). Off presents at once: lower latency, tearing possible.
     pub vsync: bool,
-    /// Show the performance statistics in a corner of the window (F2).
-    pub show_stats: bool,
+    /// The performance statistics shown in a corner of the window (F2 cycles).
+    pub stats: StatsMode,
+    /// Size of the overlay's text and widgets: 0 follows the window height (1x at 720 pixels), otherwise a
+    /// multiple of the display's scale factor.
+    pub overlay_scale: f32,
 }
 
 impl Default for Video {
@@ -77,7 +113,8 @@ impl Default for Video {
             aspect: Aspect::Fit,
             fullscreen: false,
             vsync: true,
-            show_stats: false,
+            stats: StatsMode::Off,
+            overlay_scale: 0.0,
         }
     }
 }
@@ -112,6 +149,7 @@ impl Settings {
     pub fn clamp(&mut self) {
         self.video.frame_multiplier = self.video.frame_multiplier.clamp(1, 8);
         self.video.resolution = self.video.resolution.clamp(1, 4);
+        self.video.overlay_scale = self.video.overlay_scale.clamp(0.0, 4.0);
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
     }
 
@@ -142,8 +180,12 @@ impl Settings {
     /// `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
     pub fn with_env_overrides(mut self) -> Settings {
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
-        if std::env::var_os("FEPOR_STATS").is_some() {
-            self.video.show_stats = true;
+        if let Some(v) = std::env::var("FEPOR_STATS").ok() {
+            self.video.stats = if v == "fps" {
+                StatsMode::Fps
+            } else {
+                StatsMode::Full
+            };
         }
         if let Some(n) = num("FEPOR_FPS_MULT") {
             self.video.frame_multiplier = n;

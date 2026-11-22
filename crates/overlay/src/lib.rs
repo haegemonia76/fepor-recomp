@@ -11,6 +11,7 @@ mod ui;
 use std::sync::Arc;
 use std::time::Instant;
 
+use fepor_core::settings::StatsMode;
 pub use shared::Shared;
 pub use stats::{StatsSnapshot, ThreadLoad};
 
@@ -63,10 +64,17 @@ impl Overlay {
         ppp: f32,
     ) {
         let open = self.shared.is_open();
-        let hud = self.shared.settings.get().video.show_stats;
-        if !open && !hud {
+        let video = self.shared.settings.get().video;
+        if !open && video.stats == StatsMode::Off {
             return;
         }
+        // 0 = auto: 1x at a 720-pixel-high window, growing with it, so the text stays readable on big screens
+        let ppp = if video.overlay_scale > 0.0 {
+            ppp * video.overlay_scale
+        } else {
+            (size_px[1] as f32 / 720.0).clamp(1.0, 4.0)
+        };
+        self.shared.set_ui_ppp(ppp);
         let mut raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -87,7 +95,7 @@ impl Overlay {
         let (shared, state) = (&self.shared, &mut self.ui);
         let out = self
             .ctx
-            .run_ui(raw, |root| ui::show(root, state, shared, open, hud));
+            .run_ui(raw, |root| ui::show(root, state, shared, open, video.stats));
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         if self.painter.as_ref().is_none_or(|(_, f)| *f != format) {
             self.painter = Some((paint::Painter::new(device, format), format));

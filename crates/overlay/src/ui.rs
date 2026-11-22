@@ -110,13 +110,20 @@ fn read_card(path: &std::path::Path) -> Result<(memcard::CardInfo, Vec<(String, 
     Ok((info, saves))
 }
 
-/// One frame of UI: the settings panel when `open`, the statistics corner when `hud`.
-pub fn show(root: &mut egui::Ui, st: &mut UiState, shared: &Shared, open: bool, hud: bool) {
+/// One frame of UI: the settings panel when `open`, the statistics corner per `stats`.
+pub fn show(
+    root: &mut egui::Ui,
+    st: &mut UiState,
+    shared: &Shared,
+    open: bool,
+    stats: fepor_core::settings::StatsMode,
+) {
+    use fepor_core::settings::StatsMode;
     if open {
         settings_panel(root, st, shared);
     }
-    if hud {
-        stats_hud(root.ctx(), &shared.stats());
+    if stats != StatsMode::Off {
+        stats_hud(root.ctx(), &shared.stats(), stats == StatsMode::Full);
     }
 }
 
@@ -124,7 +131,7 @@ const GOOD: Color32 = Color32::from_rgb(110, 220, 120);
 const WARN: Color32 = Color32::from_rgb(240, 200, 70);
 const BAD: Color32 = Color32::from_rgb(240, 90, 80);
 
-fn stats_hud(ctx: &egui::Context, s: &crate::stats::StatsSnapshot) {
+fn stats_hud(ctx: &egui::Context, s: &crate::stats::StatsSnapshot, full: bool) {
     use egui::RichText as T;
     let line = |ui: &mut egui::Ui, color: Color32, text: String| {
         ui.label(T::new(text).monospace().small().color(color));
@@ -139,6 +146,15 @@ fn stats_hud(ctx: &egui::Context, s: &crate::stats::StatsSnapshot) {
                 .inner_margin(6.0)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
+                    if !full {
+                        let fps = if s.shown_fps > 0.0 {
+                            s.shown_fps
+                        } else {
+                            s.guest_fps
+                        };
+                        line(ui, Color32::WHITE, format!("{fps:.0} fps"));
+                        return;
+                    }
                     line(
                         ui,
                         Color32::WHITE,
@@ -355,9 +371,21 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
         &mut s.video.vsync,
         "Vsync (no tearing; off = lower latency)",
     );
-    ui.checkbox(
-        &mut s.video.show_stats,
-        "Performance statistics in the corner (F2)",
+    ui.add_space(8.0);
+    ui.label("Statistics in the corner (F2)");
+    for m in fepor_core::settings::StatsMode::ALL {
+        ui.radio_value(&mut s.video.stats, m, m.label());
+    }
+    ui.add_space(8.0);
+    ui.label("Overlay size");
+    ui.add(
+        egui::Slider::new(&mut s.video.overlay_scale, 0.0..=3.0).custom_formatter(|v, _| {
+            if v < 0.05 {
+                "Auto (follows the window)".to_string()
+            } else {
+                format!("x{v:.1}")
+            }
+        }),
     );
     if s != before {
         shared.settings.update(|x| *x = s);

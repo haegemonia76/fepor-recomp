@@ -1310,7 +1310,7 @@ impl Renderer {
             self.rec.clear();
         }
         self.vsync = s.video.vsync;
-        self.show_stats = s.video.show_stats;
+        self.show_stats = s.video.stats != fepor_core::settings::StatsMode::Off;
         if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
             p.set_present(&self.device, mult > 1, self.vsync);
         }

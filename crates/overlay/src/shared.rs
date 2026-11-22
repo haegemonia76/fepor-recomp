@@ -37,6 +37,7 @@ pub struct Shared {
     /// The memory card in slot A, once the game opened it.
     pub card_path: Mutex<Option<PathBuf>>,
     display_millihz: AtomicU32,
+    ui_ppp_x100: AtomicU32,
     guest_fps_x100: AtomicU32,
     /// Names of the playback devices, kept up to date by the audio thread.
     pub audio_devices: Arc<Mutex<Vec<String>>>,
@@ -86,6 +87,7 @@ impl Shared {
             card_path: Mutex::new(None),
             display_millihz: AtomicU32::new(0),
             guest_fps_x100: AtomicU32::new(0),
+            ui_ppp_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
             stats: Mutex::default(),
         })
@@ -142,6 +144,19 @@ impl Shared {
         self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// The overlay's points-to-pixels factor, once it has painted.
+    fn ui_ppp(&self) -> Option<f64> {
+        match self.ui_ppp_x100.load(Ordering::Relaxed) {
+            0 => None,
+            v => Some(v as f64 / 100.0),
+        }
+    }
+
+    pub(crate) fn set_ui_ppp(&self, ppp: f32) {
+        self.ui_ppp_x100
+            .store((ppp * 100.0) as u32, Ordering::Relaxed);
+    }
+
     pub fn toggle(&self) {
         self.set_open(!self.is_open());
     }
@@ -174,6 +189,8 @@ impl Shared {
     /// A window event, with the window's scale factor. Returns whether the overlay took it: when it did,
     /// the game must not see it.
     pub fn window_event(&self, event: &WindowEvent, scale: f64) -> bool {
+        // pointer positions are in the overlay's points, whose size the overlay chose (see `Overlay::paint`)
+        let scale = self.ui_ppp().unwrap_or(scale);
         let open = self.is_open();
         match event {
             WindowEvent::KeyboardInput {
@@ -196,7 +213,7 @@ impl Shared {
                 if *code == KeyCode::F2 {
                     if pressed && !repeat {
                         self.settings
-                            .update(|s| s.video.show_stats = !s.video.show_stats);
+                            .update(|s| s.video.stats = s.video.stats.next());
                     }
                     return true;
                 }
