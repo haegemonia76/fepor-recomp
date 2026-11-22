@@ -179,6 +179,46 @@ struct RecDraw {
     sig: u64,
 }
 
+/// A pipeline that draws one full-target triangle writing only the alpha channel, value 1.
+fn make_alpha_one(device: &wgpu::Device) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("alpha one"),
+        source: wgpu::ShaderSource::Wgsl(
+            "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                 var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                 return vec4<f32>(p[i], 0.0, 1.0);
+             }
+             @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }"
+                .into(),
+        ),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("alpha one"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALPHA,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 /// What a draw derived from its render state, for the next draw to reuse while the state is the same one.
 struct DrawCache {
     state: Arc<fepor_gx::state::RenderState>,
@@ -447,6 +487,8 @@ pub struct Renderer {
     spare_verts: Vec<fepor_gx::state::Vertex>,
     scratch_vb: Vec<u8>,
     draw_cache: Option<DrawCache>,
+    /// Writes alpha 1 over a texture and touches no colour (see `copy`).
+    alpha_one: wgpu::RenderPipeline,
     stats: StatsState,
     /// Whether the statistics overlay is shown (the settings' `show_stats`, applied each frame).
     show_stats: bool,
@@ -606,7 +648,9 @@ impl Renderer {
         if let Some(d) = &dump {
             let _ = std::fs::create_dir_all(&d.dir);
         }
+        let alpha_one = make_alpha_one(&device);
         Ok(Renderer {
+            alpha_one,
             device,
             queue,
             efb,
@@ -752,6 +796,18 @@ impl Renderer {
             return self.white.clone();
         }
         let a = d.addr as usize & 0x01FF_FFFF;
+        if self.tex_watch == Some(d.addr) {
+            let copies: Vec<(u32, u32)> = self
+                .efb_textures
+                .iter()
+                .filter(|t| t.addr == d.addr)
+                .map(|t| (t.width, t.height))
+                .collect();
+            eprintln!(
+                "texuse: frame {} {:08x} {}x{} fmt {} efb copies there {:?}",
+                self.frame, d.addr, d.width, d.height, d.format, copies
+            );
+        }
         if let Some(i) = self
             .efb_textures
             .iter()
@@ -1985,7 +2041,9 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
             self.end_pass();
@@ -2017,6 +2075,30 @@ impl Renderer {
                 },
             );
             let view = Rc::new(tex.create_view(&Default::default()));
+            if c.format == 4 {
+                // RGB565 has no alpha channel: what the game reads back is opaque, whatever alpha the draws
+                // left in the EFB
+                let enc = self
+                    .encoder
+                    .get_or_insert_with(|| self.device.create_command_encoder(&Default::default()));
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("opaque copy"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.alpha_one);
+                pass.draw(0..3, 0..1);
+            }
             self.efb_textures.retain(|t| t.addr != c.dest);
             let (tw, th) = if c.half_scale { (w / 2, h / 2) } else { (w, h) };
             // what main memory holds there now: if the game later writes a texture at that address, this
@@ -2043,6 +2125,24 @@ impl Renderer {
             if self.efb_textures.len() > 64 {
                 self.efb_textures.remove(0);
             }
+        }
+        if self.trace_tex && self.tex_watch == Some(c.dest) {
+            let px = self.read_efb(c.x, c.y, c.width, c.height);
+            let n = (px.len() / 4).max(1) as u64;
+            let sum = |k: usize| px.chunks_exact(4).map(|p| p[k] as u64).sum::<u64>() / n;
+            eprintln!(
+                "efbcontent: frame {} dest {:08x} region {},{} {}x{} average r {} g {} b {} a {}",
+                self.frame,
+                c.dest,
+                c.x,
+                c.y,
+                c.width,
+                c.height,
+                sum(0),
+                sum(1),
+                sum(2),
+                sum(3)
+            );
         }
         if c.clear {
             let cc = c.clear_color;
