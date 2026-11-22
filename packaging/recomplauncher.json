@@ -4,7 +4,7 @@
   "name": "Fire Emblem: Path of Radiance",
   "game": {
     "kind": "iso_or_folder",
-    "label": "Your disc image (.iso) or extracted folder of Fire Emblem: Path of Radiance, European release (GFEP01).",
+    "label": "Your disc image (.iso, .rvz or .gcz) or extracted folder of Fire Emblem: Path of Radiance, European release (GFEP01).",
     "check": { "ids": ["GFEP01"] }
   },
   "prepare": {
@@ -21,7 +21,7 @@
   },
   "saves": ["{data}/saves"],
   "exit_codes": {
-    "10": "The disc image could not be read. Pick the .iso of Fire Emblem: Path of Radiance (GFEP01).",
+    "10": "The disc image could not be read. Pick the .iso, .rvz or .gcz of Fire Emblem: Path of Radiance (GFEP01).",
     "11": "This disc is not the European release (GFEP01) this recompilation supports.",
     "20": "Building the game needs clang, CMake and Ninja. Install them and try again.",
     "30": "Building the game failed. Send the log from the crash screen."

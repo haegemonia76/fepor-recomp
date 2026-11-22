@@ -21,7 +21,7 @@ pub struct Cli {
     /// TOML config file; command-line options override it.
     #[arg(long, short, global = true, default_value = "fepor.toml")]
     pub config: PathBuf,
-    /// The player's copy: ISO/GCM file or extracted folder. (`--game` is the RecompLauncher spelling.)
+    /// The player's copy: ISO/GCM, RVZ or GCZ file, or extracted folder. (`--game` is the RecompLauncher spelling.)
     #[arg(long, global = true, alias = "game")]
     pub disc: Option<PathBuf>,
     /// Where everything the tool makes goes. RecompLauncher passes it as `--data` / RECOMPLAUNCHER_DATA.

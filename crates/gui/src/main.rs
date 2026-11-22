@@ -30,7 +30,7 @@ fn config_path() -> PathBuf {
 /// Message for the exit codes of `fepor-recomp prepare` (same texts as `packaging/recomplauncher.json`).
 fn exit_message(code: i32) -> String {
     match code {
-        10 => "The disc image could not be read. Pick the .iso of Fire Emblem: Path of Radiance (GFEP01).".into(),
+        10 => "The disc image could not be read. Pick the .iso, .rvz or .gcz of Fire Emblem: Path of Radiance (GFEP01).".into(),
         11 => format!("This disc is not the European release ({GAME_ID}) this recompilation supports."),
         20 => "Building the game needs clang, CMake and Ninja. Install them and try again.".into(),
         30 => "Building the game failed. The log below has the details.".into(),
@@ -56,11 +56,10 @@ fn check_game(path: &str) -> GameCheck {
     }
     let mut disc = match fepor_core::open_disc(p) {
         Ok(d) => d,
-        Err(_) => {
-            return GameCheck::Bad(
-                "This is not a GameCube disc image (.iso/.gcm) or extracted disc folder.".into(),
-            )
-        }
+        Err(_) => return GameCheck::Bad(
+            "This is not a GameCube disc image (.iso, .gcm, .rvz, .gcz) or extracted disc folder."
+                .into(),
+        ),
     };
     let id = disc.game_id().to_string();
     match disc
@@ -317,7 +316,7 @@ impl eframe::App for App {
                     .clicked()
                 {
                     if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("GameCube disc image", &["iso", "gcm"])
+                        .add_filter("GameCube disc image", &["iso", "gcm", "rvz", "gcz"])
                         .pick_file()
                     {
                         self.game = p.display().to_string();

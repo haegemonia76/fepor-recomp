@@ -5,7 +5,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 ## Glossary
 
 - **Guest**: the original GameCube software and hardware model (Gekko PPC, Flipper GPU, DSP). **Host**: the machine running the recomp.
-- **Disc image**: user-supplied ISO/GCM (or extracted folder). Read through an abstract reader so more formats can be added.
+- **Disc image**: user-supplied ISO/GCM, RVZ or GCZ (or extracted folder). Read through an abstract reader (`crates/core/src/image.rs`) so more formats can be added.
 - **DOL**: `main.dol`, the single executable of the game. No `.rel` modules exist, so all guest code is at fixed addresses.
 - **FST**: the disc file system table.
 - **Lifter**: Rust component turning Gekko instructions into C++ (`crates/ppc-lift`).

@@ -5,6 +5,7 @@ pub mod config;
 pub mod disc;
 pub mod dol;
 pub mod extract;
+pub mod image;
 pub mod memcard;
 pub mod paths;
 pub mod settings;

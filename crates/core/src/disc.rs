@@ -1,11 +1,11 @@
-//! Abstract disc reader: raw ISO/GCM and extracted folder (`sys/` + `files/`, Dolphin layout).
-//! New image formats (CISO, RVZ, ...) implement [`Disc`].
+//! Abstract disc reader: ISO/GCM, RVZ and GCZ images (see `image`) and the extracted folder (`sys/` + `files/`, Dolphin layout).
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::dol;
+use crate::image::{self, Image};
 
 const GCM_MAGIC: u32 = 0xC233_9F3D;
 const BOOT_BIN_SIZE: usize = 0x440;
@@ -131,27 +131,30 @@ pub fn parse_fst(fst: &[u8]) -> Result<Vec<FileEntry>, DiscError> {
 
 pub struct IsoDisc {
     path: PathBuf,
-    file: File,
+    img: Box<dyn Image>,
     id: String,
     boot: Vec<u8>,
     files: Vec<FileEntry>,
 }
 
 impl IsoDisc {
+    /// Open a GCM (ISO), GCZ or RVZ image.
     pub fn open(path: &Path) -> Result<Self, DiscError> {
-        let mut file = File::open(path).map_err(io_err(path))?;
+        let mut img = image::open(path)?;
         let mut boot = vec![0u8; BOOT_BIN_SIZE];
-        file.read_exact(&mut boot)
-            .map_err(|_| DiscError::BadImage("file too small".into()))?;
+        if img.len() < BOOT_BIN_SIZE as u64 {
+            return Err(DiscError::BadImage("file too small".into()));
+        }
+        img.read_at(0, &mut boot).map_err(io_err(path))?;
         if be32(&boot, 0x1C) != GCM_MAGIC {
             return Err(DiscError::BadImage(
-                "GCM magic not found (compressed formats are unsupported)".into(),
+                "GCM magic not found: not a GameCube disc image".into(),
             ));
         }
         let id = game_id_of(&boot)?;
         let mut disc = IsoDisc {
             path: path.to_path_buf(),
-            file,
+            img,
             id,
             boot,
             files: Vec::new(),
@@ -161,11 +164,14 @@ impl IsoDisc {
         Ok(disc)
     }
 
+    /// `len` bytes at `offset`; the image must hold them all.
     fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, DiscError> {
+        if offset + len as u64 > self.img.len() {
+            return Err(DiscError::BadImage("the image ends before its data".into()));
+        }
         let mut buf = vec![0u8; len];
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| self.file.read_exact(&mut buf))
+        self.img
+            .read_at(offset, &mut buf)
             .map_err(io_err(&self.path))?;
         Ok(buf)
     }
@@ -216,28 +222,24 @@ impl Disc for IsoDisc {
     }
 
     fn read_file(&mut self, entry: &FileEntry, out: &mut dyn Write) -> Result<(), DiscError> {
-        self.file
-            .seek(SeekFrom::Start(entry.offset))
-            .map_err(io_err(&self.path))?;
-        let copied =
-            io::copy(&mut (&mut self.file).take(entry.size), out).map_err(io_err(&self.path))?;
-        if copied != entry.size {
+        if entry.offset + entry.size > self.img.len() {
             return Err(DiscError::BadImage(format!("{} is truncated", entry.path)));
+        }
+        let mut buf = vec![0u8; 1 << 20];
+        let (mut at, end) = (entry.offset, entry.offset + entry.size);
+        while at < end {
+            let n = buf.len().min((end - at) as usize);
+            self.img
+                .read_at(at, &mut buf[..n])
+                .map_err(io_err(&self.path))?;
+            out.write_all(&buf[..n]).map_err(io_err(&self.path))?;
+            at += n as u64;
         }
         Ok(())
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError> {
-        buf.fill(0);
-        let len = self.file.metadata().map_err(io_err(&self.path))?.len();
-        if offset >= len {
-            return Ok(());
-        }
-        let n = buf.len().min((len - offset) as usize);
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| self.file.read_exact(&mut buf[..n]))
-            .map_err(io_err(&self.path))
+        self.img.read_at(offset, buf).map_err(io_err(&self.path))
     }
 }
 

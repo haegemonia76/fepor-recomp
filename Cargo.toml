@@ -25,5 +25,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 sha1 = "0.10"
 thiserror = "2"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+ruzstd = "0.8"
 ppc750cl = "0.3"
 tempfile = "3"

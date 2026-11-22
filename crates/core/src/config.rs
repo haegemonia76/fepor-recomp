@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Disc image (ISO/GCM) or extracted folder (`sys/` + `files/`).
+    /// Disc image (ISO/GCM, RVZ, GCZ) or extracted folder (`sys/` + `files/`).
     pub disc: Option<PathBuf>,
     /// Output directory for extracted and generated data (git-ignored).
     pub output: Option<PathBuf>,
