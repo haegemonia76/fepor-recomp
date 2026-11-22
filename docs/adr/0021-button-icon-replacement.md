@@ -12,11 +12,11 @@ Status: accepted (implements ticket #22)
 - Nintendo names the buttons by position (SDL's `a`, south, is its B).
 
 **Not done**
-- The grey dot ("Cond") of the map hint, probably the C-stick: unknown which button it stands for.
+- Other scenes' icons: see below.
 - Icons inside text (dialogue, tutorials) are font glyphs of the game's atlases, drawn in grey levels only; not touched.
 - Other scenes' icons (battle forecast, menus) when they use other textures: add their fingerprints to `icons::KNOWN`.
 
 **Layout (face-button diamond)**
 - The GameCube's face buttons are not laid out like other pads (big A in the middle, B lower left, X right, Y above). With the Xbox, Nintendo or PlayStation family the hint is rearranged into a diamond by the physical place of the bound button (bottom, right, left, top; `glyphs::diamond_slot`, radius 20 px, icons 24 px). The A texture, the cluster's base (dark dot on a translucent halo), is redrawn with its icon at the slot; B, X and Y are moved by shifting their vertices (`Renderer::icon_shift`, clip-space shift by the difference between the slot and the position the game draws them at, measured with `FEPOR_TRACE=icons`).
-- Captions follow their button (`icons::LABELS`): "Status" (Y) stays on the outer side of Y, "Next Unit" (X) goes left of X; the C-stick's "Cond" caption and dot move up to the free band at the top left, between "Map Menu" and "Next Unit". "Move" (A) and "Map Menu" (Z, drawn as the shoulder pill) stay. Checked on the real game with the Xbox family.
+- Captions follow their button (`icons::LABELS`): "Status" (Y) stays on the outer side of Y, "Next Unit" (X) goes left of X; the "Cond" caption and its grey dot move up to the free band at the top left, between "Map Menu" and "Next Unit". The dot is the GameCube's Start button: it is replaced by the gamepad button Start is bound to (three bars for Xbox and PlayStation, `+` for Nintendo), drawn at 3x the texels and shown 1.5x larger by scaling its vertices about their centre (`icons::Replace`, `icons::Move`). "Move" (A) and "Map Menu" (Z, drawn as the shoulder pill) stay. Checked on the real game with the Xbox and PlayStation families (before the Start icon: positions).
 - New textures are added by dumping (`FEPOR_DUMP_TEXTURES`) and tracing (`FEPOR_TRACE=icons`: quad centres and fingerprints of the textured draws near the hint).

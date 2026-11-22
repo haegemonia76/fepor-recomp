@@ -32,7 +32,7 @@ fn main() {
     for (row, family) in families.iter().enumerate() {
         for (col, source) in sources.iter().enumerate() {
             // face buttons are square, the rest wide, as the game's own textures are
-            let (iw, ih) = if matches!(*source, "a" | "b" | "x" | "y") {
+            let (iw, ih) = if matches!(*source, "a" | "b" | "x" | "y" | "start") {
                 (56, 56)
             } else {
                 (88, 44)

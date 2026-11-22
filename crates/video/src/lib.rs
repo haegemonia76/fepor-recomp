@@ -698,6 +698,8 @@ impl Renderer {
             ));
             write_png(&path, d.width, d.height, png::ColorType::Rgba, &rgba);
         }
+        // a replacement may have more texels than the game's texture (it is sampled by coordinate)
+        let (mut tw, mut th) = (d.width, d.height);
         if let Some(icon) = icons::find(sample, d.width, d.height) {
             let replacement = self.overlay.as_ref().and_then(|o| {
                 o.shared()
@@ -706,14 +708,25 @@ impl Renderer {
             if let Some(img) = replacement {
                 rgba = img;
             }
+        } else if let Some(rep) =
+            icons::find_label(sample, d.width, d.height).and_then(|l| l.replace.as_ref())
+        {
+            let (w, h) = (d.width * rep.texel_scale, d.height * rep.texel_scale);
+            let replacement = self.overlay.as_ref().and_then(|o| {
+                o.shared()
+                    .button_icon(rep.action, w, h, fepor_overlay::glyphs::Shape::default())
+            });
+            if let Some(img) = replacement {
+                (rgba, tw, th) = (img, w, h);
+            }
         }
         let tex = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
                 label: Some("gx texture"),
                 size: wgpu::Extent3d {
-                    width: d.width,
-                    height: d.height,
+                    width: tw,
+                    height: th,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -763,7 +776,7 @@ impl Renderer {
         used: &[bool; 8],
         ram: &[u8],
         vertices: &[fepor_gx::state::Vertex],
-    ) -> Option<(f32, f32)> {
+    ) -> Option<icons::Move> {
         if self.trace_icons {
             // find the labels of the hints: every textured draw near the bottom right corner
             if let Some(m) = (0..8).find(|m| used[*m]) {
@@ -793,7 +806,7 @@ impl Renderer {
             .find_map(|m| self.icon_of(&state.textures[m], ram))?;
         let quad = icons::quad_px(vertices.iter().map(|v| v.pos), state.viewport)?;
         let shared = self.overlay.as_ref()?.shared();
-        let (dx, dy) = match known {
+        let (dx, dy, scale) = match known {
             icons::Known::Icon(icon) => {
                 if self.trace_icons {
                     eprintln!(
@@ -803,14 +816,26 @@ impl Renderer {
                 }
                 let slot = shared.button_slot(icon.action)?;
                 let origin = icon.origin?;
-                (slot.0 - origin.0, slot.1 - origin.1)
+                (slot.0 - origin.0, slot.1 - origin.1, 1.0)
             }
             icons::Known::Label(label) => {
-                icons::label_shift(&label.anchor, |a| shared.button_slot(a))?
+                let (dx, dy) = icons::label_shift(&label.anchor, |a| shared.button_slot(a))?;
+                (dx, dy, label.replace.as_ref().map_or(1.0, |r| r.grow))
             }
         };
-        let (vw, vh) = (state.viewport[2], state.viewport[3]);
-        Some((dx * 2.0 / vw, -dy * 2.0 / vh))
+        let (vp_x, vp_y, vw, vh) = (
+            state.viewport[0],
+            state.viewport[1],
+            state.viewport[2],
+            state.viewport[3],
+        );
+        Some(icons::Move {
+            dx: dx * 2.0 / vw,
+            dy: -dy * 2.0 / vh,
+            scale,
+            cx: (quad.cx - vp_x) / vw * 2.0 - 1.0,
+            cy: 1.0 - (quad.cy - vp_y) / vh * 2.0,
+        })
     }
 
     fn pipeline(
@@ -1065,13 +1090,14 @@ impl Renderer {
                 used[s.texmap as usize & 7] = true;
             }
         }
-        if let Some((dx, dy)) = self.icon_shift(&state, &used, ram, &d.vertices) {
+        if let Some(m) = self.icon_shift(&state, &used, ram, &d.vertices) {
             let f = |v: &[u8], i: usize| f32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);
             for v in vb.chunks_exact_mut(stride) {
-                // clip space: a shift in NDC is a shift times w
+                // clip space: scale about the quad's centre, then shift (in NDC, so times w)
                 let w = f(v, 12);
-                for (k, delta) in [(0, dx), (4, dy)] {
-                    let x = f(v, k) + delta * w;
+                for (k, centre, delta) in [(0, m.cx, m.dx), (4, m.cy, m.dy)] {
+                    let ndc = f(v, k) / w;
+                    let x = (centre + (ndc - centre) * m.scale + delta) * w;
                     v[k..k + 4].copy_from_slice(&x.to_le_bytes());
                 }
             }

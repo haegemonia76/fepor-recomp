@@ -91,9 +91,19 @@ pub enum Anchor {
     /// Next to the icon of this GameCube button: the label sits beside it, on the outer side of the
     /// diamond, at this offset from the cluster centre in the GameCube layout.
     Icon(Action, (f32, f32)),
-    /// Moves by this many pixels whenever the diamond is in use (the C-stick's dot and "Cond" caption go
-    /// up, into the free band between "Map Menu" and the X button's caption).
+    /// Moves by this many pixels whenever the diamond is in use (the Start dot and "Cond" caption go up,
+    /// into the free band between "Map Menu" and the X button's caption).
     Fixed((f32, f32)),
+}
+
+/// A label texture that is replaced by a generated icon too.
+pub struct Replace {
+    /// The GameCube control whose binding decides the icon (Start for the "Cond" dot).
+    pub action: Action,
+    /// The icon is made at this multiple of the texture's size, for sharpness when it is shown larger.
+    pub texel_scale: u32,
+    /// How much larger than the game's texture the icon is drawn (around its centre).
+    pub grow: f32,
 }
 
 /// A text or dot texture of the hint that belongs to a button.
@@ -102,6 +112,7 @@ pub struct KnownLabel {
     pub width: u32,
     pub height: u32,
     pub anchor: Anchor,
+    pub replace: Option<Replace>,
 }
 
 /// Measured with `FEPOR_TRACE=icons`, relative to the centre of the A texture. "Map Menu" (Z) and "Move" (A)
@@ -113,6 +124,7 @@ pub const LABELS: &[KnownLabel] = &[
         width: 48,
         height: 16,
         anchor: Anchor::Icon(Action::Y, (33.0, -33.0)),
+        replace: None,
     },
     // "Next Unit" (X)
     KnownLabel {
@@ -120,6 +132,7 @@ pub const LABELS: &[KnownLabel] = &[
         width: 40,
         height: 32,
         anchor: Anchor::Icon(Action::X, (67.0, -6.0)),
+        replace: None,
     },
     // "Cond" caption, now at (-64, -28): top left, between "Map Menu" and "Next Unit"
     KnownLabel {
@@ -127,13 +140,21 @@ pub const LABELS: &[KnownLabel] = &[
         width: 40,
         height: 16,
         anchor: Anchor::Fixed((-8.0, -9.0)),
+        replace: None,
     },
-    // the grey dot after the "Cond" caption (the C-stick), now at (-34, -28)
+    // the grey dot after the "Cond" caption: the GameCube's Start button. Replaced by the gamepad button
+    // Start is bound to, drawn at 3x the texels and shown 1.5x larger (24 px, like the other icons), centre
+    // now at (-31, -28)
     KnownLabel {
         sample: 0xe100_f3c3_acc3_391c,
         width: 16,
         height: 16,
-        anchor: Anchor::Fixed((21.0, -25.0)),
+        anchor: Anchor::Fixed((24.0, -25.0)),
+        replace: Some(Replace {
+            action: Action::Start,
+            texel_scale: 3,
+            grow: 1.5,
+        }),
     },
 ];
 
@@ -158,6 +179,12 @@ pub fn find_any(sample: u64, width: u32, height: u32) -> Option<Known> {
     })
 }
 
+/// The label texture with this fingerprint, if it is one.
+pub fn find_label(sample: u64, width: u32, height: u32) -> Option<&'static KnownLabel> {
+    LABELS
+        .iter()
+        .find(|l| l.sample == sample && l.width == width && l.height == height)
+}
 /// Whether a texture of this size can be one of the known textures (a cheap test before fingerprinting).
 pub fn could_be(width: u32, height: u32) -> bool {
     KNOWN.iter().any(|k| k.width == width && k.height == height)
@@ -195,6 +222,16 @@ pub fn label_shift(
             Some((slot.0 + dx - label.0, slot.1 + dy - label.1))
         }
     }
+}
+
+/// How the vertices of a hint texture move, in NDC: scaled about `(cx, cy)` (the quad's centre), then shifted.
+#[derive(Debug, Clone, Copy)]
+pub struct Move {
+    pub dx: f32,
+    pub dy: f32,
+    pub scale: f32,
+    pub cx: f32,
+    pub cy: f32,
 }
 
 /// A drawn rectangle in EFB pixels.

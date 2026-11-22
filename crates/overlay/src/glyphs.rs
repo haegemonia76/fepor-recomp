@@ -28,6 +28,7 @@ enum Symbol {
     Circle,
     Square,
     Triangle,
+    Menu,
 }
 
 /// What goes on the face of the icon.
@@ -70,6 +71,7 @@ fn icon_for(family: GlyphSet, source: &str) -> Option<Icon> {
     let text = |s: &str| Mark::Text(s.to_string());
     Some(match family {
         GlyphSet::GameCube => return None,
+        _ if source == "start" => start_icon(family),
         GlyphSet::Xbox => match source {
             "a" => face(0x3f9e4d, text("A"), 0xffffff),
             "b" => face(0xd24b45, text("B"), 0xffffff),
@@ -96,6 +98,15 @@ fn icon_for(family: GlyphSet, source: &str) -> Option<Icon> {
             _ => other(family, source),
         },
     })
+}
+
+/// The menu button: Xbox and PlayStation draw three bars, Nintendo calls it `+`.
+fn start_icon(family: GlyphSet) -> Icon {
+    match family {
+        GlyphSet::Nintendo => face(0x3a3d46, Mark::Text("+".into()), 0xffffff),
+        GlyphSet::PlayStation => face(0x2b2d36, Mark::Symbol(Symbol::Menu), 0xd8d8e0),
+        _ => face(0x3a3d46, Mark::Symbol(Symbol::Menu), 0xffffff),
+    }
 }
 
 /// Shoulders, triggers, menu buttons and anything else: a pill with the family's name for it.
@@ -182,6 +193,10 @@ fn on_symbol(symbol: Symbol, p: (f32, f32)) -> bool {
         Symbol::Triangle => {
             let (a, b, c) = ((0.0, -0.56), (0.52, 0.38), (-0.52, 0.38));
             seg_dist(p, a, b) < t || seg_dist(p, b, c) < t || seg_dist(p, c, a) < t
+        }
+        // the menu button: three bars
+        Symbol::Menu => {
+            p.0.abs() < 0.46 && [-0.32, 0.0, 0.32].iter().any(|y| (p.1 - y).abs() < 0.07)
         }
     }
 }
@@ -379,5 +394,19 @@ mod tests {
         let alpha = |x: usize, y: usize| img[(y * 48 + x) * 4 + 3];
         // the pill reaches the left and right edges at mid height
         assert!(alpha(1, 12) > 200 && alpha(46, 12) > 200);
+    }
+
+    #[test]
+    fn the_start_button_is_drawn_round_in_every_family() {
+        assert_eq!(
+            icon_for(GlyphSet::Nintendo, "start").unwrap().mark,
+            Mark::Text("+".into())
+        );
+        for family in [GlyphSet::Xbox, GlyphSet::PlayStation] {
+            let icon = icon_for(family, "start").unwrap();
+            assert!(!icon.pill);
+            assert_eq!(icon.mark, Mark::Symbol(Symbol::Menu));
+        }
+        assert!(icon_for(GlyphSet::GameCube, "start").is_none());
     }
 }
