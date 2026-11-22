@@ -1,0 +1,90 @@
+name: release
+
+# Runs on the GitHub mirror of the Gitea repository (ADR 0023): a `v*` tag builds one archive per system and
+# attaches them to a GitHub release, where RecompLauncher installs from. Code, tickets and review stay on Gitea.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, system: linux, arch: x64 }
+          - { os: windows-latest, system: windows, arch: x64 }
+          - { os: macos-latest, system: macos, arch: arm64 }
+          - { os: macos-15-intel, system: macos, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Version from the tag
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "fepor-recomp") | .version')
+          if [ "$version" != "$crate" ]; then
+              echo "tag $GITHUB_REF_NAME does not match the crate version $crate: bump [workspace.package] version first" >&2
+              exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # SDL3 is built from source and linked statically (`bundled-sdl`): it needs a C compiler, cmake and,
+      # on Linux, the headers of the audio, input and display backends it loads at run time.
+      - name: Install SDL3 build dependencies (Linux)
+        if: matrix.system == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libudev-dev libdbus-1-dev libx11-dev libxext-dev libxcursor-dev libxi-dev libxrandr-dev libxss-dev \
+            libwayland-dev libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libusb-1.0-0-dev
+      - name: Install SDL3 build dependencies (macOS)
+        if: matrix.system == 'macos'
+        run: brew install cmake ninja
+      - name: Install SDL3 build dependencies (Windows)
+        if: matrix.system == 'windows'
+        run: choco install cmake ninja -y --no-progress
+
+      - name: Instruction vectors
+        run: cargo test --release --locked -p fepor-jit --test vectors
+
+      - name: Build
+        run: cargo build --release --locked -p fepor-recomp -p fepor-game --features fepor-game/bundled-sdl
+
+      - name: Package
+        id: package
+        run: |
+          archive=$(tools/package-release.sh "${{ steps.version.outputs.version }}" "${{ matrix.system }}" "${{ matrix.arch }}" target/release dist)
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.system }}-${{ matrix.arch }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes

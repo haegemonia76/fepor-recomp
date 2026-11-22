@@ -24,6 +24,7 @@ Reusable helpers. Extend these (or the `fepor-recomp` subcommands) instead of wr
 | `tools/trace-outline.py PHOTO --mode alpha\|white\|dark\|border\|saturated --name NAME` | Trace the silhouette of a controller photo into a Rust constant (outline only, normalised to 1.0 wide; `--grid out.png` writes the cropped photo with a labelled grid to read button positions from). Used for `crates/overlay/src/outlines.rs`. Needs `.venv-tools` (numpy, Pillow) and `potrace`. |
 | `tools/vectors.sh [out]` | Regenerate `crates/ppc-lift/tests/vectors.bin` with Unicorn (`gen_vectors.py`, ADR 0008). Output is deterministic. |
 | `tools/validate-profile.sh [file]` | Validate `packaging/recomplauncher.json` against RecompLauncher's schema. |
+| `tools/package-release.sh <version> <windows\|linux\|macos> <x64\|arm64> <bin-dir> [out-dir]` | One release archive (ADR 0023): `fepor-recomp`, `fepor-game`, the profile stamped with the version, the licence. Needs `jq`, and `7z` for the Windows zip. Used by `.github/workflows/release.yml`. |
 | `tools/venv.sh` | Sourced by the scripts above: creates `.venv-tools` from `tools/requirements.txt`. |
 
 All `fepor-recomp` commands take `--disc/--game`, `--output/--data` (or `RECOMPLAUNCHER_DATA`), `--config` and `--no-verify`.

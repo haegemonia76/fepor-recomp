@@ -9,3 +9,7 @@ fepor-runtime.workspace = true
 fepor-core.workspace = true
 # test-mode lifts the crate's "first thread that calls init" rule: audio and gamepads each own a thread
 sdl3 = { version = "0.14", features = ["test-mode"] }
+
+[features]
+# Build SDL3 from source and link it statically: a release archive needs no SDL3 on the player's system.
+bundled-sdl = ["sdl3/build-from-source-static"]

@@ -13,3 +13,7 @@ sdl3 = { version = "0.14", features = ["test-mode"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[features]
+# As in fepor-audio: SDL3 built from source and linked statically, for release archives.
+bundled-sdl = ["sdl3/build-from-source-static"]

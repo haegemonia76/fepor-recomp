@@ -12,6 +12,8 @@ jit = ["dep:fepor-jit"]
 # The development backend: the C++ library `fepor-recomp prepare` generates (FEPOR_GENERATED_DIR), built
 # with clang. `cargo build -p fepor-game --no-default-features --features cpp`.
 cpp = ["fepor-runtime/dispatch"]
+# Release archives: SDL3 compiled in (needs cmake and a C compiler at build time), not the system's library.
+bundled-sdl = ["fepor-audio/bundled-sdl", "fepor-input/bundled-sdl"]
 
 [dependencies]
 fepor-core.workspace = true
