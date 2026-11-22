@@ -355,6 +355,8 @@ pub struct Renderer {
     dump_textures: Option<PathBuf>,
     trace: bool,
     trace_draws: bool,
+    /// `FEPOR_TRACE=icons`: print where the known button icons are drawn.
+    trace_icons: bool,
     /// `FEPOR_TRACE=gxhash`: print a hash of every presented frame (how often the picture really changes).
     trace_hash: bool,
     /// Draws since the last presented frame.
@@ -599,6 +601,8 @@ impl Renderer {
                 .is_ok_and(|v| v.split(',').any(|x| x == "gxdraw")),
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gx" || x == "all")),
+            trace_icons: std::env::var("FEPOR_TRACE")
+                .is_ok_and(|v| v.split(',').any(|x| x == "icons")),
             draws: 0,
         })
     }
@@ -667,11 +671,7 @@ impl Renderer {
         let Some(data) = ram.get(a..a + size) else {
             return self.white.clone();
         };
-        // cheap content fingerprint: size plus sampled bytes
-        let mut sample = size as u64;
-        for i in (0..size).step_by((size / 64).max(1)) {
-            sample = sample.wrapping_mul(0x100_0000_01b3) ^ data[i] as u64;
-        }
+        let sample = Self::fingerprint(data, size);
         let key = TexKey { desc: *d, sample };
         if let Some(t) = self.textures.get(&key) {
             return t.clone();
@@ -732,6 +732,85 @@ impl Renderer {
         }
         self.textures.insert(key, view.clone());
         view
+    }
+
+    /// Cheap content fingerprint of texture data: size plus sampled bytes.
+    fn fingerprint(data: &[u8], size: usize) -> u64 {
+        let mut sample = size as u64;
+        for i in (0..size).step_by((size / 64).max(1)) {
+            sample = sample.wrapping_mul(0x100_0000_01b3) ^ data[i] as u64;
+        }
+        sample
+    }
+
+    /// The known button icon or caption a texture is, if any.
+    fn icon_of(&self, d: &TextureDesc, ram: &[u8]) -> Option<icons::Known> {
+        if !icons::could_be(d.width, d.height) {
+            return None;
+        }
+        let size = texture::image_size(d.format, d.width, d.height);
+        let a = d.addr as usize & 0x01FF_FFFF;
+        let data = ram.get(a..a + size)?;
+        icons::find_any(Self::fingerprint(data, size), d.width, d.height)
+    }
+
+    /// How far (in NDC) a draw of a known face-button icon must move so that the icon sits where its
+    /// physical button is on the chosen family's pad: the face buttons of Xbox, Nintendo and PlayStation pads
+    /// form a diamond, the GameCube's do not.
+    fn icon_shift(
+        &self,
+        state: &RenderState,
+        used: &[bool; 8],
+        ram: &[u8],
+        vertices: &[fepor_gx::state::Vertex],
+    ) -> Option<(f32, f32)> {
+        if self.trace_icons {
+            // find the labels of the hints: every textured draw near the bottom right corner
+            if let Some(m) = (0..8).find(|m| used[*m]) {
+                let d = &state.textures[m];
+                let size = texture::image_size(d.format, d.width, d.height);
+                let a = d.addr as usize & 0x01FF_FFFF;
+                let q = icons::quad_px(vertices.iter().map(|v| v.pos), state.viewport);
+                if let (Some(data), Some(q)) = (ram.get(a..a + size), q) {
+                    if (400.0..800.0).contains(&q.cx) && (320.0..440.0).contains(&q.cy) {
+                        eprintln!(
+                            "icons: tex {}x{} f{} {:016x} centre ({:.1}, {:.1}) size {:.1}x{:.1}",
+                            d.width,
+                            d.height,
+                            d.format,
+                            Self::fingerprint(data, size),
+                            q.cx,
+                            q.cy,
+                            q.w,
+                            q.h
+                        );
+                    }
+                }
+            }
+        }
+        let known = (0..8)
+            .filter(|m| used[*m])
+            .find_map(|m| self.icon_of(&state.textures[m], ram))?;
+        let quad = icons::quad_px(vertices.iter().map(|v| v.pos), state.viewport)?;
+        let shared = self.overlay.as_ref()?.shared();
+        let (dx, dy) = match known {
+            icons::Known::Icon(icon) => {
+                if self.trace_icons {
+                    eprintln!(
+                        "icons: {:?} quad centre ({:.1}, {:.1}) size {:.1}x{:.1}",
+                        icon.action, quad.cx, quad.cy, quad.w, quad.h
+                    );
+                }
+                let slot = shared.button_slot(icon.action)?;
+                let origin = icon.origin?;
+                (slot.0 - origin.0, slot.1 - origin.1)
+            }
+            icons::Known::Label(label) => {
+                icons::label_shift(&label.anchor, |a| shared.button_slot(a))?
+            }
+        };
+        let (vw, vh) = (state.viewport[2], state.viewport[3]);
+        Some((dx * 2.0 / vw, -dy * 2.0 / vh))
     }
 
     fn pipeline(
@@ -984,6 +1063,17 @@ impl Renderer {
         for s in &state.tev[..state.num_tev_stages as usize] {
             if s.tex_enable {
                 used[s.texmap as usize & 7] = true;
+            }
+        }
+        if let Some((dx, dy)) = self.icon_shift(&state, &used, ram, &d.vertices) {
+            let f = |v: &[u8], i: usize| f32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);
+            for v in vb.chunks_exact_mut(stride) {
+                // clip space: a shift in NDC is a shift times w
+                let w = f(v, 12);
+                for (k, delta) in [(0, dx), (4, dy)] {
+                    let x = f(v, k) + delta * w;
+                    v[k..k + 4].copy_from_slice(&x.to_le_bytes());
+                }
             }
         }
         let views: Vec<Rc<wgpu::TextureView>> = (0..8)

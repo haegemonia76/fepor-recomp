@@ -172,14 +172,24 @@ impl Shared {
         h: u32,
         shape: crate::glyphs::Shape,
     ) -> Option<Vec<u8>> {
-        let (family, source) = {
-            let c = self.controls.lock().ok()?;
-            let cfg = c.config();
-            let mut sources = cfg.sources_of(false, action);
-            sources.sort_unstable();
-            (cfg.glyphs, sources.first()?.to_string())
-        };
+        let (family, source) = self.bound(action)?;
         crate::glyphs::render(family, &source, w, h, shape)
+    }
+
+    /// Where the game's icon of `action` goes in the face-button diamond of the chosen family, relative to
+    /// the cluster's centre in the game's pixels; `None` when it keeps the GameCube layout.
+    pub fn button_slot(&self, action: Action) -> Option<(f32, f32)> {
+        let (family, source) = self.bound(action)?;
+        crate::glyphs::diamond_slot(family, &source)
+    }
+
+    /// The button-name family and the gamepad input `action` is bound to (the first by name).
+    fn bound(&self, action: Action) -> Option<(fepor_input::GlyphSet, String)> {
+        let c = self.controls.lock().ok()?;
+        let cfg = c.config();
+        let mut sources = cfg.sources_of(false, action);
+        sources.sort_unstable();
+        Some((cfg.glyphs, sources.first()?.to_string()))
     }
 
     pub fn toggle(&self) {

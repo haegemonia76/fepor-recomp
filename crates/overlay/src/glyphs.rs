@@ -123,7 +123,7 @@ fn other(family: GlyphSet, source: &str) -> Icon {
 }
 
 /// Coverage (0..1) of `text` centred in a `w` x `h` box, as large as fits (at most `max_px` high).
-fn text_coverage(text: &str, w: u32, h: u32, max_px: f32, fit_w: f32) -> Vec<f32> {
+fn text_coverage(text: &str, w: u32, h: u32, max_px: f32, fit_w: f32, off: (f32, f32)) -> Vec<f32> {
     let mut out = vec![0.0; (w * h) as usize];
     let Some(font) = FONT.as_ref() else {
         return out;
@@ -141,10 +141,10 @@ fn text_coverage(text: &str, w: u32, h: u32, max_px: f32, fit_w: f32) -> Vec<f32
     }
     let scaled = font.as_scaled(PxScale::from(px));
     let total = width_at(px);
-    let mut x = (w as f32 - total) / 2.0;
+    let mut x = (w as f32 - total) / 2.0 + off.0;
     // the font's cap height sits on the baseline: centre it vertically on that
     let cap = scaled.ascent() * 0.72;
-    let baseline = (h as f32 + cap) / 2.0;
+    let baseline = (h as f32 + cap) / 2.0 + off.1;
     for c in text.chars() {
         let id = font.glyph_id(c);
         let glyph = id.with_scale_and_position(PxScale::from(px), ab_glyph::point(x, baseline));
@@ -191,7 +191,7 @@ const HALO_GREY: f32 = 0.2;
 const HALO_ALPHA: f32 = 0.5;
 
 /// Draw `icon` into a straight-alpha RGBA image of `w` x `h` pixels.
-fn draw(icon: &Icon, w: u32, h: u32, shape: Shape) -> Vec<u8> {
+fn draw(icon: &Icon, w: u32, h: u32, shape: Shape, off: (f32, f32)) -> Vec<u8> {
     const SS: u32 = 4;
     let (wf, hf) = (w as f32, h as f32);
     // the disc fills the smaller side; the pill is twice as wide as high, or as wide as the image
@@ -203,13 +203,13 @@ fn draw(icon: &Icon, w: u32, h: u32, shape: Shape) -> Vec<u8> {
         (d, d)
     };
     let (bw, bh) = (bw * shape.scale, bh * shape.scale);
-    let (cx, cy) = (wf / 2.0, hf / 2.0);
+    let (cx, cy) = (wf / 2.0 + off.0, hf / 2.0 + off.1);
     let halo_radius = wf.min(hf) / 2.0;
     let radius = bh / 2.0;
     let half_len = (bw / 2.0 - radius).max(0.0);
     let border = (bh * 0.07).max(1.0);
     let text = match &icon.mark {
-        Mark::Text(t) => Some(text_coverage(t, w, h, bh * 0.62, bw)),
+        Mark::Text(t) => Some(text_coverage(t, w, h, bh * 0.62, bw, off)),
         Mark::Symbol(_) => None,
     };
     let dark = |c: Rgb| c.map(|v| v * 0.55);
@@ -225,7 +225,7 @@ fn draw(icon: &Icon, w: u32, h: u32, shape: Shape) -> Vec<u8> {
                     let d = (px.abs() - half_len).max(0.0).hypot(py);
                     if d > radius {
                         // the halo is what the game's A button has around its dot
-                        if shape.halo && px.hypot(py) <= halo_radius {
+                        if shape.halo && (px + off.0).hypot(py + off.1) <= halo_radius {
                             a += HALO_ALPHA;
                             for k in 0..3 {
                                 col[k] += HALO_GREY * HALO_ALPHA;
@@ -287,9 +287,44 @@ impl Default for Shape {
     }
 }
 
-/// The replacement image for the game's icon of a button bound to the gamepad input `source`.
+/// Radius of the diamond the four face buttons sit on, and the size of their icons, in the game's pixels.
+pub const DIAMOND_RADIUS: f32 = 20.0;
+pub const DIAMOND_ICON: f32 = 24.0;
+
+/// Where the icon of the gamepad face button `source` goes in the diamond of Xbox, Nintendo and PlayStation
+/// pads (relative to its centre, in pixels): by physical place, bottom, right, left, top. `None` for the
+/// GameCube family, whose buttons keep the game's own layout, and for buttons that are not face buttons.
+pub fn diamond_slot(family: GlyphSet, source: &str) -> Option<(f32, f32)> {
+    if family == GlyphSet::GameCube {
+        return None;
+    }
+    let r = DIAMOND_RADIUS;
+    match source {
+        "a" => Some((0.0, r)),
+        "b" => Some((r, 0.0)),
+        "x" => Some((-r, 0.0)),
+        "y" => Some((0.0, -r)),
+        _ => None,
+    }
+}
+
+/// The replacement image for the game's icon of a button bound to the gamepad input `source`. A `halo`
+/// shape is the base of the button cluster: its icon is drawn at the diamond slot of `source`.
 pub fn render(family: GlyphSet, source: &str, w: u32, h: u32, shape: Shape) -> Option<Vec<u8>> {
-    icon_for(family, source).map(|i| draw(&i, w, h, shape))
+    let icon = icon_for(family, source)?;
+    let slot = if shape.halo {
+        diamond_slot(family, source)
+    } else {
+        None
+    };
+    let shape = match slot {
+        Some(_) => Shape {
+            scale: DIAMOND_ICON / w.min(h) as f32,
+            ..shape
+        },
+        None => shape,
+    };
+    Some(draw(&icon, w, h, shape, slot.unwrap_or((0.0, 0.0))))
 }
 
 #[cfg(test)]

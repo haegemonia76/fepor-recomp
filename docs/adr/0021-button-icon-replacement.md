@@ -15,3 +15,8 @@ Status: accepted (implements ticket #22)
 - The grey dot ("Cond") of the map hint, probably the C-stick: unknown which button it stands for.
 - Icons inside text (dialogue, tutorials) are font glyphs of the game's atlases, drawn in grey levels only; not touched.
 - Other scenes' icons (battle forecast, menus) when they use other textures: add their fingerprints to `icons::KNOWN`.
+
+**Layout (face-button diamond)**
+- The GameCube's face buttons are not laid out like other pads (big A in the middle, B lower left, X right, Y above). With the Xbox, Nintendo or PlayStation family the hint is rearranged into a diamond by the physical place of the bound button (bottom, right, left, top; `glyphs::diamond_slot`, radius 20 px, icons 24 px). The A texture, the cluster's base (dark dot on a translucent halo), is redrawn with its icon at the slot; B, X and Y are moved by shifting their vertices (`Renderer::icon_shift`, clip-space shift by the difference between the slot and the position the game draws them at, measured with `FEPOR_TRACE=icons`).
+- Captions follow their button (`icons::LABELS`): "Status" (Y) stays on the outer side of Y, "Next Unit" (X) goes left of X; the C-stick's dot and "Cond" caption move to the right side, which has no caption. "Move" (A) and "Map Menu" (Z, drawn as the shoulder pill) stay. Checked on the real game with the Xbox family.
+- New textures are added by dumping (`FEPOR_DUMP_TEXTURES`) and tracing (`FEPOR_TRACE=icons`: quad centres and fingerprints of the textured draws near the hint).
