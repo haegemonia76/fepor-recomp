@@ -341,6 +341,25 @@ fn set_both(c: &mut Context, n: u8, a: f64) {
     set(c, n, a, a);
 }
 
+/// Decoding an instruction word (a table walk) costs more than executing many of these: remember the
+/// last ones, direct-mapped by word. Only the guest thread holding the baton gets here.
+fn decode(word: u32) -> Ins {
+    static mut CACHE: [(u32, Option<Ins>); 2048] = [(0, None); 2048];
+    let slot = ((word ^ word >> 11) & 2047) as usize;
+    // SAFETY: one guest thread runs at a time (the scheduler's baton), and the helpers do not nest.
+    unsafe {
+        let cache = &mut *std::ptr::addr_of_mut!(CACHE);
+        match cache[slot] {
+            (w, Some(ins)) if w == word => ins,
+            _ => {
+                let ins = Ins::new(word);
+                cache[slot] = (word, Some(ins));
+                ins
+            }
+        }
+    }
+}
+
 /// CR1 after a record-form FP instruction: the FPSCR exception summary bits.
 fn rc1(c: &mut Context, ins: Ins) {
     if ins.field_rc() {
@@ -374,7 +393,7 @@ pub fn cr_field_written(ins: Ins) -> Option<u8> {
 pub unsafe extern "C" fn fepor_jit_fp(c: *mut Context, word: u32) {
     use Opcode::*;
     let c = &mut *c;
-    let ins = Ins::new(word);
+    let ins = decode(word);
     let (fd, fa, fb, fc) = (
         ins.field_frd(),
         ins.field_fra(),
@@ -612,7 +631,7 @@ pub unsafe extern "C" fn fepor_jit_fp(c: *mut Context, word: u32) {
 pub unsafe extern "C" fn fepor_jit_fpmem(c: *mut Context, word: u32, ea: u32) {
     use Opcode::*;
     let c = &mut *c;
-    let ins = Ins::new(word);
+    let ins = decode(word);
     let fd = ins.field_frd();
     match ins.op {
         Lfs | Lfsu | Lfsx | Lfsux => {
