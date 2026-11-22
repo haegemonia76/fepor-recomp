@@ -110,8 +110,8 @@ fn layout(family: GlyphSet) -> Vec<Spot> {
     match family {
         GlyphSet::PlayStation => {
             s.extend(dpad(205.0, 140.0, 66.0));
-            s.extend(stick("left", 360.0, 265.0, 76.0));
-            s.extend(stick("right", 665.0, 265.0, 76.0));
+            s.extend(stick("left", 360.0, 305.0, 76.0));
+            s.extend(stick("right", 665.0, 305.0, 76.0));
             s.push(icon("y", 825.0, 80.0, 76.0, 76.0));
             s.push(icon("x", 745.0, 148.0, 76.0, 76.0));
             s.push(icon("b", 890.0, 148.0, 76.0, 76.0));
@@ -359,7 +359,7 @@ fn draw_pad_body(painter: &Painter, f: &Frame, family: GlyphSet) {
             for u in [360.0, 665.0] {
                 stick_shape(
                     painter,
-                    f.at(u, 265.0),
+                    f.at(u, 305.0),
                     f.len(56.0),
                     rgb(0x0b0c0f),
                     rgb(0x2b2d33),
