@@ -650,8 +650,8 @@ impl Ax {
         self.voices_run += 1;
         if self.trace && ms == 0 && self.frames % self.trace_every == 0 {
             eprintln!(
-                "ax: frame {} voice fmt {:#x} src {} ratio {:#x} mix {:#x} vol {:#x}/{:#x} env {:#x} cur {:#x} end {:#x} loop {} stream {}",
-                self.frames, pb[56], pb[4], hilo(pb[83], pb[84]), pb[6], pb[9], pb[11], pb[50], hilo(pb[61], pb[62]), hilo(pb[59], pb[60]), pb[55], pb[8]
+                "ax: frame {} voice fmt {:#x} src {} ratio {:#x} mix {:#x} vol {:#x}/{:#x} env {:#x} cur {:#x} end {:#x} loop {} stream {} upd {:?}@{:#x}",
+                self.frames, pb[56], pb[4], hilo(pb[83], pb[84]), pb[6], pb[9], pb[11], pb[50], hilo(pb[61], pb[62]), hilo(pb[59], pb[60]), pb[55], pb[8], &pb[34..39], hilo(pb[39], pb[40])
             );
         }
         let mut samples = [0i16; COUNT];
@@ -693,17 +693,6 @@ impl Ax {
         pb[81] = acc.yn1 as u16;
         pb[82] = acc.yn2 as u16;
         pb[80] = acc.pred_scale;
-        // A one-shot voice that ends inside this block drops from its last sample to zero in one step: a
-        // click (every text blip in a dialogue ended with one). The DSP's depop ramps it down instead.
-        if pb[7] == 0 {
-            if let Some(li) = samples.iter().rposition(|s| *s != 0) {
-                let n = (COUNT - 1 - li).min(24);
-                let v = samples[li] as i32;
-                for k in 0..n {
-                    samples[li + 1 + k] = (v * (n - k) as i32 / (n as i32 + 1)) as i16;
-                }
-            }
-        }
 
         // volume envelope
         for s in samples.iter_mut() {

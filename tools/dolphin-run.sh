@@ -5,15 +5,19 @@
 # Usage: tools/dolphin-run.sh --iso <disc> [--card <raw> | --gci <save.gci>] [--user <dir>] -- <step>...
 # Steps run in order: wait:<seconds>  press:<A|B|X|Y|Z|START|L|R|D_UP|D_DOWN|D_LEFT|D_RIGHT>  mash:<button>:<seconds>  shot:<file.png>
 # --card <raw>: raw image as slot A (Dolphin may write to it: pass a copy). --gci <file>: a GCI-folder card holding that one save.
+# --dump-audio: Dolphin writes its audio to <user>/Dump/Audio/*dspdump.wav (compare with FEPOR_DUMP_AUDIO and tools/audio-check.py).
+# --dump-frames: Dolphin writes the video to <user>/Dump/Frames/*.avi (extract frames with ffmpeg to see what was on screen).
 # Needs dolphin-emu, spectacle (KDE) and ImageMagick for the screenshots. Linux only.
 set -euo pipefail
-iso=""; card=""; gci=""; user="/tmp/dolphin-run-user"
+iso=""; card=""; gci=""; user="/tmp/dolphin-run-user"; dump_audio=0; dump_frames=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --iso) iso="$2"; shift 2 ;;
     --card) card="$2"; shift 2 ;;
     --gci) gci="$2"; shift 2 ;;
     --user) user="$2"; shift 2 ;;
+    --dump-audio) dump_audio=1; shift ;;
+    --dump-frames) dump_frames=1; shift ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -36,9 +40,15 @@ SkipIPL = True
 SlotA = $slot
 SlotB = 255
 $([ -n "$card" ] && echo "MemcardAPath = $card")
+[DSP]
+DumpAudio = $([ "$dump_audio" = 1 ] && echo True || echo False)
 [Interface]
 ConfirmStop = False
 EOF
+# [Movie]: dump the video (lossless AVI) so the scene at each moment can be checked offline
+if [ "$dump_frames" = 1 ]; then
+  printf '[Movie]\nDumpFrames = True\nDumpFramesSilent = True\n' >> "$user/Config/Dolphin.ini"
+fi
 cat > "$user/Config/GCPadNew.ini" <<'EOF'
 [GCPad1]
 Device = Pipe/0/pad
@@ -54,6 +64,10 @@ D-Pad/Up = `Button D_UP`
 D-Pad/Down = `Button D_DOWN`
 D-Pad/Left = `Button D_LEFT`
 D-Pad/Right = `Button D_RIGHT`
+Main Stick/Up = `Axis Y +`
+Main Stick/Down = `Axis Y -`
+Main Stick/Left = `Axis X -`
+Main Stick/Right = `Axis X +`
 EOF
 mkfifo "$user/Pipes/pad"
 
@@ -65,6 +79,13 @@ for step in "$@"; do
   case "$step" in
     wait:*) sleep "${step#wait:}" ;;
     press:*) echo "PRESS ${step#press:}" >&3; sleep 0.3; echo "RELEASE ${step#press:}" >&3 ;;
+    stick:*)
+      # tilt the main stick: stick:left|right|up|down (menus often read the stick, not the D-pad)
+      case "${step#stick:}" in
+        left) xy="0 0.5" ;; right) xy="1 0.5" ;; up) xy="0.5 1" ;; down) xy="0.5 0" ;;
+        *) echo "unknown stick direction ${step#stick:}" >&2; exit 2 ;;
+      esac
+      echo "SET MAIN $xy" >&3; sleep 0.4; echo "SET MAIN 0.5 0.5" >&3 ;;
     mash:*)
       # press a button every 1.5 s for the given time: gets through screens whose timing varies
       IFS=: read -r _ btn secs <<< "$step"
