@@ -1,3 +1,5 @@
 # Python tooling used by the scripts in this directory (installed into .venv-tools by tools/venv.sh).
 unicorn>=2.1
 jsonschema>=4
+numpy>=1.26
+pillow>=10
