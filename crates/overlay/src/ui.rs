@@ -453,7 +453,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     ui.horizontal_wrapped(|ui| {
         ui.label(crate::theme::caption("Controller"));
         for (g, name) in [
-            (GlyphSet::GameCube, "GameCube names"),
+            (GlyphSet::GameCube, "GameCube"),
             (GlyphSet::Xbox, "Xbox"),
             (GlyphSet::Nintendo, "Nintendo"),
             (GlyphSet::PlayStation, "PlayStation"),
@@ -465,7 +465,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         }
     });
     ui.add_space(4.0);
-    crate::pad::show(ui, &mut st.pad, &c, &mut st.pad_selected);
+    crate::pad::show(ui, &mut st.pad, &mut c, &mut st.pad_selected);
     ui.add_space(4.0);
     // the GameCube buttons to give to the input picked on the drawing
     match st.pad_selected {
@@ -490,9 +490,13 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         }
         None => {
             ui.label(
-                RichText::new("Click a button on the controller, then choose the GameCube button it stands for.")
-                    .small()
-                    .color(crate::theme::DIM),
+                RichText::new(if cfg.glyphs == GlyphSet::GameCube {
+                    "Click a GameCube button, then press the input of your gamepad that should do it."
+                } else {
+                    "Click a button on the controller, then choose the GameCube button it stands for."
+                })
+                .small()
+                .color(crate::theme::DIM),
             );
         }
     }
