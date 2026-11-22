@@ -82,7 +82,10 @@ struct PipelineKey {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TexKey {
     desc: TextureDesc,
-    sample: u64,
+    /// Hash of every byte of the texture (a sampled hash let changes between the samples through).
+    content: u64,
+    /// Hash of the palette of an indexed texture.
+    palette: u64,
 }
 
 struct EfbTexture {
@@ -90,6 +93,9 @@ struct EfbTexture {
     width: u32,
     height: u32,
     view: Rc<wgpu::TextureView>,
+    /// How many bytes of main memory at `addr` the copy stands for, and their fingerprint when it was made.
+    ram_len: usize,
+    ram_fp: u64,
 }
 
 /// Which presented frames to write as PNG (`FEPOR_DUMP_FRAMES=dir`, `FEPOR_DUMP_EVERY=n`).
@@ -373,6 +379,14 @@ pub struct Renderer {
     /// Guest frames since `fps_since`, to measure the game's frame rate for the overlay.
     fps_frames: u32,
     fps_since: Instant,
+    /// `FEPOR_TRACE=tex`: count the textures the old sampled key would have got wrong.
+    trace_tex: bool,
+    seen_sampled: FastMap<(TextureDesc, u64), (u64, u64)>,
+    stale_data: u64,
+    stale_palette: u64,
+    stale_efb: u64,
+    /// Hash of the texture data at (address, size), valid until the end of the frame.
+    hash_memo: FastMap<(usize, usize), u64>,
     stats: StatsState,
     /// Whether the statistics overlay is shown (the settings' `show_stats`, applied each frame).
     show_stats: bool,
@@ -601,6 +615,12 @@ impl Renderer {
                 .is_ok_and(|v| v.split(',').any(|x| x == "gxdraw")),
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gx" || x == "all")),
+            trace_tex: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "tex")),
+            seen_sampled: FastMap::default(),
+            stale_data: 0,
+            stale_palette: 0,
+            stale_efb: 0,
+            hash_memo: FastMap::default(),
             trace_icons: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "icons")),
             draws: 0,
@@ -659,23 +679,28 @@ impl Renderer {
         if d.width == 0 || d.height == 0 || d.width > 1024 || d.height > 1024 {
             return self.white.clone();
         }
-        if let Some(t) = self
+        let a = d.addr as usize & 0x01FF_FFFF;
+        if let Some(i) = self
             .efb_textures
             .iter()
-            .find(|t| t.addr == d.addr && t.width == d.width && t.height == d.height)
+            .position(|t| t.addr == d.addr && t.width == d.width && t.height == d.height)
         {
-            return t.view.clone();
+            let t = &self.efb_textures[i];
+            let now = ram
+                .get(a..a + t.ram_len)
+                .map_or(0, |data| Self::fingerprint(data, t.ram_len));
+            if now == t.ram_fp {
+                return t.view.clone();
+            }
+            // the game put a real texture where an EFB copy used to be
+            self.efb_textures.remove(i);
+            self.stale_efb += 1;
         }
         let size = texture::image_size(d.format, d.width, d.height);
-        let a = d.addr as usize & 0x01FF_FFFF;
         let Some(data) = ram.get(a..a + size) else {
             return self.white.clone();
         };
-        let sample = Self::fingerprint(data, size);
-        let key = TexKey { desc: *d, sample };
-        if let Some(t) = self.textures.get(&key) {
-            return t.clone();
-        }
+        // The palette of an indexed texture is part of what it looks like.
         let tlut = tluts
             .data
             .get(&d.tlut_offset)
@@ -689,6 +714,43 @@ impl Renderer {
             })
             .or_else(|| tluts.data.values().next())
             .map(|v| (v.as_slice(), d.tlut_format));
+        // C4, C8 and C14X2 index a palette
+        let palette = if (8..=10).contains(&d.format) {
+            tlut.map_or(0, |(p, _)| Self::full_hash(p))
+        } else {
+            0
+        };
+        // hashing every byte at every draw is too slow (a background is a megabyte): once per frame
+        let content = *self
+            .hash_memo
+            .entry((a, size))
+            .or_insert_with(|| Self::full_hash(data));
+        let key = TexKey {
+            desc: *d,
+            content,
+            palette,
+        };
+        if let Some(t) = self.textures.get(&key) {
+            return t.clone();
+        }
+        // the sampled fingerprint names the texture in dumps and finds the button icons
+        let sample = Self::fingerprint(data, size);
+        if self.trace_tex {
+            // what the cache used to key on: a hit there with another content was a wrong texture
+            let old = (*d, sample);
+            match self.seen_sampled.get(&old) {
+                Some((content, pal)) if (*content, *pal) != (key.content, key.palette) => {
+                    if *content != key.content {
+                        self.stale_data += 1;
+                    }
+                    if *pal != key.palette {
+                        self.stale_palette += 1;
+                    }
+                }
+                _ => {}
+            }
+            self.seen_sampled.insert(old, (key.content, key.palette));
+        }
         let mut rgba = texture::decode(d.format, d.width, d.height, data, tlut);
         // the dump keeps the game's own art: it is how new icons are found
         if let Some(dir) = &self.dump_textures {
@@ -741,13 +803,31 @@ impl Renderer {
         );
         let view = Rc::new(tex.create_view(&Default::default()));
         if self.textures.len() > 2048 {
+            // the bind groups keep their textures alive: drop them together, or the GPU memory only grows
             self.textures.clear();
+            self.tex_binds.clear();
         }
         self.textures.insert(key, view.clone());
         view
     }
 
-    /// Cheap content fingerprint of texture data: size plus sampled bytes.
+    /// Hash of all of `data`, eight bytes at a time.
+    fn full_hash(data: &[u8]) -> u64 {
+        const K: u64 = 0x517c_c1b7_2722_0a95;
+        let mut h = data.len() as u64;
+        let mut words = data.chunks_exact(8);
+        for w in &mut words {
+            let v = u64::from_le_bytes([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]);
+            h = (h.rotate_left(5) ^ v).wrapping_mul(K);
+        }
+        for &b in words.remainder() {
+            h = (h.rotate_left(5) ^ b as u64).wrapping_mul(K);
+        }
+        h
+    }
+
+    /// Cheap content fingerprint of texture data: size plus sampled bytes. It names textures in dumps and
+    /// finds the button icons; the texture cache keys on `full_hash`.
     fn fingerprint(data: &[u8], size: usize) -> u64 {
         let mut sample = size as u64;
         for i in (0..size).step_by((size / 64).max(1)) {
@@ -1484,6 +1564,7 @@ impl Renderer {
 
     fn present(&mut self, c: &CopyEfb) {
         self.frame += 1;
+        self.hash_memo.clear();
         self.fps_frames += 1;
         self.stats_frame();
         let since = self.fps_since.elapsed();
@@ -1494,6 +1575,15 @@ impl Renderer {
                 if let Some(mhz) = self.presenter.as_ref().and_then(|p| p.refresh_millihz()) {
                     o.shared().set_display_millihz(mhz);
                 }
+            }
+            if self.trace_tex {
+                eprintln!(
+                    "tex: {} textures cached; wrongly reused by the old key since start: {} (data changed), {} (palette changed); EFB copies dropped after the game wrote there: {}",
+                    self.textures.len(),
+                    self.stale_data,
+                    self.stale_palette,
+                    self.stale_efb
+                );
             }
             (self.fps_frames, self.fps_since) = (0, Instant::now());
         }
@@ -1710,7 +1800,7 @@ impl Renderer {
         }
     }
 
-    fn copy(&mut self, c: CopyEfb) {
+    fn copy(&mut self, c: CopyEfb, ram: &[u8]) {
         if c.to_xfb {
             self.flush();
             self.present(&c);
@@ -1767,11 +1857,20 @@ impl Renderer {
             let view = Rc::new(tex.create_view(&Default::default()));
             self.efb_textures.retain(|t| t.addr != c.dest);
             let (tw, th) = if c.half_scale { (w / 2, h / 2) } else { (w, h) };
+            // what main memory holds there now: if the game later writes a texture at that address, this
+            // copy is no longer what the address means
+            let ram_len = texture::image_size(c.format, tw, th);
+            let a = c.dest as usize & 0x01FF_FFFF;
+            let ram_fp = ram
+                .get(a..a + ram_len)
+                .map_or(0, |d| Self::fingerprint(d, ram_len));
             self.efb_textures.push(EfbTexture {
                 addr: c.dest,
                 width: tw,
                 height: th,
                 view,
+                ram_len,
+                ram_fp,
             });
             if self.efb_textures.len() > 64 {
                 self.efb_textures.remove(0);
@@ -1808,8 +1907,11 @@ impl Sink for Renderer {
         let t = Instant::now();
         match event {
             Event::Draw(d) => self.draw(d, ram, tluts),
-            Event::Copy(c) => self.copy(c),
-            Event::Finish => self.flush(),
+            Event::Copy(c) => self.copy(c, ram),
+            Event::Finish => {
+                self.flush();
+                self.hash_memo.clear();
+            }
             Event::Token(_) => {}
         }
         self.busy_events += t.elapsed();
