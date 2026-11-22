@@ -7,7 +7,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytemuck::{Pod, Zeroable};
 use fepor_gx::state::{CopyEfb, DrawCall, Event, Primitive, RenderState, Sink, TextureDesc, Tluts};
 use fepor_gx::{tev, texture};
 use wgpu::util::DeviceExt;
@@ -65,14 +64,6 @@ struct PassState {
     pipeline: Option<wgpu::RenderPipeline>,
     tbind: Option<wgpu::BindGroup>,
     buffers_bound: bool,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct GpuVertex {
-    pos: [f32; 4],
-    col: [[f32; 4]; 2],
-    uv: [[f32; 4]; 8],
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -162,7 +153,9 @@ impl Stream {
 
 /// One draw as it was submitted, with everything needed to submit it again with other vertices.
 struct RecDraw {
-    verts: Vec<GpuVertex>,
+    /// Vertex stream (see `tev::vertex_stride`).
+    verts: Vec<u8>,
+    stride: usize,
     indices: Vec<u32>,
     uniforms: [f32; tev::UNIFORM_FLOATS],
     pipeline: wgpu::RenderPipeline,
@@ -201,36 +194,45 @@ fn mix(h: u64, v: u64) -> u64 {
 
 /// Vertices of `cur` moved `t` of the way from where `prev` had them. Anything that jumps across the
 /// screen (a cut, a teleport) or has no counterpart is left as it is in `cur`.
-fn lerp_verts(prev: Option<&RecDraw>, cur: &RecDraw, t: f32) -> Vec<GpuVertex> {
+fn lerp_verts(prev: Option<&RecDraw>, cur: &RecDraw, t: f32) -> Vec<u8> {
     // same object: same shader/textures/counts and the very same texture coordinates (glyphs of a text
     // that grows, or sprites that swap frames, are not the same object even when the sig matches)
-    let Some(p) = prev
-        .filter(|p| p.sig == cur.sig && p.verts.iter().zip(&cur.verts).all(|(a, b)| a.uv == b.uv))
-    else {
+    let s = cur.stride;
+    let Some(p) = prev.filter(|p| {
+        p.sig == cur.sig
+            && p.stride == s
+            && p.verts.len() == cur.verts.len()
+            && p.verts
+                .chunks_exact(s)
+                .zip(cur.verts.chunks_exact(s))
+                .all(|(a, b)| a[24..] == b[24..])
+    }) else {
         return cur.verts.clone();
     };
-    let ndc = |v: &GpuVertex| (v.pos[0] / v.pos[3], v.pos[1] / v.pos[3]);
-    let jumps = p.verts.iter().zip(&cur.verts).any(|(a, b)| {
-        if a.pos[3] <= 0.0 || b.pos[3] <= 0.0 {
-            return true;
-        }
-        let ((ax, ay), (bx, by)) = (ndc(a), ndc(b));
-        (ax - bx).abs() > MAX_MOVE || (ay - by).abs() > MAX_MOVE
-    });
-    if jumps {
-        return cur.verts.clone();
-    }
-    p.verts
-        .iter()
-        .zip(&cur.verts)
-        .map(|(a, b)| {
-            let mut v = *b;
-            for k in 0..4 {
-                v.pos[k] = a.pos[k] + (b.pos[k] - a.pos[k]) * t;
-            }
-            v
+    let pos = |v: &[u8]| -> [f32; 4] {
+        std::array::from_fn(|k| {
+            f32::from_le_bytes([v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]])
         })
-        .collect()
+    };
+    let mut out = cur.verts.clone();
+    for (v, (a, b)) in out
+        .chunks_exact_mut(s)
+        .zip(p.verts.chunks_exact(s).zip(cur.verts.chunks_exact(s)))
+    {
+        let (a, b) = (pos(a), pos(b));
+        if a[3] <= 0.0 || b[3] <= 0.0 {
+            return cur.verts.clone();
+        }
+        if (a[0] / a[3] - b[0] / b[3]).abs() > MAX_MOVE
+            || (a[1] / a[3] - b[1] / b[3]).abs() > MAX_MOVE
+        {
+            return cur.verts.clone();
+        }
+        for k in 0..4 {
+            v[4 * k..4 * k + 4].copy_from_slice(&(a[k] + (b[k] - a[k]) * t).to_le_bytes());
+        }
+    }
+    out
 }
 
 /// Largest per-frame movement (in NDC units; the screen is 2 wide) still treated as motion.
@@ -794,13 +796,31 @@ impl Renderer {
             2 => Some(wgpu::Face::Front),
             _ => None,
         };
-        let attrs: Vec<wgpu::VertexAttribute> = (0..11)
-            .map(|i| wgpu::VertexAttribute {
+        let n_uv = tev::tex_inputs(state);
+        let mut attrs: Vec<wgpu::VertexAttribute> = vec![
+            wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
-                offset: 16 * i as u64,
-                shader_location: i,
-            })
-            .collect();
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Unorm8x4,
+                offset: 16,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Unorm8x4,
+                offset: 20,
+                shader_location: 2,
+            },
+        ];
+        for i in 0..n_uv {
+            attrs.push(wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 24 + 12 * i as u64,
+                shader_location: 3 + i as u32,
+            });
+        }
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -811,7 +831,7 @@ impl Renderer {
                     entry_point: Some("vs"),
                     compilation_options: Default::default(),
                     buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        array_stride: tev::vertex_stride(n_uv) as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &attrs,
                     }],
@@ -902,16 +922,21 @@ impl Renderer {
                 d.state.tev[0], d.state.textures[0]
             );
         }
-        let verts: Vec<GpuVertex> = d
-            .vertices
-            .iter()
-            .map(|v| GpuVertex {
-                pos: v.pos,
-                col: v.col,
-                uv: std::array::from_fn(|i| [v.uv[i][0], v.uv[i][1], v.uv[i][2], 0.0]),
-            })
-            .collect();
+        let nverts = d.vertices.len();
         let state = d.state;
+        // vertex stream: position, two 8-bit colours, and only the texture coordinate sets a stage reads
+        let n_uv = tev::tex_inputs(&state);
+        let stride = tev::vertex_stride(n_uv);
+        let quant = |c: [f32; 4]| c.map(|x| (x * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
+        let mut vb: Vec<u8> = Vec::with_capacity(nverts * stride);
+        for v in &d.vertices {
+            vb.extend_from_slice(bytemuck::cast_slice(&v.pos));
+            vb.extend_from_slice(&quant(v.col[0]));
+            vb.extend_from_slice(&quant(v.col[1]));
+            for uv in &v.uv[..n_uv] {
+                vb.extend_from_slice(bytemuck::cast_slice(uv));
+            }
+        }
         let key = tev::shader_key(&state);
         let (shader_hash, src) = match self.shader_srcs.get(&key) {
             Some((h, s)) => (*h, s.clone()),
@@ -975,12 +1000,13 @@ impl Renderer {
         let tbind = self.tex_binds[&key].0.clone();
 
         // what makes two draws of consecutive frames "the same object" for interpolation
-        let mut sig = mix(mix(shader_hash, verts.len() as u64), indices.len() as u64);
+        let mut sig = mix(mix(shader_hash, nverts as u64), indices.len() as u64);
         for m in (0..8).filter(|m| used[*m]) {
             sig = mix(sig, state.textures[m].addr as u64);
         }
         let rec = RecDraw {
-            verts,
+            verts: vb,
+            stride,
             indices,
             uniforms,
             pipeline,
@@ -996,22 +1022,26 @@ impl Renderer {
     }
 
     /// Record `r` (with `verts` as its vertices) into the open render pass.
-    fn emit(&mut self, r: &RecDraw, verts: &[GpuVertex]) {
+    fn emit(&mut self, r: &RecDraw, vbytes: &[u8]) {
         // Draw data goes into per-submit staging vectors, uploaded once in `flush` (one buffer each, not
         // three buffers per draw: the buffer count dominated the frame time).
-        let vbytes: &[u8] = bytemuck::cast_slice(verts);
         let ibytes: &[u8] = bytemuck::cast_slice(&r.indices);
         if vbytes.len() > VBUF_SIZE || ibytes.len() > IBUF_SIZE {
             return;
         }
+        let stride = r.stride;
+        let pad = |len: usize| (stride - len % stride) % stride;
         let s = &self.stream;
-        if s.vdata.len() + vbytes.len() > VBUF_SIZE
+        if s.vdata.len() + pad(s.vdata.len()) + vbytes.len() > VBUF_SIZE
             || s.idata.len() + ibytes.len() > IBUF_SIZE
             || s.udata.len() + UNIFORM_STRIDE > UBUF_SIZE
         {
             self.flush();
         }
         let s = &mut self.stream;
+        // a vertex stream is addressed with base_vertex in units of this draw's stride: start on one
+        let vpad = pad(s.vdata.len());
+        s.vdata.resize(s.vdata.len() + vpad, 0);
         let (voff, ioff, uoff) = (s.vdata.len(), s.idata.len(), s.udata.len());
         s.vdata.extend_from_slice(vbytes);
         s.idata.extend_from_slice(ibytes);
@@ -1124,7 +1154,7 @@ impl Renderer {
             st.buffers_bound = true;
         }
         let first_index = (ioff / 4) as u32;
-        let base_vertex = (voff / std::mem::size_of::<GpuVertex>()) as i32;
+        let base_vertex = (voff / r.stride) as i32;
         pass.draw_indexed(
             first_index..first_index + r.indices.len() as u32,
             base_vertex,

@@ -165,6 +165,21 @@ fn cmp_fn(mode: u32) -> &'static str {
     }
 }
 
+/// Texture coordinate sets the vertex stream carries: up to the highest one a textured stage reads.
+pub fn tex_inputs(s: &RenderState) -> usize {
+    s.tev[..s.num_tev_stages as usize]
+        .iter()
+        .filter(|st| st.tex_enable)
+        .map(|st| (st.texcoord as usize & 7) + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Bytes per vertex with `n` texture coordinate sets: position (4 f32), two colours (4 x u8 each), n x 3 f32.
+pub const fn vertex_stride(n: usize) -> usize {
+    24 + 12 * n
+}
+
 pub fn wgsl(s: &RenderState) -> String {
     let mut o = String::new();
     o.push_str(
@@ -175,21 +190,29 @@ pub fn wgsl(s: &RenderState) -> String {
         let _ = writeln!(o, "@group(1) @binding({i}) var t{i}: texture_2d<f32>;");
         let _ = writeln!(o, "@group(1) @binding({}) var s{i}: sampler;", 8 + i);
     }
+    // vertex inputs: position, two 8-bit colours and only the texture coordinate sets a stage reads
+    let n = tex_inputs(s);
+    o.push_str("struct VsIn { @location(0) pos: vec4<f32>, @location(1) c0: vec4<f32>, @location(2) c1: vec4<f32>");
+    for i in 0..n {
+        let _ = write!(o, ", @location({}) u{i}: vec3<f32>", 3 + i);
+    }
+    o.push_str(" };\n");
     o.push_str(
-        "struct VsIn { @location(0) pos: vec4<f32>, @location(1) c0: vec4<f32>, @location(2) c1: vec4<f32>,\n\
-           @location(3) u0: vec4<f32>, @location(4) u1: vec4<f32>, @location(5) u2: vec4<f32>, @location(6) u3: vec4<f32>,\n\
-           @location(7) u4: vec4<f32>, @location(8) u5: vec4<f32>, @location(9) u6: vec4<f32>, @location(10) u7: vec4<f32> };\n\
-         struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) c0: vec4<f32>, @location(1) c1: vec4<f32>,\n\
+        "struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) c0: vec4<f32>, @location(1) c1: vec4<f32>,\n\
            @location(2) u0: vec3<f32>, @location(3) u1: vec3<f32>, @location(4) u2: vec3<f32>, @location(5) u3: vec3<f32>,\n\
            @location(6) u4: vec3<f32>, @location(7) u5: vec3<f32>, @location(8) u6: vec3<f32>, @location(9) u7: vec3<f32> };\n\
          @vertex fn vs(i: VsIn) -> VsOut {\n\
            var o: VsOut;\n\
-           o.pos = i.pos; o.c0 = i.c0; o.c1 = i.c1;\n\
-           o.u0 = i.u0.xyz; o.u1 = i.u1.xyz; o.u2 = i.u2.xyz; o.u3 = i.u3.xyz;\n\
-           o.u4 = i.u4.xyz; o.u5 = i.u5.xyz; o.u6 = i.u6.xyz; o.u7 = i.u7.xyz;\n\
-           return o;\n\
-         }\n",
+           o.pos = i.pos; o.c0 = i.c0; o.c1 = i.c1;\n",
     );
+    for k in 0..8 {
+        if k < n {
+            let _ = writeln!(o, "  o.u{k} = i.u{k};");
+        } else {
+            let _ = writeln!(o, "  o.u{k} = vec3<f32>(0.0, 0.0, 1.0);");
+        }
+    }
+    o.push_str("  return o;\n}\n");
     o.push_str("@fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {\n");
     o.push_str(
         "  var prev = u.regs[0]; var r0 = u.regs[1]; var r1 = u.regs[2]; var r2 = u.regs[3];\n",
