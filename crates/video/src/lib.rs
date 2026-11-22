@@ -179,6 +179,17 @@ struct RecDraw {
     sig: u64,
 }
 
+/// What a draw derived from its render state, for the next draw to reuse while the state is the same one.
+struct DrawCache {
+    state: Arc<fepor_gx::state::RenderState>,
+    topology: wgpu::PrimitiveTopology,
+    shader_hash: u64,
+    pipeline: wgpu::RenderPipeline,
+    uniforms: [f32; tev::UNIFORM_FLOATS],
+    used: [bool; 8],
+    tbind: wgpu::BindGroup,
+}
+
 enum Rec {
     Clear {
         color: [f64; 4],
@@ -435,6 +446,7 @@ pub struct Renderer {
     /// The decoded-vertex vector of the last draw, handed back to the GX parser (`Sink::recycle`).
     spare_verts: Vec<fepor_gx::state::Vertex>,
     scratch_vb: Vec<u8>,
+    draw_cache: Option<DrawCache>,
     stats: StatsState,
     /// Whether the statistics overlay is shown (the settings' `show_stats`, applied each frame).
     show_stats: bool,
@@ -681,6 +693,7 @@ impl Renderer {
             trace_icons: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "icons")),
             draws: 0,
+            draw_cache: None,
         })
     }
 
@@ -702,6 +715,7 @@ impl Renderer {
             self.queue.submit([e.finish()]);
         }
         self.tex_binds.clear();
+        self.draw_cache = None;
     }
 
     fn sampler(&mut self, d: &TextureDesc) -> wgpu::Sampler {
@@ -1234,37 +1248,104 @@ impl Renderer {
         let quant = |c: [f32; 4]| c.map(|x| (x * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
         let mut vb = std::mem::take(&mut self.scratch_vb);
         vb.clear();
-        vb.reserve(nverts * stride);
-        for v in &d.vertices {
-            vb.extend_from_slice(bytemuck::cast_slice(&v.pos));
-            vb.extend_from_slice(&quant(v.col[0]));
-            vb.extend_from_slice(&quant(v.col[1]));
-            for uv in &v.uv[..n_uv] {
-                vb.extend_from_slice(bytemuck::cast_slice(uv));
+        vb.resize(nverts * stride, 0);
+        for (v, out) in d.vertices.iter().zip(vb.chunks_exact_mut(stride)) {
+            out[0..16].copy_from_slice(bytemuck::cast_slice(&v.pos));
+            out[16..20].copy_from_slice(&quant(v.col[0]));
+            out[20..24].copy_from_slice(&quant(v.col[1]));
+            for (i, uv) in v.uv[..n_uv].iter().enumerate() {
+                out[24 + 12 * i..36 + 12 * i].copy_from_slice(bytemuck::cast_slice(uv));
             }
         }
-        let key = tev::shader_key(&state);
-        let (shader_hash, src) = match self.shader_srcs.get(&key) {
-            Some((h, s)) => (*h, s.clone()),
+        // Most draws follow each other with the same render state (the GX parser keeps one snapshot until a
+        // register changes): then the shader, pipeline, uniforms and texture binding are the last draw's.
+        let cached = match &self.draw_cache {
+            Some(c) if Arc::ptr_eq(&c.state, &state) && c.topology == topology => Some((
+                c.shader_hash,
+                c.pipeline.clone(),
+                c.uniforms,
+                c.used,
+                c.tbind.clone(),
+            )),
+            _ => None,
+        };
+        let (shader_hash, pipeline, uniforms, used, tbind) = match cached {
+            Some(c) => c,
             None => {
-                let s = tev::wgsl(&state);
-                let h = hash_str(&s);
-                let s: Rc<str> = s.into();
-                self.shader_srcs.insert(key, (h, s.clone()));
-                (h, s)
+                let key = tev::shader_key(&state);
+                let (shader_hash, src) = match self.shader_srcs.get(&key) {
+                    Some((h, s)) => (*h, s.clone()),
+                    None => {
+                        let s = tev::wgsl(&state);
+                        let h = hash_str(&s);
+                        let s: Rc<str> = s.into();
+                        self.shader_srcs.insert(key, (h, s.clone()));
+                        (h, s)
+                    }
+                };
+                let pipeline = self.pipeline(&state, shader_hash, &src, topology);
+
+                let uniforms = tev::uniforms(&state);
+
+                // textures: only the maps a stage reads are fetched
+                let mut used = [false; 8];
+                for s in &state.tev[..state.num_tev_stages as usize] {
+                    if s.tex_enable {
+                        used[s.texmap as usize & 7] = true;
+                    }
+                }
+                let views: [Rc<wgpu::TextureView>; 8] = std::array::from_fn(|m| {
+                    if used[m] {
+                        self.texture(&state.textures[m], ram, tluts)
+                    } else {
+                        self.white.clone()
+                    }
+                });
+                let key: TexBindKey = (
+                    std::array::from_fn(|m| Rc::as_ptr(&views[m]) as usize),
+                    std::array::from_fn(|m| {
+                        let t = &state.textures[m];
+                        t.wrap_s & 3
+                            | (t.wrap_t & 3) << 2
+                            | (t.mag_linear as u8) << 4
+                            | (t.min_linear as u8) << 5
+                    }),
+                );
+                if !self.tex_binds.contains_key(&key) {
+                    let samplers: Vec<wgpu::Sampler> =
+                        (0..8).map(|m| self.sampler(&state.textures[m])).collect();
+                    let mut entries = Vec::new();
+                    for m in 0..8 {
+                        entries.push(wgpu::BindGroupEntry {
+                            binding: m as u32,
+                            resource: wgpu::BindingResource::TextureView(&views[m]),
+                        });
+                        entries.push(wgpu::BindGroupEntry {
+                            binding: 8 + m as u32,
+                            resource: wgpu::BindingResource::Sampler(&samplers[m]),
+                        });
+                    }
+                    let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &self.texture_layout,
+                        entries: &entries,
+                    });
+                    // the views stay alive with the bind group, so their pointers stay unique keys
+                    self.tex_binds.insert(key, (bind, views.to_vec()));
+                }
+                let tbind = self.tex_binds[&key].0.clone();
+                self.draw_cache = Some(DrawCache {
+                    state: state.clone(),
+                    topology,
+                    shader_hash,
+                    pipeline: pipeline.clone(),
+                    uniforms,
+                    used,
+                    tbind: tbind.clone(),
+                });
+                (shader_hash, pipeline, uniforms, used, tbind)
             }
         };
-        let pipeline = self.pipeline(&state, shader_hash, &src, topology);
-
-        let uniforms = tev::uniforms(&state);
-
-        // textures: only the maps a stage reads are fetched
-        let mut used = [false; 8];
-        for s in &state.tev[..state.num_tev_stages as usize] {
-            if s.tex_enable {
-                used[s.texmap as usize & 7] = true;
-            }
-        }
         if let Some(m) = self.icon_shift(&state, &used, ram, &d.vertices) {
             let f = |v: &[u8], i: usize| f32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);
             for v in vb.chunks_exact_mut(stride) {
@@ -1277,46 +1358,6 @@ impl Renderer {
                 }
             }
         }
-        let views: [Rc<wgpu::TextureView>; 8] = std::array::from_fn(|m| {
-            if used[m] {
-                self.texture(&state.textures[m], ram, tluts)
-            } else {
-                self.white.clone()
-            }
-        });
-        let key: TexBindKey = (
-            std::array::from_fn(|m| Rc::as_ptr(&views[m]) as usize),
-            std::array::from_fn(|m| {
-                let t = &state.textures[m];
-                t.wrap_s & 3
-                    | (t.wrap_t & 3) << 2
-                    | (t.mag_linear as u8) << 4
-                    | (t.min_linear as u8) << 5
-            }),
-        );
-        if !self.tex_binds.contains_key(&key) {
-            let samplers: Vec<wgpu::Sampler> =
-                (0..8).map(|m| self.sampler(&state.textures[m])).collect();
-            let mut entries = Vec::new();
-            for m in 0..8 {
-                entries.push(wgpu::BindGroupEntry {
-                    binding: m as u32,
-                    resource: wgpu::BindingResource::TextureView(&views[m]),
-                });
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 8 + m as u32,
-                    resource: wgpu::BindingResource::Sampler(&samplers[m]),
-                });
-            }
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.texture_layout,
-                entries: &entries,
-            });
-            // the views stay alive with the bind group, so their pointers stay unique keys
-            self.tex_binds.insert(key, (bind, views.to_vec()));
-        }
-        let tbind = self.tex_binds[&key].0.clone();
 
         // what makes two draws of consecutive frames "the same object" for interpolation
         let mut sig = mix(mix(shader_hash, nverts as u64), indices.len() as u64);
@@ -1678,6 +1719,7 @@ impl Renderer {
     fn present(&mut self, c: &CopyEfb) {
         self.frame += 1;
         self.hash_memo.clear();
+        self.draw_cache = None;
         self.fps_frames += 1;
         self.stats_frame();
         let since = self.fps_since.elapsed();
@@ -1752,6 +1794,7 @@ impl Renderer {
             self.icon_gen = icon_gen;
             self.textures.clear();
             self.tex_binds.clear();
+            self.draw_cache = None;
         }
         if self.presenter.is_none() && self.dump.is_none() {
             return;
@@ -2027,7 +2070,11 @@ impl Sink for Renderer {
                 self.draw(&d, ram, tluts);
                 self.spare_verts = std::mem::take(&mut d.vertices);
             }
-            Event::Copy(c) => self.copy(c, ram),
+            Event::Copy(c) => {
+                // the copy may rewrite texture memory the cached binding was built from
+                self.draw_cache = None;
+                self.copy(c, ram)
+            }
             Event::Finish => {
                 self.flush();
                 self.hash_memo.clear();
