@@ -15,6 +15,7 @@ use crate::shared::Shared;
 pub enum Page {
     Video,
     Audio,
+    Language,
     Controls,
     Card,
     Help,
@@ -22,9 +23,10 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; 7] = [
         Page::Video,
         Page::Audio,
+        Page::Language,
         Page::Controls,
         Page::Card,
         Page::Help,
@@ -37,6 +39,7 @@ impl Page {
             Page::Audio => "Audio",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
+            Page::Language => "Language",
             Page::Help => "Help",
             Page::Quit => "Quit",
         }
@@ -313,6 +316,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| match st.page {
             Page::Video => video(ui, shared),
             Page::Audio => audio(ui, shared),
+            Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
             Page::Help => help(ui, shared),
@@ -424,6 +428,35 @@ fn audio(ui: &mut egui::Ui, shared: &Shared) {
     if device != before.audio.device {
         shared.settings.update(|x| x.audio.device = device);
     }
+}
+
+/// The language of the game's text. The game reads it once, when it starts.
+fn language(ui: &mut egui::Ui, shared: &Shared) {
+    use fepor_core::settings::Language;
+    let before = shared.settings.get().game.language;
+    let mut now = before;
+    ui.label(crate::theme::caption("Text language"));
+    egui::ComboBox::from_id_salt("text_language")
+        .width(240.0)
+        .selected_text(now.label())
+        .show_ui(ui, |ui| {
+            for l in Language::ALL {
+                ui.selectable_value(&mut now, l, l.label());
+            }
+        });
+    if now != before {
+        shared.settings.update(|x| x.game.language = now);
+    }
+    ui.add_space(4.0);
+    ui.add(
+        egui::Label::new(
+            "Menus, dialogue and windows. Takes effect the next time the game starts.",
+        )
+        .wrap(),
+    );
+    ui.add_space(12.0);
+    ui.label(crate::theme::caption("Audio language"));
+    ui.add(egui::Label::new("This disc has one set of voices and movie soundtracks: no other audio language to choose.").wrap());
 }
 
 fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {

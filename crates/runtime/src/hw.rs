@@ -255,6 +255,11 @@ impl Hw {
         }
     }
 
+    /// Set the console language the game reads from the SRAM (`OS_LANG_*`).
+    pub fn set_language(&mut self, code: u8) {
+        self.exi.set_language(code);
+    }
+
     /// Insert a memory card in slot A (0) or B (1).
     pub fn insert_card(&mut self, slot: usize, card: crate::card::MemCard) {
         self.exi.insert_card(slot, card);

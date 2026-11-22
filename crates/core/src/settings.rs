@@ -137,11 +137,81 @@ impl Default for Audio {
     }
 }
 
+/// The language of the game's text, windows and menus. The game reads it from the console's SRAM
+/// (`OSGetLanguage`) when it starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    #[default]
+    English,
+    German,
+    French,
+    Spanish,
+    Italian,
+}
+
+impl Language {
+    pub const ALL: [Language; 5] = [
+        Language::English,
+        Language::German,
+        Language::French,
+        Language::Spanish,
+        Language::Italian,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Language::English => "English",
+            Language::German => "Deutsch",
+            Language::French => "Français",
+            Language::Spanish => "Español",
+            Language::Italian => "Italiano",
+        }
+    }
+
+    /// The value of the SRAM language byte (`OS_LANG_*`).
+    pub fn sram_code(self) -> u8 {
+        match self {
+            Language::English => 0,
+            Language::German => 1,
+            Language::French => 2,
+            Language::Spanish => 3,
+            Language::Italian => 4,
+        }
+    }
+
+    /// The ISO 639-1 code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::English => "en",
+            Language::German => "de",
+            Language::French => "fr",
+            Language::Spanish => "es",
+            Language::Italian => "it",
+        }
+    }
+
+    /// Parse the `FEPOR_LANG` environment syntax: the two-letter code or the English name.
+    pub fn parse(s: &str) -> Option<Language> {
+        Language::ALL
+            .into_iter()
+            .find(|l| s.eq_ignore_ascii_case(l.code()) || s.eq_ignore_ascii_case(&format!("{l:?}")))
+    }
+}
+
+/// Options of the game itself, applied when it starts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Game {
+    pub language: Language,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub video: Video,
     pub audio: Audio,
+    pub game: Game,
 }
 
 impl Settings {
@@ -198,6 +268,12 @@ impl Settings {
             .and_then(|v| Aspect::parse(&v))
         {
             self.video.aspect = a;
+        }
+        if let Some(l) = std::env::var("FEPOR_LANG")
+            .ok()
+            .and_then(|v| Language::parse(&v))
+        {
+            self.game.language = l;
         }
         self.clamp();
         self
@@ -273,6 +349,7 @@ mod tests {
         s.video.frame_multiplier = 3;
         s.video.aspect = Aspect::Wide16x9;
         s.audio.volume = 0.4;
+        s.game.language = Language::Italian;
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
         std::fs::write(
@@ -285,6 +362,19 @@ mod tests {
             (l.video.frame_multiplier, l.video.resolution, l.audio.volume),
             (8, 1, 1.0)
         );
+    }
+
+    #[test]
+    fn language_codes_and_names_parse_and_map_to_distinct_sram_values() {
+        assert_eq!(Language::parse("de"), Some(Language::German));
+        assert_eq!(Language::parse("French"), Some(Language::French));
+        assert_eq!(Language::parse("xx"), None);
+        let mut codes: Vec<u8> = Language::ALL.iter().map(|l| l.sram_code()).collect();
+        codes.dedup();
+        assert_eq!(codes.len(), Language::ALL.len());
+        for l in Language::ALL {
+            assert_eq!(Language::parse(l.code()), Some(l));
+        }
     }
 
     #[test]

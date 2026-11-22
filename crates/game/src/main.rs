@@ -162,6 +162,7 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         m.hw.set_audio_sink(sink);
     }
     insert_cards(m, disc.game_id(), Some(&data), &overlay);
+    m.hw.set_language(overlay.settings.get().game.language.sram_code());
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
     abi::start_watchdog();

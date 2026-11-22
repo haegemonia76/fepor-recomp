@@ -44,11 +44,8 @@ pub struct Exi {
     rtc: u32,
 }
 
-/// Default SRAM with valid checksums, English.
-fn default_sram() -> [u8; 64] {
-    let mut s = [0u8; 64];
-    s[0x13] = 0x01; // flags/language byte
-                    // checksum: sum of the big-endian u16 words in bytes 0x0C..0x14, then its complement
+/// Checksums of the SRAM: the sum of the big-endian u16 words in bytes 0x0C..0x14, then its complement.
+fn seal_sram(s: &mut [u8; 64]) {
     let sum: u32 = (0x0C..0x14)
         .step_by(2)
         .map(|i| u16::from_be_bytes([s[i], s[i + 1]]) as u32)
@@ -56,6 +53,13 @@ fn default_sram() -> [u8; 64] {
     let c = (sum & 0xFFFF) as u16;
     s[0..2].copy_from_slice(&c.to_be_bytes());
     s[2..4].copy_from_slice(&(!c).to_be_bytes());
+}
+
+/// Default SRAM with valid checksums, English.
+fn default_sram() -> [u8; 64] {
+    let mut s = [0u8; 64];
+    s[0x13] = 0x01; // flags byte
+    seal_sram(&mut s);
     s
 }
 
@@ -66,6 +70,12 @@ impl Exi {
             sram: default_sram(),
             rtc: 0x2C00_0000,
         }
+    }
+
+    /// Set the language byte and keep the checksums valid.
+    pub fn set_language(&mut self, code: u8) {
+        self.sram[0x12] = code;
+        seal_sram(&mut self.sram);
     }
 
     /// Register read; `off` is the offset inside the EXI block (0..0x400).
