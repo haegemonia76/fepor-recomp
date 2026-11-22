@@ -56,9 +56,14 @@ jobs:
       - name: Install SDL3 build dependencies (macOS)
         if: matrix.system == 'macos'
         run: brew install cmake ninja
-      - name: Install SDL3 build dependencies (Windows)
+      # The runtime crate compiles two small C++ files with clang++ (crates/runtime/build.rs); the MSVC STL on
+      # the runner refuses clang older than 22, which is older than what the image ships.
+      - name: Install clang, cmake and ninja (Windows)
         if: matrix.system == 'windows'
-        run: choco install cmake ninja -y --no-progress
+        run: |
+          choco install cmake ninja -y --no-progress
+          choco upgrade llvm -y --no-progress
+          "/c/Program Files/LLVM/bin/clang++" --version
 
       - name: Instruction vectors
         run: cargo test --release --locked -p fepor-jit --test vectors

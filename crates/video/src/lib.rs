@@ -765,6 +765,12 @@ impl Renderer {
                 return t.view.clone();
             }
             // the game put a real texture where an EFB copy used to be
+            if self.trace_tex {
+                eprintln!(
+                    "efbstale: frame {} addr {:08x} {}x{} len {} ram fp {:x} -> {now:x}",
+                    self.frame, d.addr, t.width, t.height, t.ram_len, t.ram_fp
+                );
+            }
             self.efb_textures.remove(i);
             self.stale_efb += 1;
         }
@@ -2020,6 +2026,12 @@ impl Renderer {
             let ram_fp = ram
                 .get(a..a + ram_len)
                 .map_or(0, |d| Self::fingerprint(d, ram_len));
+            if self.trace_tex {
+                eprintln!(
+                    "efbcopy: frame {} dest {:08x} {tw}x{th} fmt {} len {ram_len} ram fp {ram_fp:x}",
+                    self.frame, c.dest, c.format
+                );
+            }
             self.efb_textures.push(EfbTexture {
                 addr: c.dest,
                 width: tw,
