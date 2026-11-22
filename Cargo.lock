@@ -1253,6 +1253,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 name = "fepor-audio"
 version = "0.1.0"
 dependencies = [
+ "fepor-core",
  "fepor-runtime",
  "sdl3",
 ]
@@ -1276,6 +1277,7 @@ dependencies = [
  "fepor-audio",
  "fepor-core",
  "fepor-input",
+ "fepor-overlay",
  "fepor-runtime",
  "fepor-video",
  "winit",
@@ -1294,6 +1296,19 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "fepor-overlay"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "egui",
+ "fepor-core",
+ "fepor-input",
+ "tempfile",
+ "wgpu 26.0.1",
+ "winit",
 ]
 
 [[package]]
@@ -1341,7 +1356,9 @@ name = "fepor-video"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "fepor-core",
  "fepor-gx",
+ "fepor-overlay",
  "png 0.17.16",
  "pollster 0.4.0",
  "wgpu 26.0.1",

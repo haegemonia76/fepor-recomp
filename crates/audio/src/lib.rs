@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::mpsc::{channel, Sender};
 
+use fepor_core::settings::SettingsHandle;
 use fepor_runtime::dsp::AudioSink;
 
 /// Streaming WAV writer: the header is rewritten after every push so a killed process leaves a valid file.
@@ -59,11 +60,20 @@ impl AudioSink for WavSink {
 /// Plays through SDL3. The SDL objects live on their own thread (they are not `Send`).
 struct SdlSink {
     tx: Sender<(u32, Vec<i16>)>,
+    settings: SettingsHandle,
 }
 
 impl AudioSink for SdlSink {
     fn push(&mut self, rate: u32, samples: &[i16]) {
-        let _ = self.tx.send((rate, samples.to_vec()));
+        // the volume slider is perceptual: the gain is its square
+        let v = self.settings.get().audio.volume;
+        let gain = v * v;
+        let out = if gain >= 0.999 {
+            samples.to_vec()
+        } else {
+            samples.iter().map(|s| (*s as f32 * gain) as i16).collect()
+        };
+        let _ = self.tx.send((rate, out));
     }
 }
 
@@ -145,9 +155,10 @@ impl AudioSink for Tee {
     }
 }
 
-/// The audio output selected by the environment: SDL3 unless `FEPOR_NO_AUDIO` is set, plus a WAV dump
-/// when `FEPOR_DUMP_AUDIO` names a file. `None` when nothing could be opened.
-pub fn open() -> Option<Box<dyn AudioSink>> {
+/// The audio output selected by the environment: SDL3 unless `FEPOR_NO_AUDIO` is set (played at the volume
+/// of `settings`), plus a WAV dump when `FEPOR_DUMP_AUDIO` names a file (always at full volume). `None` when
+/// nothing could be opened.
+pub fn open(settings: SettingsHandle) -> Option<Box<dyn AudioSink>> {
     let mut sinks: Vec<Box<dyn AudioSink>> = Vec::new();
     if let Ok(path) = std::env::var("FEPOR_DUMP_AUDIO") {
         match WavSink::create(&path) {
@@ -163,7 +174,7 @@ pub fn open() -> Option<Box<dyn AudioSink>> {
             .spawn(move || sdl_thread(rx, rtx))
             .ok()?;
         match rrx.recv() {
-            Ok(Ok(())) => sinks.push(Box::new(SdlSink { tx })),
+            Ok(Ok(())) => sinks.push(Box::new(SdlSink { tx, settings })),
             Ok(Err(e)) => eprintln!("audio disabled: {e}"),
             Err(_) => {}
         }

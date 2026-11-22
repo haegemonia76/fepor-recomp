@@ -389,6 +389,15 @@ impl Remapper {
         }
     }
 
+    /// Remap `action` only.
+    pub fn single(keyboard: bool, action: Action) -> Remapper {
+        Remapper {
+            keyboard,
+            queue: vec![action],
+            next: 0,
+        }
+    }
+
     pub fn keyboard(&self) -> bool {
         self.keyboard
     }
@@ -554,6 +563,7 @@ pub struct Controls {
     pub message: Option<String>,
     /// Sources of the device being remapped that are currently held down.
     held: std::collections::HashSet<String>,
+    suspended: bool,
 }
 
 impl Controls {
@@ -565,6 +575,7 @@ impl Controls {
             path,
             message: None,
             held: Default::default(),
+            suspended: false,
         }
     }
 
@@ -599,6 +610,11 @@ impl Controls {
             self.message = Some("Remapping cancelled".into());
             return;
         }
+        self.begin_remap(Remapper::new(keyboard));
+    }
+
+    fn begin_remap(&mut self, remapper: Remapper) {
+        let keyboard = remapper.keyboard();
         // inputs already held when remapping starts must be released before they can count
         let prefix = if keyboard { "kb:" } else { "pad:" };
         self.held = self
@@ -610,7 +626,7 @@ impl Controls {
         self.state.release_all(true);
         self.state.release_all(false);
         self.publish();
-        self.remap = Some(Remapper::new(keyboard));
+        self.remap = Some(remapper);
         self.message = self.prompt();
     }
 
@@ -624,6 +640,59 @@ impl Controls {
         };
         let _ = self.cfg.save(&self.path);
         self.message = Some(format!("Button glyphs: {:?}", self.cfg.glyphs));
+    }
+
+    /// Rebind one action of the keyboard or the gamepad: the next input becomes its binding (Esc on the
+    /// keyboard keeps the current one). Saved when done.
+    pub fn rebind(&mut self, keyboard: bool, action: Action) {
+        self.begin_remap(Remapper::single(keyboard, action));
+    }
+
+    /// Whether the next input is being captured as a binding.
+    pub fn is_remapping(&self) -> bool {
+        self.remap.is_some()
+    }
+
+    /// The device (`true` = keyboard) and action being captured, if any.
+    pub fn remap_target(&self) -> Option<(bool, Action)> {
+        let r = self.remap.as_ref()?;
+        match r.current() {
+            RemapStep::Ask(a) => Some((r.keyboard(), a)),
+            RemapStep::Done => None,
+        }
+    }
+
+    pub fn cancel_remap(&mut self) {
+        if self.remap.take().is_some() {
+            self.message = Some("Remapping cancelled".into());
+        }
+    }
+
+    /// While suspended (the overlay is open) inputs no longer reach the game: the pad reads neutral.
+    /// Remapping still receives them.
+    pub fn set_suspended(&mut self, suspended: bool) {
+        self.suspended = suspended;
+        if suspended {
+            self.state.release_all(true);
+            self.state.release_all(false);
+            self.publish();
+        }
+    }
+
+    pub fn set_glyphs(&mut self, glyphs: GlyphSet) {
+        self.cfg.glyphs = glyphs;
+        let _ = self.cfg.save(&self.path);
+    }
+
+    pub fn set_deadzone(&mut self, deadzone: f32) {
+        self.cfg.deadzone = deadzone.clamp(0.0, 0.9);
+        let _ = self.cfg.save(&self.path);
+    }
+
+    /// Back to the default bindings (glyph family and dead zone kept).
+    pub fn reset_bindings(&mut self) {
+        self.cfg.bindings = Bindings::default();
+        let _ = self.cfg.save(&self.path);
     }
 
     /// One input event. `keyboard` selects the device; `value` is 0 on release.
@@ -651,6 +720,9 @@ impl Controls {
                     }
                 }
             }
+            return;
+        }
+        if self.suspended {
             return;
         }
         self.state.set(keyboard, source, value);

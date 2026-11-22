@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use fepor_core::settings::Aspect;
 use fepor_gx::state::CopyEfb;
 use wgpu::util::DeviceExt;
 
@@ -27,29 +28,6 @@ struct VO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32> };
 }
 "#;
 
-/// How the frame is fitted into the window (`FEPOR_ASPECT=fit|stretch|16:9`).
-#[derive(Clone, Copy)]
-enum Aspect {
-    Frame,
-    Stretch,
-    Ratio(f32),
-}
-
-impl Aspect {
-    fn from_env() -> Aspect {
-        let v = std::env::var("FEPOR_ASPECT").unwrap_or_default();
-        match v.as_str() {
-            "" | "fit" => Aspect::Frame,
-            "stretch" => Aspect::Stretch,
-            r => r
-                .split_once(':')
-                .and_then(|(a, b)| Some(a.parse::<f32>().ok()? / b.parse::<f32>().ok()?))
-                .filter(|r| *r > 0.0)
-                .map_or(Aspect::Frame, Aspect::Ratio),
-        }
-    }
-}
-
 pub struct Presenter {
     surface: wgpu::Surface<'static>,
     window: Arc<winit::window::Window>,
@@ -58,6 +36,7 @@ pub struct Presenter {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     aspect: Aspect,
+    adapter: wgpu::Adapter,
 }
 
 impl Presenter {
@@ -174,7 +153,8 @@ impl Presenter {
             layout,
             pipeline,
             sampler,
-            aspect: Aspect::from_env(),
+            aspect: Aspect::Fit,
+            adapter: adapter.clone(),
         }
     }
 
@@ -185,6 +165,7 @@ impl Presenter {
         queue: &wgpu::Queue,
         efb: &wgpu::TextureView,
         c: &CopyEfb,
+        overlay: Option<&mut fepor_overlay::Overlay>,
     ) {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -237,8 +218,9 @@ impl Presenter {
         // letterbox to the chosen aspect ratio (default: the frame's own)
         let (sw, sh) = (size.width as f32, size.height as f32);
         let aspect = match self.aspect {
-            Aspect::Frame => w as f32 / h as f32,
-            Aspect::Ratio(r) => r,
+            Aspect::Fit => w as f32 / h as f32,
+            Aspect::Wide16x9 => 16.0 / 9.0,
+            Aspect::Wide21x9 => 21.0 / 9.0,
             Aspect::Stretch => sw / sh,
         };
         let (vw, vh) = if sw / sh > aspect {
@@ -269,8 +251,44 @@ impl Presenter {
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
+        if let Some(o) = overlay {
+            o.paint(
+                device,
+                queue,
+                &mut enc,
+                &view,
+                self.config.format,
+                [size.width, size.height],
+                self.window.scale_factor() as f32,
+            );
+        }
         queue.submit([enc.finish()]);
         self.window.pre_present_notify();
         frame.present();
+    }
+
+    pub fn set_aspect(&mut self, aspect: Aspect) {
+        self.aspect = aspect;
+    }
+
+    pub fn set_fullscreen(&self, on: bool) {
+        let want = on.then_some(winit::window::Fullscreen::Borderless(None));
+        if self.window.fullscreen() != want {
+            self.window.set_fullscreen(want);
+        }
+    }
+
+    /// Images are paced by the renderer when it interpolates: then presenting must not wait for the display.
+    pub fn set_low_latency(&mut self, device: &wgpu::Device, low_latency: bool) {
+        let caps = self.surface.get_capabilities(&self.adapter);
+        self.config.present_mode = if low_latency {
+            [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+                .into_iter()
+                .find(|m| caps.present_modes.contains(m))
+                .unwrap_or(wgpu::PresentMode::Fifo)
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+        self.surface.configure(device, &self.config);
     }
 }

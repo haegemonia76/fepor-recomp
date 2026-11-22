@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use fepor_core::settings::SettingsHandle;
 use fepor_gx::state::{CopyEfb, DrawCall, Event, Primitive, RenderState, Sink, TextureDesc, Tluts};
 use fepor_gx::{tev, texture};
 use wgpu::util::DeviceExt;
@@ -238,6 +239,63 @@ fn lerp_verts(prev: Option<&RecDraw>, cur: &RecDraw, t: f32) -> Vec<u8> {
 /// Largest per-frame movement (in NDC units; the screen is 2 wide) still treated as motion.
 const MAX_MOVE: f32 = 0.4;
 
+/// The render targets, all `scale` times the GameCube's EFB.
+struct Targets {
+    efb: wgpu::Texture,
+    efb_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    /// A second colour/depth target for interpolated frames, and a copy of the last real frame.
+    alt: wgpu::Texture,
+    alt_view: wgpu::TextureView,
+    alt_depth_view: wgpu::TextureView,
+    xfb: wgpu::Texture,
+    xfb_view: wgpu::TextureView,
+}
+
+fn make_targets(device: &wgpu::Device, scale: u32) -> Targets {
+    let tex = |label: &'static str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: EFB_WIDTH * scale,
+                height: EFB_HEIGHT * scale,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    use wgpu::TextureFormat::{Depth32Float, Rgba8Unorm};
+    use wgpu::TextureUsages as U;
+    let efb = tex(
+        "efb",
+        Rgba8Unorm,
+        U::RENDER_ATTACHMENT | U::COPY_SRC | U::TEXTURE_BINDING,
+    );
+    let depth = tex("efb depth", Depth32Float, U::RENDER_ATTACHMENT);
+    let alt = tex(
+        "efb interp",
+        Rgba8Unorm,
+        U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
+    );
+    let alt_depth = tex("efb interp depth", Depth32Float, U::RENDER_ATTACHMENT);
+    let xfb = tex("xfb", Rgba8Unorm, U::COPY_DST | U::TEXTURE_BINDING);
+    Targets {
+        efb_view: efb.create_view(&Default::default()),
+        depth_view: depth.create_view(&Default::default()),
+        alt_view: alt.create_view(&Default::default()),
+        alt_depth_view: alt_depth.create_view(&Default::default()),
+        xfb_view: xfb.create_view(&Default::default()),
+        efb,
+        alt,
+        xfb,
+    }
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -300,6 +358,12 @@ pub struct Renderer {
     /// Draws since the last presented frame.
     pub draws: u64,
     presenter: Option<present::Presenter>,
+    overlay: Option<fepor_overlay::Overlay>,
+    settings: SettingsHandle,
+    /// The `generation` of `settings` last applied.
+    settings_gen: u64,
+    /// Whether this renderer can show interpolated images (windowed, or dumping frames).
+    interpolates: bool,
 }
 
 fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
@@ -322,7 +386,11 @@ fn hash_str(s: &str) -> u64 {
 impl Renderer {
     /// Create a renderer. With a window it presents every XFB copy there; without one it only renders
     /// (frames can still be dumped with `FEPOR_DUMP_FRAMES`).
-    pub fn new(window: Option<Arc<winit::window::Window>>) -> Result<Renderer, String> {
+    pub fn new(
+        window: Option<Arc<winit::window::Window>>,
+        overlay: Option<fepor_overlay::Overlay>,
+        settings: SettingsHandle,
+    ) -> Result<Renderer, String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = match &window {
             Some(w) => Some(
@@ -343,13 +411,10 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|e| format!("device: {e}"))?;
-        // `FEPOR_FPS_MULT=n`: show n images per guest frame (interpolated between consecutive frames).
-        let mult: u32 = if window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok() {
-            std::env::var("FEPOR_FPS_MULT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1)
-                .clamp(1, 8)
+        // Images shown per guest frame (interpolated between consecutive frames), windowed or dumped only.
+        let interpolates = window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok();
+        let mult: u32 = if interpolates {
+            settings.get().video.frame_multiplier
         } else {
             1
         };
@@ -363,93 +428,17 @@ impl Renderer {
             )
         });
 
-        // `FEPOR_RES=n`: render at n times the GameCube's 640x528 (windowed or dumped; 1..=4).
-        let scale: u32 = std::env::var("FEPOR_RES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1)
-            .clamp(1, 4);
-        let efb = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("efb"),
-            size: wgpu::Extent3d {
-                width: EFB_WIDTH * scale,
-                height: EFB_HEIGHT * scale,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let depth = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("efb depth"),
-            size: wgpu::Extent3d {
-                width: EFB_WIDTH * scale,
-                height: EFB_HEIGHT * scale,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let efb_view = efb.create_view(&Default::default());
-        let depth_view = depth.create_view(&Default::default());
-        // A second colour/depth target for interpolated frames, and a copy of the last real frame.
-        let alt = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("efb interp"),
-            size: wgpu::Extent3d {
-                width: EFB_WIDTH * scale,
-                height: EFB_HEIGHT * scale,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let alt_view = alt.create_view(&Default::default());
-        let alt_depth_view = device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("efb interp depth"),
-                size: wgpu::Extent3d {
-                    width: EFB_WIDTH * scale,
-                    height: EFB_HEIGHT * scale,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            })
-            .create_view(&Default::default());
-        let xfb = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("xfb"),
-            size: wgpu::Extent3d {
-                width: EFB_WIDTH * scale,
-                height: EFB_HEIGHT * scale,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let xfb_view = xfb.create_view(&Default::default());
+        let scale = settings.get().video.resolution;
+        let Targets {
+            efb,
+            efb_view,
+            depth_view,
+            alt,
+            alt_view,
+            alt_depth_view,
+            xfb,
+            xfb_view,
+        } = make_targets(&device, scale);
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("tev uniforms"),
@@ -569,6 +558,10 @@ impl Renderer {
             frame: 0,
             dump,
             presenter,
+            overlay,
+            settings,
+            settings_gen: 0,
+            interpolates,
             cull: std::env::var("FEPOR_CULL").is_ok(),
             dump_textures: std::env::var("FEPOR_DUMP_TEXTURES")
                 .ok()
@@ -1271,6 +1264,71 @@ impl Renderer {
         out
     }
 
+    /// Apply what the player changed in the settings overlay since the last frame.
+    fn apply_settings(&mut self) {
+        let generation = self.settings.generation();
+        if generation == self.settings_gen {
+            return;
+        }
+        self.settings_gen = generation;
+        let s = self.settings.get();
+        if let Some(p) = &mut self.presenter {
+            p.set_aspect(s.video.aspect);
+            p.set_fullscreen(s.video.fullscreen);
+        }
+        let mult = if self.interpolates {
+            s.video.frame_multiplier
+        } else {
+            1
+        };
+        if mult != self.mult {
+            self.mult = mult;
+            // the frames recorded so far were not kept for the new rate
+            self.prev = None;
+            self.plan = None;
+            self.rec.clear();
+            if let Some(p) = &mut self.presenter {
+                p.set_low_latency(&self.device, mult > 1);
+            }
+        }
+        if s.video.resolution != self.scale {
+            self.flush();
+            self.scale = s.video.resolution;
+            let t = make_targets(&self.device, self.scale);
+            self.efb = t.efb;
+            self.efb_view = t.efb_view;
+            self.depth_view = t.depth_view;
+            self.alt = t.alt;
+            self.alt_view = t.alt_view;
+            self.alt_depth_view = t.alt_depth_view;
+            self.xfb = t.xfb;
+            self.xfb_view = t.xfb_view;
+            // copies already made keep their size: they are sampled by coordinate, not by pixel
+            self.prev = None;
+            self.plan = None;
+            self.rec.clear();
+            self.pending_clear = Some(([0.0; 4], 1.0));
+        }
+    }
+
+    /// Frame dumps have no window to draw the overlay on: draw it on the EFB (the next frame redraws it).
+    fn paint_overlay_on_efb(&mut self) {
+        self.flush();
+        let Some(o) = &mut self.overlay else { return };
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let s = self.scale;
+        o.paint(
+            &self.device,
+            &self.queue,
+            &mut enc,
+            &self.efb_view,
+            wgpu::TextureFormat::Rgba8Unorm,
+            [EFB_WIDTH * s, EFB_HEIGHT * s],
+            s as f32,
+        );
+        self.queue.submit([enc.finish()]);
+    }
+
     fn present(&mut self, c: &CopyEfb) {
         self.frame += 1;
         if self.trace {
@@ -1295,6 +1353,9 @@ impl Renderer {
         }
         let path = d.dir.join(format!("frame_{:05}.png", self.frame));
         let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+        if self.presenter.is_none() {
+            self.paint_overlay_on_efb();
+        }
         let rgba = self.read_efb(c.x, c.y, w, h);
         let rgb: Vec<u8> = rgba
             .chunks_exact(4)
@@ -1312,12 +1373,19 @@ impl Renderer {
     /// Show a finished frame: right away, or (with `mult > 1`) as the plan of interpolated images
     /// followed by the real one.
     fn show_frame(&mut self, c: &CopyEfb) {
+        self.apply_settings();
         if self.presenter.is_none() && self.dump.is_none() {
             return;
         }
         if self.mult <= 1 {
             if let Some(p) = &mut self.presenter {
-                p.show(&self.device, &self.queue, &self.efb_view, c);
+                p.show(
+                    &self.device,
+                    &self.queue,
+                    &self.efb_view,
+                    c,
+                    self.overlay.as_mut(),
+                );
             }
             return;
         }
@@ -1365,7 +1433,13 @@ impl Renderer {
             }
             None => {
                 if let Some(p) = &mut self.presenter {
-                    p.show(&self.device, &self.queue, &self.xfb_view, c);
+                    p.show(
+                        &self.device,
+                        &self.queue,
+                        &self.xfb_view,
+                        c,
+                        self.overlay.as_mut(),
+                    );
                 }
             }
         }
@@ -1386,7 +1460,13 @@ impl Renderer {
             self.show_interp(&p.prev, &p.cur, p.j as f32 / self.mult as f32, &p.copy);
             self.plan = Some(Plan { j: p.j + 1, ..p });
         } else if let Some(pr) = &mut self.presenter {
-            pr.show(&self.device, &self.queue, &self.xfb_view, &p.copy);
+            pr.show(
+                &self.device,
+                &self.queue,
+                &self.xfb_view,
+                &p.copy,
+                self.overlay.as_mut(),
+            );
         }
     }
 
@@ -1421,7 +1501,13 @@ impl Renderer {
         self.flush();
         self.use_alt = false;
         if let Some(p) = &mut self.presenter {
-            p.show(&self.device, &self.queue, &self.alt_view, c);
+            p.show(
+                &self.device,
+                &self.queue,
+                &self.alt_view,
+                c,
+                self.overlay.as_mut(),
+            );
         }
         if self
             .dump

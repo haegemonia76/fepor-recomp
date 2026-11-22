@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 fepor-gx.workspace = true
+fepor-core.workspace = true
+fepor-overlay.workspace = true
 wgpu = "26"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }

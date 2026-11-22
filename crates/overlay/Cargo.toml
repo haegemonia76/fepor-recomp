@@ -1,0 +1,17 @@
+[package]
+name = "fepor-overlay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fepor-core.workspace = true
+fepor-input.workspace = true
+# egui is only the UI toolkit; the wgpu painter is ours (fepor-video uses an older wgpu than egui-wgpu)
+egui = { version = "0.37.0", default-features = false, features = ["default_fonts", "bytemuck"] }
+wgpu = "26"
+bytemuck = { version = "1", features = ["derive"] }
+winit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

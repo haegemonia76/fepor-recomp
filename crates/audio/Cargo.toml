@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 fepor-runtime.workspace = true
+fepor-core.workspace = true
 # test-mode lifts the crate's "first thread that calls init" rule: audio and gamepads each own a thread
 sdl3 = { version = "0.14", features = ["test-mode"] }

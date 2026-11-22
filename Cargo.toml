@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates/runtime", "crates/game", "crates/gx", "crates/video", "crates/audio", "crates/input"]
+members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates/runtime", "crates/game", "crates/gx", "crates/video", "crates/audio", "crates/input", "crates/overlay"]
 # crates/game links the generated game library and only builds through tools/dev-run.sh.
-default-members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates/runtime", "crates/gx", "crates/video", "crates/audio", "crates/input"]
+default-members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates/runtime", "crates/gx", "crates/video", "crates/audio", "crates/input", "crates/overlay"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ fepor-gx = { path = "crates/gx" }
 fepor-video = { path = "crates/video" }
 fepor-audio = { path = "crates/audio" }
 fepor-input = { path = "crates/input" }
+fepor-overlay = { path = "crates/overlay" }
 winit = "0.30"
 cc = "1"
 clap = { version = "4", features = ["derive", "env"] }
