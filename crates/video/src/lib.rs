@@ -230,6 +230,9 @@ pub struct Renderer {
     stat_frames: u32,
     stat_images: u32,
     stat_since: Instant,
+    busy_events: Duration,
+    busy_interp: Duration,
+    busy_since: Instant,
     period: Duration,
     frame: u64,
     dump: Option<Dump>,
@@ -503,6 +506,9 @@ impl Renderer {
             stat_frames: 0,
             stat_images: 0,
             stat_since: Instant::now(),
+            busy_events: Duration::ZERO,
+            busy_interp: Duration::ZERO,
+            busy_since: Instant::now(),
             period: Duration::from_micros(16_683),
             pending_clear: Some(([0.0; 4], 1.0)),
             frame: 0,
@@ -1428,15 +1434,30 @@ impl Renderer {
 
 impl Sink for Renderer {
     fn tick(&mut self) {
-        self.tick_plan();
+        if self.plan.is_some() {
+            let t = Instant::now();
+            self.tick_plan();
+            self.busy_interp += t.elapsed();
+        }
     }
 
     fn event(&mut self, event: Event, ram: &[u8], tluts: &Tluts) {
+        let t = Instant::now();
         match event {
             Event::Draw(d) => self.draw(d, ram, tluts),
             Event::Copy(c) => self.copy(c),
             Event::Finish => self.flush(),
             Event::Token(_) => {}
+        }
+        self.busy_events += t.elapsed();
+        if self.trace && self.busy_since.elapsed() >= Duration::from_secs(1) {
+            eprintln!(
+                "gx: guest thread per second: {} ms in draw/copy events, {} ms in interpolated images",
+                self.busy_events.as_millis(),
+                self.busy_interp.as_millis()
+            );
+            (self.busy_events, self.busy_interp, self.busy_since) =
+                (Duration::ZERO, Duration::ZERO, Instant::now());
         }
     }
 }

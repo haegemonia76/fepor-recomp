@@ -41,6 +41,10 @@ const CR_AIDINT: u16 = 1 << 3;
 const ROM_READY_MAIL: u32 = 0x8071_FEED;
 const MAIL_VALID: u32 = 0x8000_0000;
 
+static TRACE_AUDIO: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "audio"))
+});
+
 pub struct Dsp {
     regs: [u8; 0x100],
     control: u16,
@@ -59,6 +63,10 @@ pub struct Dsp {
     ai_dma_on: bool,
     ai_dma_len: u32,
     ai_next: Option<std::time::Instant>,
+    /// The guest wrote the AI DMA start address since the last period: a buffer is ready to play.
+    ai_start_written: bool,
+    /// `FEPOR_TRACE=audio`: (since, ucode samples, ucode peak, AI buffers, AI peak) of the last second.
+    tr_audio: (std::time::Instant, u32, u16, u32, u16),
 }
 
 impl Dsp {
@@ -78,6 +86,8 @@ impl Dsp {
             ai_dma_on: false,
             ai_dma_len: 0,
             ai_next: None,
+            tr_audio: (std::time::Instant::now(), 0, 0, 0, 0),
+            ai_start_written: false,
         }
     }
 
@@ -96,8 +106,12 @@ impl Dsp {
         while now >= next {
             next += period;
             self.control |= CR_AIDINT;
-            let start = (self.raw_read(0x30, 2) & 0x03FF) << 16 | (self.raw_read(0x32, 2) & 0xFFE0);
-            if self.pending_audio.len() < 64 {
+            // A buffer is pushed only if the guest programmed one since the last period. Re-reading the
+            // start address regardless replayed the previous buffer whenever the guest answered late: 15 %
+            // of the frames in a busy scene, heard as crackle. Now a late guest leaves a gap instead.
+            if std::mem::take(&mut self.ai_start_written) && self.pending_audio.len() < 64 {
+                let start =
+                    (self.raw_read(0x30, 2) & 0x03FF) << 16 | (self.raw_read(0x32, 2) & 0xFFE0);
                 self.pending_audio.push((start, self.ai_dma_len, rate));
             }
         }
@@ -106,16 +120,32 @@ impl Dsp {
 
     /// Hand the finished audio DMA buffers to `sink` as interleaved left/right samples.
     pub fn drain_audio(&mut self, ram: &[u8], sink: &mut dyn AudioSink) {
-        // Once the AX ucode runs, its frames go to the sink exactly once, in order; the AI DMA clock only
-        // paces interrupts. (The clock re-reads the DMA address on every tick, so a guest that answers late
-        // made it replay the same buffer: 15 % of the frames in a busy scene.)
-        if self.ax.frames > 0 {
-            self.pending_audio.clear();
-            let produced = std::mem::take(&mut self.ax.out);
-            if !produced.is_empty() {
-                sink.push(32_000, &produced);
+        if *TRACE_AUDIO {
+            let ai_peak = self
+                .pending_audio
+                .iter()
+                .filter_map(|(s, l, _)| {
+                    ram.get((*s & 0x03FF_FFFF) as usize..(*s & 0x03FF_FFFF) as usize + *l as usize)
+                })
+                .flat_map(|b| {
+                    b.chunks_exact(2)
+                        .map(|w| i16::from_be_bytes([w[0], w[1]]).unsigned_abs())
+                })
+                .max()
+                .unwrap_or(0);
+            let t = &mut self.tr_audio;
+            t.3 += self.pending_audio.len() as u32;
+            t.4 = t.4.max(ai_peak);
+            if t.0.elapsed() >= std::time::Duration::from_secs(1) {
+                eprintln!(
+                    "audio: ucode {}, {} AX frames/s; {} AI buffers/s pushed (200 needed) peak {}",
+                    if self.ax_on { "loaded" } else { "ROM" },
+                    (self.ax.frames - t.1 as u64),
+                    t.3,
+                    t.4
+                );
+                *t = (std::time::Instant::now(), self.ax.frames as u32, 0, 0, 0);
             }
-            return;
         }
         for (start, len, rate) in std::mem::take(&mut self.pending_audio) {
             let s = (start & 0x03FF_FFFF) as usize;
@@ -228,6 +258,10 @@ impl Dsp {
                 if self.raw_read(AR_DMA_CNT, 4) & 0x7FFF_FFFF != 0 {
                     self.aram_dma(ram);
                 }
+            }
+            (0x30, 2) | (0x32, 2) => {
+                self.raw_write(off, value, size);
+                self.ai_start_written = true;
             }
             (AI_DMA_LEN, 2) => {
                 self.raw_write(off, value, size);

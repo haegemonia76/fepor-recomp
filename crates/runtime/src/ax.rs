@@ -446,10 +446,6 @@ pub struct Ax {
     voices_run: u64,
     /// Trace state for `note_cpu_buffer`: (last hash, unchanged, seen) for the four CPU-returned buffers.
     cpu_bufs: [(u64, u32, u32); 4],
-    /// Every frame the ucode output since the last `Dsp::drain_audio`, interleaved left/right at 32 kHz. The
-    /// sink is fed from here, not from the AI DMA clock: a guest that answers a few ms late must not make the
-    /// clock replay the previous buffer.
-    pub out: Vec<i16>,
 }
 
 impl Default for Ax {
@@ -479,7 +475,6 @@ impl Ax {
                 .unwrap_or(20),
             voices_run: 0,
             cpu_bufs: [(0, 0, 0); 4],
-            out: Vec::new(),
         }
     }
 
@@ -985,7 +980,6 @@ impl Ax {
             // interleaved R, L as the ucode writes them (the AI plays word 1 as the left channel)
             mem.w16(lr + 4 * k as u32, r as u16);
             mem.w16(lr + 4 * k as u32 + 2, l as u16);
-            self.out.extend_from_slice(&[l as i16, r as i16]);
         }
     }
 

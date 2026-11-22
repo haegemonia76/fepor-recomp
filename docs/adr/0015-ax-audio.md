@@ -19,8 +19,12 @@ of the same game); it is not caused by the aux return, compressor, ramps, stoppe
 Frame-edge discontinuities (7-10 % of the 5 ms frames in dialogue scenes, 0.1 % in Dolphin's recording) turned
 out to be **frames played twice**: 15 % of the frames in the music segment were exact copies of the previous
 one. The sink was fed from the AI DMA clock, which re-reads the DMA start address every period; when the guest
-answered late the clock replayed the same buffer. The ucode now hands each frame it outputs to the sink once, in
-order (`Ax::out`, drained by `Dsp::drain_audio`); the AI clock only paces the interrupt.
+answered late the clock replayed the same buffer. A buffer is now pushed only if the guest programmed one since
+the last period (`Dsp::ai_start_written`); a late guest leaves a gap instead of a replay.
+
+Feeding the sink from the ucode's own output instead was tried and is wrong: movie audio (THP) is mixed into the
+AI DMA buffer by the CPU after the ucode wrote it, so the AI buffer is the audio. `FEPOR_TRACE=audio` prints the
+AX frames per second, the AI buffers pushed per second (200 needed) and the peak of each second.
 
 The guest answered late because the renderer rebuilt the WGSL source and its hash for every draw (about 15 % of
 the time in the busy scenes): AX production fell to 163 frames/s against 200 needed. Shader sources are now cached
