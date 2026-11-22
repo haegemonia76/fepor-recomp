@@ -12,7 +12,7 @@ Players should be able to install, set up and play this recomp from [RecompLaunc
 - **Disc formats**: the launcher's GameCube standard is ISO, RVZ and GCZ; the disc reader reads all three (ADR 0022).
 - **Releases**: one archive per system and architecture named `fepor-recomp-<version>-<windows|linux|macos>-<x64|arm64>.<zip|tar.xz>`; no game data in any archive.
 - **Toolchain**: decided in ADR 0011: one executable, no tools for players (the C++ `prepare` described above is the development backend).
-- **Open decision**: the launcher installs from GitHub releases (a Gitea-only repository needs a mirror or a catalog entry). Ticket M7.3.
+- **Releases host**: decided in ADR 0023: a GitHub push mirror of this repository builds and publishes the archives; nothing is published before the single executable exists.
 - **Not done yet (ticket M7.1)**: the release workflow and the end-to-end install. A release cannot hold a working `fepor-game`: the game links the code generated from the player's disc, so it only exists after `prepare`, on a machine with clang, CMake, Ninja and the Rust toolchain. It waits for the single executable (ADR 0011, ticket M7.0) or for loading the generated code as a library built by `prepare`; the profile stays in `packaging/` until then.
 
 ## Tooling rule
