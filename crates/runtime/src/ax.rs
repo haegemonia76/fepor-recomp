@@ -566,6 +566,12 @@ impl Ax {
             let w1 = mem.r16(init_addr + 6 * b as u32 + 2);
             let delta = mem.r16(init_addr + 6 * b as u32 + 4) as i16 as i32;
             let value = ((w0 as u32) << 16 | w1 as u32) as i32;
+            if self.trace && value != 0 {
+                eprintln!(
+                    "ax: frame {} setup buffer {b} init {value} delta {delta}",
+                    self.frames
+                );
+            }
             for j in 0..FRAME {
                 self.bufs[b][j] = if value == 0 {
                     0
@@ -650,8 +656,8 @@ impl Ax {
         self.voices_run += 1;
         if self.trace && ms == 0 && self.frames % self.trace_every == 0 {
             eprintln!(
-                "ax: frame {} voice fmt {:#x} src {} ratio {:#x} mix {:#x} vol {:#x}/{:#x} env {:#x} cur {:#x} end {:#x} loop {} stream {} upd {:?}@{:#x}",
-                self.frames, pb[56], pb[4], hilo(pb[83], pb[84]), pb[6], pb[9], pb[11], pb[50], hilo(pb[61], pb[62]), hilo(pb[59], pb[60]), pb[55], pb[8], &pb[34..39], hilo(pb[39], pb[40])
+                "ax: frame {} voice pb {:#x} fmt {:#x} src {} ratio {:#x} mix {:#x} vol {:#x}/{:#x} env {:#x} start {:#x} cur {:#x} end {:#x} loop {} stream {} adpcm ps {:#x} yn {} {} upd {:?}@{:#x} mixwords {:04x?}",
+                self.frames, hilo(pb[2], pb[3]), pb[56], pb[4], hilo(pb[83], pb[84]), pb[6], pb[9], pb[11], pb[50], hilo(pb[57], pb[58]), hilo(pb[61], pb[62]), hilo(pb[59], pb[60]), pb[55], pb[8], pb[80], pb[81] as i16, pb[82] as i16, &pb[34..39], hilo(pb[39], pb[40]), &pb[9..28]
             );
         }
         let mut samples = [0i16; COUNT];
@@ -726,6 +732,19 @@ impl Ax {
             (7, 19, 46, MIX_AUXB_R, MIX_AUXB_R_RAMP),
             (8, 21, 49, MIX_AUXB_S, MIX_AUXB_S_RAMP),
         ];
+        if self.trace && ms == 0 && on(MIX_MAIN_L) {
+            // per-voice continuity across the frame edge: this voice's first mixed sample against its last
+            let (prev, vol) = (pb[41] as i16 as i64, pb[9] as i64);
+            let first = (samples[0] as i64 * vol) >> 15;
+            let second = (samples[1] as i64 * vol) >> 15;
+            let jump = (first - prev).abs();
+            if jump > 3 * (second - first).abs() + 150 {
+                eprintln!(
+                    "ax: boundary jump frame {} pb {:#x} jump {} (prev {} first {} second {}) vol {:#x} ratio {:#x} fmt {:#x} loop {} cur {:#x}",
+                    self.frames, hilo(pb[2], pb[3]), jump, prev, first, second, pb[9], hilo(pb[83], pb[84]), pb[56], pb[55], hilo(pb[61], pb[62])
+                );
+            }
+        }
         for (buf, vol, dpop, bit, ramp) in routes {
             if on(bit) {
                 mix_add(
