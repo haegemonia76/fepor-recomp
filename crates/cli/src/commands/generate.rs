@@ -24,6 +24,10 @@ pub struct GenerateArgs {
     /// CMake build type for `prepare`.
     #[arg(long, default_value = "Release")]
     pub build_type: String,
+    /// `prepare` with the development C++ backend: generate the game as C++ and build it with clang, CMake and
+    /// Ninja (for debugging the compiler; the game is otherwise compiled in process and nothing is built).
+    #[arg(long)]
+    pub cpp: bool,
 }
 
 /// RecompLauncher setup-step progress line: `progress <0..1> <text>`.
@@ -168,7 +172,7 @@ fn extract_disc(session: &mut Session, out: &Path) -> Result<(), Fail> {
 
 pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fail> {
     let out = opts.output()?.clone();
-    if prepare {
+    if prepare && args.cpp {
         for tool in ["cmake", "ninja", args.cxx.as_str()] {
             require_tool(tool)?;
         }
@@ -176,6 +180,16 @@ pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fai
     progress(0.02, "Reading the disc image");
     let mut session = Session::open(opts)?;
     progress(0.10, "Analysing the game code");
+    if prepare && !args.cpp {
+        // The game compiles its code in process (ADR 0024): nothing to generate or build. Analyse once to
+        // fail early on a disc the compiler cannot handle, and copy the game data.
+        let analysis = analyze(&session.dol, &session.analysis_cfg);
+        eprintln!("{}", analysis.summary());
+        extract_disc(&mut session, &out)?;
+        write_marker(&out, session.disc.game_id(), "native", "native")?;
+        progress(1.0, "Done");
+        return Ok(());
+    }
     let gen_dir = {
         progress(0.20, "Generating C++");
         generate(opts, args, &session, &out)?
@@ -214,16 +228,19 @@ pub fn run(opts: &Options, args: &GenerateArgs, prepare: bool) -> Result<(), Fai
     // The game's data (textures, sounds, movies, ...) is read from the disc while playing. Copy it next to the
     // build so the game runs on its own, without the disc image.
     extract_disc(&mut session, &out)?;
-    // Marker for RecompLauncher's `prepare.done`: written last, so its presence means the build finished.
+    write_marker(&out, session.disc.game_id(), &args.build_type, "cpp")?;
+    progress(1.0, "Done");
+    Ok(())
+}
+
+/// Marker for RecompLauncher's `prepare.done`: written last, so its presence means the setup finished.
+fn write_marker(out: &Path, game_id: &str, build_type: &str, backend: &str) -> Result<(), Fail> {
     let marker = format!(
-        "{{\n  \"tool\": \"{}\",\n  \"game_id\": \"{}\",\n  \"build_type\": \"{}\",\n  \"disc\": \"disc\"\n}}\n",
+        "{{\n  \"tool\": \"{}\",\n  \"game_id\": \"{game_id}\",\n  \"backend\": \"{backend}\",\n  \"build_type\": \"{build_type}\",\n  \"disc\": \"disc\"\n}}\n",
         env!("CARGO_PKG_VERSION"),
-        session.disc.game_id(),
-        args.build_type
     );
     std::fs::write(out.join("prepared.json"), marker)
         .map_err(|e| Fail::Other(format!("prepared.json: {e}")))?;
-    progress(1.0, "Done");
     Ok(())
 }
 

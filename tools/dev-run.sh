@@ -15,8 +15,8 @@ shift 2 2>/dev/null || shift $#
 cargo build -q --release -p fepor-recomp --manifest-path "$ROOT/Cargo.toml"
 flags=()
 [ "${TRACE_CALLS:-1}" = "1" ] && flags+=(--trace-calls)
-[ "${SKIP_PREPARE:-0}" = 1 ] || "$ROOT/target/release/fepor-recomp" prepare --game "$disc" --data "$data" --build-type "${BUILD_TYPE:-None}" "${flags[@]}" > /dev/null
-FEPOR_GENERATED_DIR="$data/build" cargo build -q --release -p fepor-game --manifest-path "$ROOT/Cargo.toml"
+[ "${SKIP_PREPARE:-0}" = 1 ] || "$ROOT/target/release/fepor-recomp" prepare --cpp --game "$disc" --data "$data" --build-type "${BUILD_TYPE:-None}" "${flags[@]}" > /dev/null
+FEPOR_GENERATED_DIR="$data/build" cargo build -q --release -p fepor-game --no-default-features --features cpp --manifest-path "$ROOT/Cargo.toml"
 t="${RUN_TIMEOUT:-30}"
 if [ "$t" != 0 ]; then exec timeout "$t" "$ROOT/target/release/fepor-game" --game "$disc" --data "$data" "$@"; fi
 exec "$ROOT/target/release/fepor-game" --game "$disc" --data "$data" "$@"

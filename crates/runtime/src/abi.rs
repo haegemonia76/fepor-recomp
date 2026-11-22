@@ -51,6 +51,11 @@ pub fn start_watchdog() {
                 .join(" ")
         );
         let fs = &machine().trace.first_seen;
+        // `FEPOR_FIRST_SEEN=<file>`: every function in the order it first ran (compare two backends or runs)
+        if let Some(path) = std::env::var_os("FEPOR_FIRST_SEEN") {
+            let text: String = fs.iter().map(|a| format!("{a:08x}\n")).collect();
+            let _ = std::fs::write(path, text);
+        }
         if !fs.is_empty() {
             let from = machine()
                 .trace
@@ -198,13 +203,30 @@ pub extern "C" fn fepor_rfi(c: *mut Context, addr: u32) {
 
 const SRR0: usize = 26;
 
-#[cfg(feature = "dispatch")]
-pub fn guest_function(target: u32) -> Option<HostFn> {
-    dispatch::find(target)
+/// Where guest functions come from when they are not the generated static library: the native code
+/// backend (`crates/jit`) registers itself here.
+static RESOLVER: std::sync::OnceLock<fn(u32) -> Option<HostFn>> = std::sync::OnceLock::new();
+
+pub fn set_resolver(f: fn(u32) -> Option<HostFn>) {
+    let _ = RESOLVER.set(f);
 }
 
-#[cfg(not(feature = "dispatch"))]
-pub fn guest_function(_target: u32) -> Option<HostFn> {
+/// True when guest code is compiled in process: a thread resumed after an interrupt-time context switch
+/// then abandons its host frames by returning (`Context::spr[1022]`), not with a C++ exception.
+pub fn jit_active() -> bool {
+    RESOLVER.get().is_some()
+}
+
+/// `Context::spr` slot that is non-zero while the JIT's frames are being abandoned.
+pub const SPR_UNWIND: usize = 1022;
+
+pub fn guest_function(target: u32) -> Option<HostFn> {
+    if let Some(r) = RESOLVER.get() {
+        return r(target);
+    }
+    #[cfg(feature = "dispatch")]
+    return dispatch::find(target);
+    #[cfg(not(feature = "dispatch"))]
     None
 }
 
@@ -302,7 +324,10 @@ pub extern "C" fn fepor_enter(addr: u32) {
 /// Backward-branch countdown shared with the generated code.
 #[no_mangle]
 pub static mut fepor_ticks: u32 = POLL_INTERVAL;
-const POLL_INTERVAL: u32 = 4096;
+/// Backward branches between interrupt polls. Interrupts follow wall-clock time, so the interval must stay
+/// short enough for the slowest guest loop that waits on one (the compiled-in-process code is slower per
+/// branch than the clang build: at 4096 the boot stalled in two threads yielding to each other).
+const POLL_INTERVAL: u32 = 256;
 
 /// Safe point reached from a loop in generated code.
 #[no_mangle]
@@ -349,8 +374,10 @@ mod dispatch {
     }
 }
 
-#[cfg(feature = "dispatch")]
-pub use dispatch::find as find_function;
+/// The host function of guest address `target` (see `guest_function`).
+pub fn find_function(target: u32) -> Option<HostFn> {
+    guest_function(target)
+}
 
 /// Addresses of every exported function, so a binary can force the linker to keep them for the
 /// generated static library (which references them but comes later on the link line).

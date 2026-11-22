@@ -1,0 +1,18 @@
+[package]
+name = "fepor-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fepor-core.workspace = true
+fepor-runtime.workspace = true
+ppc750cl.workspace = true
+cranelift-codegen = "0.138"
+cranelift-frontend = "0.138"
+cranelift-module = "0.138"
+cranelift-jit = "0.138"
+cranelift-native = "0.138"
+
+[dev-dependencies]
+tempfile.workspace = true

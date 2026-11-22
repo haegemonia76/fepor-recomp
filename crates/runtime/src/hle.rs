@@ -57,6 +57,12 @@ pub extern "C" fn fepor_hle_OSSaveContext(c: *mut Context) {
     wr32(ctx + OFF_LR, c.lr);
     wr32(ctx + OFF_SRR0, c.lr);
     wr32(ctx + OFF_SRR1, c.msr);
+    if machine().trace.irq {
+        eprintln!(
+            "save ctx {ctx:08x} msr {:#x} lr {:08x} sp {:08x}",
+            c.msr, c.lr, c.r[1]
+        );
+    }
     wr32(ctx + OFF_CTR, c.ctr);
     wr32(ctx + OFF_XER, crate::context::pack_xer(&c.xer));
     wr32(ctx + 4, c.r[1]);
@@ -89,6 +95,12 @@ fn restore(c: &mut Context, ctx: u32) {
     c.ctr = rd32(ctx + OFF_CTR);
     c.xer = crate::context::unpack_xer(rd32(ctx + OFF_XER));
     c.msr = rd32(ctx + OFF_SRR1);
+    if machine().trace.irq {
+        eprintln!(
+            "restore ctx {ctx:08x} msr {:#x} lr {:08x} sp {:08x}",
+            c.msr, c.lr, c.r[1]
+        );
+    }
     c.r[4] = rd32(ctx + 0x10);
     c.r[3] = rd32(ctx + 0xC);
 }
@@ -211,8 +223,31 @@ extern "C" {
     fn fepor_call_unwindable(f: crate::abi::HostFn, c: *mut Context) -> i32;
 }
 
-/// Run a generated function; returns true if the host stack was unwound (`fepor::Unwind`).
+/// Run a generated function; returns true if the host stack was unwound (`fepor::Unwind`, or in the
+/// native code backend the unwind flag that every compiled call site checks).
 pub fn run(f: crate::abi::HostFn, c: &mut Context) -> bool {
+    if crate::abi::jit_active() {
+        // SAFETY: f is a compiled guest function.
+        unsafe { f(c) };
+        return std::mem::take(&mut c.spr[crate::abi::SPR_UNWIND]) != 0;
+    }
     // SAFETY: f is a generated function; the shim only catches fepor::Unwind.
     unsafe { fepor_call_unwindable(f, c) == 1 }
+}
+
+/// The runtime-implemented SDK functions by name, for the native code backend to call.
+pub fn symbols() -> std::collections::HashMap<String, usize> {
+    [
+        (
+            "OSSaveContext",
+            fepor_hle_OSSaveContext as *const () as usize,
+        ),
+        (
+            "OSLoadContext",
+            fepor_hle_OSLoadContext as *const () as usize,
+        ),
+    ]
+    .into_iter()
+    .map(|(n, a)| (n.to_string(), a))
+    .collect()
 }

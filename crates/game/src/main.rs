@@ -132,6 +132,25 @@ fn insert_cards(
     }
 }
 
+/// Compile guest code in process: analyse the DOL (about a second), then compile functions on first call.
+#[cfg(feature = "jit")]
+fn install_jit(game_id: &str, dol: &Dol) {
+    let cfg = version::lookup(game_id)
+        .map(|v| v.analysis_defaults())
+        .unwrap_or_default();
+    let analysis = fepor_core::analysis::analyze(dol, &cfg);
+    let trace_calls = std::env::var("FEPOR_TRACE")
+        .is_ok_and(|v| v.split(',').any(|x| x == "calls" || x == "all"));
+    fepor_jit::Jit::install(
+        dol.clone(),
+        &analysis,
+        &cfg.hle,
+        &fepor_runtime::hle::symbols(),
+        trace_calls,
+    );
+    abi::set_resolver(|target| fepor_jit::Jit::global()?.entry(target));
+}
+
 fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Result<(), String> {
     // Keep the exported runtime symbols linked for the generated library.
     std::hint::black_box(abi::exports());
@@ -149,6 +168,8 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     let bytes = disc.dol().map_err(|e| e.to_string())?;
     version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
+    #[cfg(feature = "jit")]
+    install_jit(disc.game_id(), &dol);
 
     let m = machine();
     if std::env::var_os("FEPOR_NO_VIDEO").is_none() {

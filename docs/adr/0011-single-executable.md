@@ -1,6 +1,6 @@
 # 0011 Single executable for players
 
-Status: accepted
+Status: accepted (implemented by ADR 0024)
 
 Players get one program per platform, with no development tools to install. Everything runs inside it: disc reading, analysis, code generation, the game runtime, the GUI and the CLI.
 

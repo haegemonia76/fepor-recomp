@@ -5,11 +5,20 @@ edition.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[features]
+# The game's code is compiled in process (ADR 0011, 0024): nothing to build or install.
+default = ["jit"]
+jit = ["dep:fepor-jit"]
+# The development backend: the C++ library `fepor-recomp prepare` generates (FEPOR_GENERATED_DIR), built
+# with clang. `cargo build -p fepor-game --no-default-features --features cpp`.
+cpp = ["fepor-runtime/dispatch"]
+
 [dependencies]
 fepor-core.workspace = true
 fepor-video.workspace = true
 fepor-audio.workspace = true
 fepor-input.workspace = true
 fepor-overlay.workspace = true
-fepor-runtime = { workspace = true, features = ["dispatch"] }
+fepor-runtime.workspace = true
+fepor-jit = { workspace = true, optional = true }
 winit.workspace = true
