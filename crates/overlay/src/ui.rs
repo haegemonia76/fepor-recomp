@@ -110,7 +110,166 @@ fn read_card(path: &std::path::Path) -> Result<(memcard::CardInfo, Vec<(String, 
     Ok((info, saves))
 }
 
-pub fn show(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+/// One frame of UI: the settings panel when `open`, the statistics corner when `hud`.
+pub fn show(root: &mut egui::Ui, st: &mut UiState, shared: &Shared, open: bool, hud: bool) {
+    if open {
+        settings_panel(root, st, shared);
+    }
+    if hud {
+        stats_hud(root.ctx(), &shared.stats());
+    }
+}
+
+const GOOD: Color32 = Color32::from_rgb(110, 220, 120);
+const WARN: Color32 = Color32::from_rgb(240, 200, 70);
+const BAD: Color32 = Color32::from_rgb(240, 90, 80);
+
+fn stats_hud(ctx: &egui::Context, s: &crate::stats::StatsSnapshot) {
+    use egui::RichText as T;
+    let line = |ui: &mut egui::Ui, color: Color32, text: String| {
+        ui.label(T::new(text).monospace().small().color(color));
+    };
+    egui::Area::new(egui::Id::unique("fepor stats"))
+        .fixed_pos(egui::pos2(6.0, 6.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_black_alpha(190))
+                .corner_radius(4.0)
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    line(
+                        ui,
+                        Color32::WHITE,
+                        format!(
+                            "Game {:5.1} fps   shown {:5.1}/s   display {:.0} Hz",
+                            s.guest_fps, s.shown_fps, s.display_hz
+                        ),
+                    );
+                    if let Some((avg, p99, worst)) = s.frame_summary() {
+                        let color = if worst > avg * 2.0 { WARN } else { GOOD };
+                        line(
+                            ui,
+                            color,
+                            format!("Frame avg {avg:5.1} ms  p99 {p99:5.1}  worst {worst:5.1}"),
+                        );
+                        let (resp, painter) =
+                            ui.allocate_painter(egui::vec2(260.0, 34.0), egui::Sense::hover());
+                        let rect = resp.rect;
+                        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(120));
+                        let top = (avg * 3.0).max(20.0);
+                        let w = rect.width() / s.frame_ms.len().max(1) as f32;
+                        for (i, ms) in s.frame_ms.iter().enumerate() {
+                            let h = (ms / top).min(1.0) * rect.height();
+                            let c = if *ms > avg * 2.0 {
+                                BAD
+                            } else if *ms > avg * 1.3 {
+                                WARN
+                            } else {
+                                GOOD
+                            };
+                            let x = rect.left() + i as f32 * w;
+                            painter.rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::pos2(x, rect.bottom() - h),
+                                    egui::pos2(x + w.max(1.0) - 0.5, rect.bottom()),
+                                ),
+                                0.0,
+                                c,
+                            );
+                        }
+                    }
+                    let budget = |ms: f32| {
+                        if ms > 800.0 {
+                            BAD
+                        } else if ms > 500.0 {
+                            WARN
+                        } else {
+                            GOOD
+                        }
+                    };
+                    line(
+                        ui,
+                        budget(s.draw_ms_per_s + s.interp_ms_per_s),
+                        format!(
+                            "Guest thread: draw {:4.0} ms/s, interp {:3.0} ms/s",
+                            s.draw_ms_per_s, s.interp_ms_per_s
+                        ),
+                    );
+                    line(
+                        ui,
+                        Color32::WHITE,
+                        format!(
+                            "Draws/frame {}   target {}x{}",
+                            s.draws_per_frame, s.target.0, s.target.1
+                        ),
+                    );
+                    match (s.cpu_process, s.rss_mib) {
+                        (Some(cpu), Some(rss)) => line(
+                            ui,
+                            Color32::WHITE,
+                            format!("CPU process {cpu:4.0} %   memory {rss:.0} MiB"),
+                        ),
+                        _ => line(
+                            ui,
+                            Color32::GRAY,
+                            "CPU: not available on this system".into(),
+                        ),
+                    }
+                    for t in s.threads.iter().take(5) {
+                        let color = if t.percent > 90.0 {
+                            WARN
+                        } else {
+                            Color32::LIGHT_GRAY
+                        };
+                        line(ui, color, format!("  {:<14}{:4.0} %", t.name, t.percent));
+                    }
+                    let gpu = match s.gpu_busy {
+                        Some(b) => {
+                            format!("GPU busy {b:3.0} %   latency {:.1} ms", s.gpu_latency_ms)
+                        }
+                        None => format!(
+                            "GPU latency {:.1} ms (utilisation not available)",
+                            s.gpu_latency_ms
+                        ),
+                    };
+                    line(
+                        ui,
+                        if s.gpu_busy.is_some_and(|b| b > 95.0) {
+                            WARN
+                        } else {
+                            Color32::WHITE
+                        },
+                        gpu,
+                    );
+                    line(
+                        ui,
+                        Color32::GRAY,
+                        format!("  {} ({})", s.gpu_name, s.backend),
+                    );
+                    let audio = |v: f32| {
+                        if v >= 195.0 {
+                            GOOD
+                        } else if v >= 150.0 {
+                            WARN
+                        } else {
+                            BAD
+                        }
+                    };
+                    line(
+                        ui,
+                        audio(s.ax_per_s.min(s.ai_per_s)),
+                        format!(
+                            "Audio AX {:3.0}/s   AI {:3.0}/s (200 = real time)",
+                            s.ax_per_s, s.ai_per_s
+                        ),
+                    );
+                });
+        });
+}
+
+fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     let step = shared.take_tab_step();
     if step != 0 {
         let n = Page::ALL.len() as i32;
@@ -195,6 +354,10 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     ui.checkbox(
         &mut s.video.vsync,
         "Vsync (no tearing; off = lower latency)",
+    );
+    ui.checkbox(
+        &mut s.video.show_stats,
+        "Performance statistics in the corner (F2)",
     );
     if s != before {
         shared.settings.update(|x| *x = s);

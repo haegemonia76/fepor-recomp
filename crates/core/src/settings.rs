@@ -65,6 +65,8 @@ pub struct Video {
     pub fullscreen: bool,
     /// Wait for the display's refresh (no tearing). Off presents at once: lower latency, tearing possible.
     pub vsync: bool,
+    /// Show the performance statistics in a corner of the window (F2).
+    pub show_stats: bool,
 }
 
 impl Default for Video {
@@ -75,6 +77,7 @@ impl Default for Video {
             aspect: Aspect::Fit,
             fullscreen: false,
             vsync: true,
+            show_stats: false,
         }
     }
 }
@@ -136,9 +139,12 @@ impl Settings {
     }
 
     /// The environment overrides the debugging tools have always had (`FEPOR_FPS_MULT`, `FEPOR_RES`,
-    /// `FEPOR_ASPECT`). They win over the file for this run and are not saved.
+    /// `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
     pub fn with_env_overrides(mut self) -> Settings {
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+        if std::env::var_os("FEPOR_STATS").is_some() {
+            self.video.show_stats = true;
+        }
         if let Some(n) = num("FEPOR_FPS_MULT") {
             self.video.frame_multiplier = n;
         }

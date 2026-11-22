@@ -37,6 +37,8 @@ pub struct Presenter {
     sampler: wgpu::Sampler,
     aspect: Aspect,
     adapter: wgpu::Adapter,
+    /// Images presented so far (read by the statistics overlay).
+    pub shown: u64,
 }
 
 impl Presenter {
@@ -155,6 +157,7 @@ impl Presenter {
             sampler,
             aspect: Aspect::Fit,
             adapter: adapter.clone(),
+            shown: 0,
         }
     }
 
@@ -265,6 +268,7 @@ impl Presenter {
         queue.submit([enc.finish()]);
         self.window.pre_present_notify();
         frame.present();
+        self.shown += 1;
     }
 
     pub fn set_aspect(&mut self, aspect: Aspect) {

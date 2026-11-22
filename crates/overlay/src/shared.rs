@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::stats::StatsSnapshot;
 use fepor_core::settings::SettingsHandle;
 use fepor_input::Controls;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -39,6 +40,7 @@ pub struct Shared {
     guest_fps_x100: AtomicU32,
     /// Names of the playback devices, kept up to date by the audio thread.
     pub audio_devices: Arc<Mutex<Vec<String>>>,
+    stats: Mutex<StatsSnapshot>,
 }
 
 fn key_of(code: KeyCode) -> Option<egui::Key> {
@@ -85,6 +87,7 @@ impl Shared {
             display_millihz: AtomicU32::new(0),
             guest_fps_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
+            stats: Mutex::default(),
         })
     }
 
@@ -128,6 +131,15 @@ impl Shared {
 
     pub fn guest_fps(&self) -> f32 {
         self.guest_fps_x100.load(Ordering::Relaxed) as f32 / 100.0
+    }
+
+    /// The renderer publishes the statistics here a few times per second.
+    pub fn set_stats(&self, stats: StatsSnapshot) {
+        *self.stats.lock().unwrap_or_else(|e| e.into_inner()) = stats;
+    }
+
+    pub(crate) fn stats(&self) -> StatsSnapshot {
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn toggle(&self) {
@@ -178,6 +190,13 @@ impl Shared {
                 if *code == KeyCode::F1 {
                     if pressed && !repeat {
                         self.toggle();
+                    }
+                    return true;
+                }
+                if *code == KeyCode::F2 {
+                    if pressed && !repeat {
+                        self.settings
+                            .update(|s| s.video.show_stats = !s.video.show_stats);
                     }
                     return true;
                 }

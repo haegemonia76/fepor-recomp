@@ -173,6 +173,7 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
 fn spawn_guest(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) {
     // Guest calls nest on the host stack; give the guest thread plenty of room.
     std::thread::Builder::new()
+        .name("guest".into())
         .stack_size(256 << 20)
         .spawn(move || {
             let guest = std::panic::AssertUnwindSafe(|| run(window, overlay));

@@ -5,12 +5,14 @@
 
 mod paint;
 mod shared;
+mod stats;
 mod ui;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 pub use shared::Shared;
+pub use stats::{StatsSnapshot, ThreadLoad};
 
 pub struct Overlay {
     ctx: egui::Context,
@@ -60,7 +62,9 @@ impl Overlay {
         size_px: [u32; 2],
         ppp: f32,
     ) {
-        if !self.shared.is_open() {
+        let open = self.shared.is_open();
+        let hud = self.shared.settings.get().video.show_stats;
+        if !open && !hud {
             return;
         }
         let mut raw = egui::RawInput {
@@ -81,7 +85,9 @@ impl Overlay {
             },
         );
         let (shared, state) = (&self.shared, &mut self.ui);
-        let out = self.ctx.run_ui(raw, |root| ui::show(root, state, shared));
+        let out = self
+            .ctx
+            .run_ui(raw, |root| ui::show(root, state, shared, open, hud));
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         if self.painter.as_ref().is_none_or(|(_, f)| *f != format) {
             self.painter = Some((paint::Painter::new(device, format), format));

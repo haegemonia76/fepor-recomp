@@ -13,6 +13,7 @@ use fepor_gx::{tev, texture};
 use wgpu::util::DeviceExt;
 
 mod present;
+mod sysstat;
 
 pub const EFB_WIDTH: u32 = 640;
 pub const EFB_HEIGHT: u32 = 528;
@@ -369,6 +370,12 @@ pub struct Renderer {
     /// Guest frames since `fps_since`, to measure the game's frame rate for the overlay.
     fps_frames: u32,
     fps_since: Instant,
+    stats: StatsState,
+    /// Whether the statistics overlay is shown (the settings' `show_stats`, applied each frame).
+    show_stats: bool,
+    /// Monotonic totals of the guest thread's time in draw/copy events and in interpolated images.
+    tot_events: Duration,
+    tot_interp: Duration,
 }
 
 fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
@@ -416,6 +423,7 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|e| format!("device: {e}"))?;
+        let adapter_info = adapter.get_info();
         // Images shown per guest frame (interpolated between consecutive frames), windowed or dumped only.
         let interpolates = window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok();
         let mult: u32 = if interpolates {
@@ -570,6 +578,10 @@ impl Renderer {
             vsync: true,
             fps_frames: 0,
             fps_since: Instant::now(),
+            stats: StatsState::new(&adapter_info),
+            show_stats: false,
+            tot_events: Duration::ZERO,
+            tot_interp: Duration::ZERO,
             cull: std::env::var("FEPOR_CULL").is_ok(),
             dump_textures: std::env::var("FEPOR_DUMP_TEXTURES")
                 .ok()
@@ -1298,6 +1310,7 @@ impl Renderer {
             self.rec.clear();
         }
         self.vsync = s.video.vsync;
+        self.show_stats = s.video.show_stats;
         if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
             p.set_present(&self.device, mult > 1, self.vsync);
         }
@@ -1342,6 +1355,7 @@ impl Renderer {
     fn present(&mut self, c: &CopyEfb) {
         self.frame += 1;
         self.fps_frames += 1;
+        self.stats_frame();
         let since = self.fps_since.elapsed();
         if since >= Duration::from_secs(1) {
             if let Some(o) = &self.overlay {
@@ -1646,6 +1660,7 @@ impl Sink for Renderer {
             let t = Instant::now();
             self.tick_plan();
             self.busy_interp += t.elapsed();
+            self.tot_interp += t.elapsed();
         }
     }
 
@@ -1658,6 +1673,7 @@ impl Sink for Renderer {
             Event::Token(_) => {}
         }
         self.busy_events += t.elapsed();
+        self.tot_events += t.elapsed();
         if self.trace && self.busy_since.elapsed() >= Duration::from_secs(1) {
             eprintln!(
                 "gx: guest thread per second: {} ms in draw/copy events, {} ms in interpolated images",
@@ -1667,5 +1683,117 @@ impl Sink for Renderer {
             (self.busy_events, self.busy_interp, self.busy_since) =
                 (Duration::ZERO, Duration::ZERO, Instant::now());
         }
+    }
+}
+
+/// What the statistics overlay needs from the renderer between two publications.
+struct StatsState {
+    frame_ms: std::collections::VecDeque<f32>,
+    last_frame: Option<Instant>,
+    cpu: sysstat::CpuSampler,
+    gpu_busy_path: Option<PathBuf>,
+    gpu_name: String,
+    backend: String,
+    /// Submission-to-completion time of the last batch of GPU work, in microseconds.
+    gpu_latency_us: Arc<std::sync::atomic::AtomicU32>,
+    at: Instant,
+    frames: u32,
+    shown: u64,
+    events: Duration,
+    interp: Duration,
+    ax: u64,
+    ai: u64,
+}
+
+impl StatsState {
+    fn new(info: &wgpu::AdapterInfo) -> StatsState {
+        use std::sync::atomic::Ordering::Relaxed;
+        StatsState {
+            frame_ms: Default::default(),
+            last_frame: None,
+            cpu: sysstat::CpuSampler::new(),
+            gpu_busy_path: sysstat::gpu_busy_path(info.vendor, info.device),
+            gpu_name: info.name.clone(),
+            backend: format!("{:?}", info.backend),
+            gpu_latency_us: Arc::new(Default::default()),
+            at: Instant::now(),
+            frames: 0,
+            shown: 0,
+            events: Duration::ZERO,
+            interp: Duration::ZERO,
+            ax: fepor_core::stats::AX_FRAMES.load(Relaxed),
+            ai: fepor_core::stats::AI_BUFFERS.load(Relaxed),
+        }
+    }
+}
+
+impl Renderer {
+    /// One guest frame finished: update the frame-time history and, four times a second, publish a
+    /// snapshot for the statistics overlay.
+    fn stats_frame(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (Some(overlay), true) = (&self.overlay, self.show_stats) else {
+            return;
+        };
+        let now = Instant::now();
+        let st = &mut self.stats;
+        if let Some(l) = st.last_frame {
+            if st.frame_ms.len() == 120 {
+                st.frame_ms.pop_front();
+            }
+            st.frame_ms.push_back((now - l).as_secs_f32() * 1000.0);
+        }
+        st.last_frame = Some(now);
+        st.frames += 1;
+        // how long the GPU takes to finish what was submitted so far
+        let (lat, t0) = (st.gpu_latency_us.clone(), now);
+        self.queue.on_submitted_work_done(move || {
+            lat.store(
+                t0.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                Relaxed,
+            )
+        });
+        let dt = st.at.elapsed();
+        if dt < Duration::from_millis(250) {
+            return;
+        }
+        let secs = dt.as_secs_f32();
+        let shown = self.presenter.as_ref().map_or(0, |p| p.shown);
+        let (ax, ai) = (
+            fepor_core::stats::AX_FRAMES.load(Relaxed),
+            fepor_core::stats::AI_BUFFERS.load(Relaxed),
+        );
+        let cpu = st.cpu.sample();
+        let ms = |d: Duration| d.as_secs_f32() * 1000.0 / secs;
+        overlay.shared().set_stats(fepor_overlay::StatsSnapshot {
+            guest_fps: st.frames as f32 / secs,
+            shown_fps: (shown - st.shown) as f32 / secs,
+            display_hz: overlay.shared().display_hz(),
+            frame_ms: st.frame_ms.iter().copied().collect(),
+            draw_ms_per_s: ms(self.tot_events - st.events),
+            interp_ms_per_s: ms(self.tot_interp - st.interp),
+            draws_per_frame: self.draws as u32,
+            cpu_process: cpu.cpu_process,
+            rss_mib: cpu.rss_mib,
+            threads: cpu.threads,
+            gpu_busy: st.gpu_busy_path.as_deref().and_then(sysstat::read_gpu_busy),
+            gpu_latency_ms: st.gpu_latency_us.load(Relaxed) as f32 / 1000.0,
+            gpu_name: st.gpu_name.clone(),
+            backend: st.backend.clone(),
+            target: (EFB_WIDTH * self.scale, EFB_HEIGHT * self.scale),
+            ax_per_s: (ax - st.ax) as f32 / secs,
+            ai_per_s: (ai - st.ai) as f32 / secs,
+        });
+        (
+            st.at, st.frames, st.shown, st.events, st.interp, st.ax, st.ai,
+        ) = (
+            Instant::now(),
+            0,
+            shown,
+            self.tot_events,
+            self.tot_interp,
+            ax,
+            ai,
+        );
     }
 }

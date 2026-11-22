@@ -120,6 +120,9 @@ impl Dsp {
 
     /// Hand the finished audio DMA buffers to `sink` as interleaved left/right samples.
     pub fn drain_audio(&mut self, ram: &[u8], sink: &mut dyn AudioSink) {
+        use std::sync::atomic::Ordering::Relaxed;
+        fepor_core::stats::AX_FRAMES.store(self.ax.frames, Relaxed);
+        fepor_core::stats::AI_BUFFERS.fetch_add(self.pending_audio.len() as u64, Relaxed);
         if *TRACE_AUDIO {
             let ai_peak = self
                 .pending_audio
