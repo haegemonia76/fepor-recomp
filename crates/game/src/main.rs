@@ -154,7 +154,7 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
             Err(e) => eprintln!("video disabled: {e}"),
         }
     }
-    if let Some(sink) = fepor_audio::open(overlay.settings.clone()) {
+    if let Some(sink) = fepor_audio::open(overlay.settings.clone(), overlay.audio_devices.clone()) {
         m.hw.set_audio_sink(sink);
     }
     insert_cards(m, disc.game_id(), Some(&data), &overlay);

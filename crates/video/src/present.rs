@@ -278,17 +278,27 @@ impl Presenter {
         }
     }
 
-    /// Images are paced by the renderer when it interpolates: then presenting must not wait for the display.
-    pub fn set_low_latency(&mut self, device: &wgpu::Device, low_latency: bool) {
+    /// The display's refresh rate in mHz, if the platform tells.
+    pub fn refresh_millihz(&self) -> Option<u32> {
+        self.window.current_monitor()?.refresh_rate_millihertz()
+    }
+
+    /// Choose the present mode. With `vsync` an image waits for the display's refresh (no tearing), except
+    /// that the renderer's interpolated images (`paced`) are timed by the renderer itself and must not block
+    /// it, so they use the newest-image-wins mode. Without `vsync` images go out at once.
+    pub fn set_present(&mut self, device: &wgpu::Device, paced: bool, vsync: bool) {
+        use wgpu::PresentMode::{Fifo, Immediate, Mailbox};
         let caps = self.surface.get_capabilities(&self.adapter);
-        self.config.present_mode = if low_latency {
-            [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
-                .into_iter()
-                .find(|m| caps.present_modes.contains(m))
-                .unwrap_or(wgpu::PresentMode::Fifo)
-        } else {
-            wgpu::PresentMode::Fifo
+        let wanted: &[wgpu::PresentMode] = match (vsync, paced) {
+            (true, false) => &[Fifo],
+            (true, true) => &[Mailbox, Immediate],
+            (false, _) => &[Immediate, Mailbox],
         };
+        self.config.present_mode = wanted
+            .iter()
+            .copied()
+            .find(|m| caps.present_modes.contains(m))
+            .unwrap_or(Fifo);
         self.surface.configure(device, &self.config);
     }
 }

@@ -3,7 +3,7 @@
 Status: accepted (implements ticket #20, replaces the F2/F3/F4 hotkeys of ADR 0016)
 
 **What**
-- All player-facing options live in an overlay drawn over the game window: Video (frame multiplier, internal resolution, picture shape, fullscreen), Audio (master volume), Controls (per-action rebinding for keyboard and gamepad, button-name family, stick dead zone, restore defaults), Memory card (slot A status, saves, export as `.gci`) and Help. It is opened with F1 or the gamepad's Guide / Back button and closed with the same, Esc or B. Page Up/Down or LB/RB switch pages; navigation is arrows + Enter, D-pad / left stick + A, or the mouse.
+- All player-facing options live in an overlay drawn over the game window: Video (frame multiplier, internal resolution, picture shape, fullscreen, vsync), Audio (master volume, output device), Controls (per-action rebinding for keyboard and gamepad, button-name family, stick dead zone, restore defaults), Memory card (slot A status, saves, export as `.gci`), Help and Quit. It is opened with F1 or the gamepad's Guide / Back button and closed with the same, Esc or B. Page Up/Down or LB/RB switch pages; navigation is arrows + Enter, D-pad / left stick + A, or the mouse.
 - While it is open the game's pad reads neutral (`Controls::set_suspended`); inputs being captured as a binding bypass the menu and go to `Controls`.
 
 **How**
@@ -11,9 +11,9 @@ Status: accepted (implements ticket #20, replaces the F2/F3/F4 hotkeys of ADR 00
 - Settings: `fepor_core::settings` (`<data>/settings.toml`: `[video] frame_multiplier, resolution, aspect, fullscreen`, `[audio] volume`). A `SettingsHandle` is shared by the overlay (writer, saves on change), the renderer and the audio sink (readers, poll `generation()`). `FEPOR_FPS_MULT`, `FEPOR_RES`, `FEPOR_ASPECT` still override the file for one run and are never saved.
 - Live application: frame multiplier (drops the recorded frames, switches the present mode), aspect, fullscreen and volume apply at once; resolution rebuilds the render targets between frames (`Renderer::apply_settings`). The volume gain is the slider squared.
 - Memory cards: the page is read-only plus export. Saves cannot be imported into a card the running game has open, so `.gci` files put in `<data>/imports` are imported into slot A at the next start (renamed `.gci.imported`); the card must already be formatted by the game.
-- Debugging: `FEPOR_OVERLAY=<page>` opens the overlay at start; with `FEPOR_HEADLESS=1 FEPOR_DUMP_FRAMES=dir` it is painted on the dumped frames.
+- Display and device: the Video page shows the game's measured frame rate against the display's refresh rate (more images per second than the display refreshes are never seen: on a 60 Hz screen a frame multiplier only helps scenes the game draws at 30 frames/s); the vsync option picks the present mode (`Presenter::set_present`: Fifo when on and not interpolating, newest-image-wins when interpolating, immediate when off). The Audio page lists SDL playback devices (refreshed every 2 s by the audio thread) and reopens the stream on the chosen one, falling back to the system default when it is gone (`audio.device` in `settings.toml`).
+- A Quit page (two steps) ends the process.
 
-**Not done**
-- Replacing the button icons the game draws (needs textures replaced by content hash).
-- Picking an audio device, vsync option, importing a card from a file chooser.
-- The overlay is not drawn into frame dumps when interpolating (`frame_N_tXX.png`).
+**Not done (tickets)**
+- Replacing the button icons the game draws (#22), file chooser for save import (#24), restyling the UI after the game's own menus (#25).
+- The overlay is not drawn into interpolated frame dumps (`frame_N_tXX.png`): those dumps are a developer check of the interpolation, not something the player sees.

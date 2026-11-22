@@ -364,6 +364,11 @@ pub struct Renderer {
     settings_gen: u64,
     /// Whether this renderer can show interpolated images (windowed, or dumping frames).
     interpolates: bool,
+    /// The vsync setting last applied to the presenter.
+    vsync: bool,
+    /// Guest frames since `fps_since`, to measure the game's frame rate for the overlay.
+    fps_frames: u32,
+    fps_since: Instant,
 }
 
 fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
@@ -562,6 +567,9 @@ impl Renderer {
             settings,
             settings_gen: 0,
             interpolates,
+            vsync: true,
+            fps_frames: 0,
+            fps_since: Instant::now(),
             cull: std::env::var("FEPOR_CULL").is_ok(),
             dump_textures: std::env::var("FEPOR_DUMP_TEXTURES")
                 .ok()
@@ -1281,15 +1289,17 @@ impl Renderer {
         } else {
             1
         };
+        let paced_changed = mult != self.mult || s.video.vsync != self.vsync;
         if mult != self.mult {
             self.mult = mult;
             // the frames recorded so far were not kept for the new rate
             self.prev = None;
             self.plan = None;
             self.rec.clear();
-            if let Some(p) = &mut self.presenter {
-                p.set_low_latency(&self.device, mult > 1);
-            }
+        }
+        self.vsync = s.video.vsync;
+        if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
+            p.set_present(&self.device, mult > 1, self.vsync);
         }
         if s.video.resolution != self.scale {
             self.flush();
@@ -1331,6 +1341,18 @@ impl Renderer {
 
     fn present(&mut self, c: &CopyEfb) {
         self.frame += 1;
+        self.fps_frames += 1;
+        let since = self.fps_since.elapsed();
+        if since >= Duration::from_secs(1) {
+            if let Some(o) = &self.overlay {
+                o.shared()
+                    .set_guest_fps(self.fps_frames as f32 / since.as_secs_f32());
+                if let Some(mhz) = self.presenter.as_ref().and_then(|p| p.refresh_millihz()) {
+                    o.shared().set_display_millihz(mhz);
+                }
+            }
+            (self.fps_frames, self.fps_since) = (0, Instant::now());
+        }
         if self.trace {
             eprintln!(
                 "gx: frame {} ({}x{} at {},{}): {} draws",

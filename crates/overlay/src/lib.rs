@@ -40,6 +40,10 @@ impl Overlay {
         }
     }
 
+    pub fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
     pub fn is_open(&self) -> bool {
         self.shared.is_open()
     }

@@ -63,6 +63,8 @@ pub struct Video {
     pub resolution: u32,
     pub aspect: Aspect,
     pub fullscreen: bool,
+    /// Wait for the display's refresh (no tearing). Off presents at once: lower latency, tearing possible.
+    pub vsync: bool,
 }
 
 impl Default for Video {
@@ -72,6 +74,7 @@ impl Default for Video {
             resolution: 1,
             aspect: Aspect::Fit,
             fullscreen: false,
+            vsync: true,
         }
     }
 }
@@ -81,11 +84,16 @@ impl Default for Video {
 pub struct Audio {
     /// Master volume, 0.0..=1.0.
     pub volume: f32,
+    /// Name of the playback device; `None` follows the system default.
+    pub device: Option<String>,
 }
 
 impl Default for Audio {
     fn default() -> Self {
-        Audio { volume: 1.0 }
+        Audio {
+            volume: 1.0,
+            device: None,
+        }
     }
 }
 

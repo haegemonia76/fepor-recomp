@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,10 @@ pub struct Shared {
     pub data_dir: PathBuf,
     /// The memory card in slot A, once the game opened it.
     pub card_path: Mutex<Option<PathBuf>>,
+    display_millihz: AtomicU32,
+    guest_fps_x100: AtomicU32,
+    /// Names of the playback devices, kept up to date by the audio thread.
+    pub audio_devices: Arc<Mutex<Vec<String>>>,
 }
 
 fn key_of(code: KeyCode) -> Option<egui::Key> {
@@ -78,6 +82,9 @@ impl Shared {
             controls,
             data_dir,
             card_path: Mutex::new(None),
+            display_millihz: AtomicU32::new(0),
+            guest_fps_x100: AtomicU32::new(0),
+            audio_devices: Arc::default(),
         })
     }
 
@@ -102,6 +109,25 @@ impl Shared {
             }
             c.set_suspended(open);
         }
+    }
+
+    /// The display's refresh rate in mHz (0 when unknown), published by the renderer.
+    pub fn set_display_millihz(&self, mhz: u32) {
+        self.display_millihz.store(mhz, Ordering::Relaxed);
+    }
+
+    pub fn display_hz(&self) -> f32 {
+        self.display_millihz.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    /// Game frames per second as the renderer measures them, published by the renderer.
+    pub fn set_guest_fps(&self, fps: f32) {
+        self.guest_fps_x100
+            .store((fps * 100.0) as u32, Ordering::Relaxed);
+    }
+
+    pub fn guest_fps(&self) -> f32 {
+        self.guest_fps_x100.load(Ordering::Relaxed) as f32 / 100.0
     }
 
     pub fn toggle(&self) {

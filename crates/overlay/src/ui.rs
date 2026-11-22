@@ -16,15 +16,17 @@ pub enum Page {
     Controls,
     Card,
     Help,
+    Quit,
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 6] = [
         Page::Video,
         Page::Audio,
         Page::Controls,
         Page::Card,
         Page::Help,
+        Page::Quit,
     ];
 
     fn label(self) -> &'static str {
@@ -34,6 +36,7 @@ impl Page {
             Page::Controls => "Controls",
             Page::Card => "Memory card",
             Page::Help => "Help",
+            Page::Quit => "Quit",
         }
     }
 
@@ -55,6 +58,7 @@ pub struct UiState {
     card: Option<CardView>,
     card_message: String,
     focus_tabs: bool,
+    confirm_quit: bool,
 }
 
 impl UiState {
@@ -64,8 +68,33 @@ impl UiState {
             card: None,
             card_message: String::new(),
             focus_tabs: true,
+            confirm_quit: false,
         }
     }
+}
+
+/// Quit page: two steps, so that a stray Enter does not end the session.
+fn quit(ui: &mut egui::Ui, st: &mut UiState) {
+    if !st.confirm_quit {
+        ui.label("Leave the game and close the window.");
+        if ui.button("Quit the game").clicked() {
+            st.confirm_quit = true;
+        }
+        return;
+    }
+    ui.colored_label(
+        Color32::LIGHT_RED,
+        "Anything not saved in the game is lost. Quit now?",
+    );
+    ui.horizontal(|ui| {
+        if ui.button("No, go back").clicked() {
+            st.confirm_quit = false;
+        }
+        if ui.button("Yes, quit").clicked() {
+            // memory card writes already went to the file; nothing else needs flushing
+            std::process::exit(0);
+        }
+    });
 }
 
 const ACCENT: Color32 = Color32::from_rgb(120, 190, 255);
@@ -112,6 +141,7 @@ pub fn show(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Controls => controls(ui, shared),
             Page::Card => card(ui, st, shared),
             Page::Help => help(ui, shared),
+            Page::Quit => quit(ui, st),
         });
         ui.separator();
         ui.label(
@@ -136,6 +166,19 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
             }
         }),
     );
+    let (hz, fps) = (shared.display_hz(), shared.guest_fps());
+    if hz > 0.0 && fps > 0.0 {
+        let wanted = fps * before.video.frame_multiplier as f32;
+        ui.label(
+            RichText::new(format!(
+                "The game draws {fps:.0} frames/s, the display refreshes {hz:.0} times/s: {:.0} images/s are seen{}.",
+                wanted.min(hz),
+                if wanted > hz * 1.02 { " (more cannot be shown)" } else { "" }
+            ))
+            .small()
+            .weak(),
+        );
+    }
     ui.add_space(8.0);
     ui.label("Internal resolution");
     ui.add(
@@ -149,6 +192,10 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     }
     ui.add_space(8.0);
     ui.checkbox(&mut s.video.fullscreen, "Fullscreen");
+    ui.checkbox(
+        &mut s.video.vsync,
+        "Vsync (no tearing; off = lower latency)",
+    );
     if s != before {
         shared.settings.update(|x| *x = s);
     }
@@ -162,6 +209,29 @@ fn audio(ui: &mut egui::Ui, shared: &Shared) {
     let volume = pct as f32 / 100.0;
     if (volume - before.audio.volume).abs() > 0.004 {
         shared.settings.update(|x| x.audio.volume = volume);
+    }
+    ui.add_space(8.0);
+    ui.label("Output device");
+    let devices = shared
+        .audio_devices
+        .lock()
+        .map(|d| d.clone())
+        .unwrap_or_default();
+    let mut device = before.audio.device.clone();
+    let shown = device
+        .clone()
+        .unwrap_or_else(|| "System default".to_string());
+    egui::ComboBox::from_id_salt("audio_device")
+        .width(360.0)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut device, None, "System default");
+            for name in devices {
+                ui.selectable_value(&mut device, Some(name.clone()), name);
+            }
+        });
+    if device != before.audio.device {
+        shared.settings.update(|x| x.audio.device = device);
     }
 }
 

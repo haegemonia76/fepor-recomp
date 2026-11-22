@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex};
 
 use fepor_core::settings::SettingsHandle;
 use fepor_runtime::dsp::AudioSink;
@@ -77,8 +78,13 @@ impl AudioSink for SdlSink {
     }
 }
 
-fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Result<(), String>>) {
-    use sdl3::audio::{AudioFormat, AudioSpec};
+fn sdl_thread(
+    rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>,
+    ready: Sender<Result<(), String>>,
+    settings: SettingsHandle,
+    devices: Arc<Mutex<Vec<String>>>,
+) {
+    use sdl3::audio::{AudioDevice, AudioFormat, AudioSpec};
     let setup = || -> Result<_, String> {
         let sdl = sdl3::init().map_err(|e| e.to_string())?;
         let audio = sdl.audio().map_err(|e| e.to_string())?;
@@ -97,7 +103,29 @@ fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Resu
     let (mut qmin, mut qmax) = (i32::MAX, 0i32);
     let _ = ready.send(Ok(()));
     let mut stream = None;
+    let (mut device, mut seen_gen) = (None::<String>, 0u64);
+    let mut listed = None::<std::time::Instant>;
     while let Ok((r, samples)) = rx.recv() {
+        if listed.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2)) {
+            listed = Some(std::time::Instant::now());
+            let names: Vec<String> = audio
+                .audio_playback_device_ids()
+                .map(|ids| ids.iter().filter_map(|id| id.name().ok()).collect())
+                .unwrap_or_default();
+            if let Ok(mut d) = devices.lock() {
+                if *d != names {
+                    *d = names;
+                }
+            }
+        }
+        if settings.generation() != seen_gen {
+            seen_gen = settings.generation();
+            let want = settings.get().audio.device;
+            if want != device {
+                device = want;
+                stream = None;
+            }
+        }
         if r != rate || stream.is_none() {
             rate = r;
             let spec = AudioSpec {
@@ -105,10 +133,19 @@ fn sdl_thread(rx: std::sync::mpsc::Receiver<(u32, Vec<i16>)>, ready: Sender<Resu
                 channels: Some(2),
                 format: Some(AudioFormat::s16_sys()),
             };
-            stream = audio
-                .default_playback_device()
-                .open_device_stream(Some(&spec))
-                .ok();
+            let chosen = device.as_ref().and_then(|name| {
+                audio
+                    .audio_playback_device_ids()
+                    .ok()?
+                    .into_iter()
+                    .find(|id| id.name().ok().as_ref() == Some(name))
+            });
+            // a device that is gone (unplugged) falls back to the system default
+            let dev = match chosen {
+                Some(id) => AudioDevice::new(id, audio.clone()),
+                None => audio.default_playback_device(),
+            };
+            stream = dev.open_device_stream(Some(&spec)).ok();
             if let Some(s) = &stream {
                 let _ = s.resume();
             }
@@ -158,7 +195,11 @@ impl AudioSink for Tee {
 /// The audio output selected by the environment: SDL3 unless `FEPOR_NO_AUDIO` is set (played at the volume
 /// of `settings`), plus a WAV dump when `FEPOR_DUMP_AUDIO` names a file (always at full volume). `None` when
 /// nothing could be opened.
-pub fn open(settings: SettingsHandle) -> Option<Box<dyn AudioSink>> {
+pub fn open(
+    settings: SettingsHandle,
+    devices: Arc<Mutex<Vec<String>>>,
+) -> Option<Box<dyn AudioSink>> {
+    let thread_settings = settings.clone();
     let mut sinks: Vec<Box<dyn AudioSink>> = Vec::new();
     if let Ok(path) = std::env::var("FEPOR_DUMP_AUDIO") {
         match WavSink::create(&path) {
@@ -171,7 +212,7 @@ pub fn open(settings: SettingsHandle) -> Option<Box<dyn AudioSink>> {
         let (rtx, rrx) = channel();
         std::thread::Builder::new()
             .name("audio".into())
-            .spawn(move || sdl_thread(rx, rtx))
+            .spawn(move || sdl_thread(rx, rtx, thread_settings, devices))
             .ok()?;
         match rrx.recv() {
             Ok(Ok(())) => sinks.push(Box::new(SdlSink { tx, settings })),
