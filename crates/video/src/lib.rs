@@ -432,6 +432,8 @@ pub struct Renderer {
     hash_memo: FastMap<(usize, usize), u64>,
     /// Index and vertex bytes of the draw being built, kept between draws to avoid allocating for each.
     scratch_idx: Vec<u32>,
+    /// The decoded-vertex vector of the last draw, handed back to the GX parser (`Sink::recycle`).
+    spare_verts: Vec<fepor_gx::state::Vertex>,
     scratch_vb: Vec<u8>,
     stats: StatsState,
     /// Whether the statistics overlay is shown (the settings' `show_stats`, applied each frame).
@@ -674,6 +676,7 @@ impl Renderer {
             stale_efb: 0,
             hash_memo: FastMap::default(),
             scratch_idx: Vec::new(),
+            spare_verts: Vec::new(),
             scratch_vb: Vec::new(),
             trace_icons: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "icons")),
@@ -1164,7 +1167,7 @@ impl Renderer {
         pipeline
     }
 
-    fn draw(&mut self, d: DrawCall, ram: &[u8], tluts: &Tluts) {
+    fn draw(&mut self, d: &DrawCall, ram: &[u8], tluts: &Tluts) {
         let n = d.vertices.len();
         let mut indices = std::mem::take(&mut self.scratch_idx);
         indices.clear();
@@ -1224,7 +1227,7 @@ impl Renderer {
             );
         }
         let nverts = d.vertices.len();
-        let state = d.state;
+        let state = d.state.clone();
         // vertex stream: position, two 8-bit colours, and only the texture coordinate sets a stage reads
         let n_uv = tev::tex_inputs(&state);
         let stride = tev::vertex_stride(n_uv);
@@ -2013,10 +2016,17 @@ impl Sink for Renderer {
         }
     }
 
+    fn recycle(&mut self) -> Vec<fepor_gx::state::Vertex> {
+        std::mem::take(&mut self.spare_verts)
+    }
+
     fn event(&mut self, event: Event, ram: &[u8], tluts: &Tluts) {
         let t = Instant::now();
         match event {
-            Event::Draw(d) => self.draw(d, ram, tluts),
+            Event::Draw(mut d) => {
+                self.draw(&d, ram, tluts);
+                self.spare_verts = std::mem::take(&mut d.vertices);
+            }
             Event::Copy(c) => self.copy(c, ram),
             Event::Finish => {
                 self.flush();

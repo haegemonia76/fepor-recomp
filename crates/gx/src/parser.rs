@@ -201,6 +201,7 @@ impl Gx {
                     _ => None,
                 };
                 if let Some(prim) = prim {
+                    let spare = sink.recycle();
                     let vertices = vertex::decode(
                         &fmt,
                         &self.cp,
@@ -208,6 +209,7 @@ impl Gx {
                         ram,
                         &d[3..3 + count * size],
                         count,
+                        spare,
                     );
                     self.stats.draws += 1;
                     self.stats.vertices += count as u64;

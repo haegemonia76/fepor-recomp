@@ -131,6 +131,11 @@ pub trait Sink {
 
     /// Called often from the guest's poll points: lets a sink do timed work (interpolated frames).
     fn tick(&mut self) {}
+
+    /// An empty vector with capacity, to decode the next draw's vertices into (saves one allocation per draw).
+    fn recycle(&mut self) -> Vec<Vertex> {
+        Vec::new()
+    }
 }
 
 /// Palette memory: TLUT data by TMEM offset.

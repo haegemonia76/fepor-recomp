@@ -35,22 +35,15 @@ impl Reader<'_> {
 
 fn read_comp(src: &[u8], at: usize, c: Comp, shift: u32) -> f32 {
     // missing bytes read as zero
-    let mut b = [0u8; 4];
-    let n = c.size();
-    if let Some(s) = src.get(at..at + n) {
-        b[..n].copy_from_slice(s);
-    }
-    let scale = if c == Comp::F32 {
-        1.0
-    } else {
-        1.0 / (1u32 << shift) as f32
-    };
+    let b = |i: usize| src.get(at + i).copied().unwrap_or(0);
+    // 2^-shift, exactly
+    let scale = f32::from_bits((127 - shift.min(31)) << 23);
     match c {
-        Comp::U8 => b[0] as f32 * scale,
-        Comp::I8 => b[0] as i8 as f32 * scale,
-        Comp::U16 => u16::from_be_bytes([b[0], b[1]]) as f32 * scale,
-        Comp::I16 => i16::from_be_bytes([b[0], b[1]]) as f32 * scale,
-        Comp::F32 => f32::from_be_bytes(b),
+        Comp::U8 => b(0) as f32 * scale,
+        Comp::I8 => b(0) as i8 as f32 * scale,
+        Comp::U16 => u16::from_be_bytes([b(0), b(1)]) as f32 * scale,
+        Comp::I16 => i16::from_be_bytes([b(0), b(1)]) as f32 * scale,
+        Comp::F32 => f32::from_be_bytes([b(0), b(1), b(2), b(3)]),
     }
 }
 
@@ -129,7 +122,7 @@ fn packed_rgba(v: u32) -> [f32; 4] {
     ]
 }
 
-/// Decode `count` vertices from `data` and run them through XF.
+/// Decode `count` vertices from `data` and run them through XF, into `out` (reused: cleared first).
 pub fn decode(
     f: &VertexFormat,
     cp: &Cp,
@@ -137,9 +130,11 @@ pub fn decode(
     ram: &[u8],
     data: &[u8],
     count: usize,
+    mut out: Vec<Vertex>,
 ) -> Vec<Vertex> {
     let size = vertex_size(f);
-    let mut out = Vec::with_capacity(count);
+    out.clear();
+    out.reserve(count);
     let proj = xf.projection();
     let vp = xf.viewport();
     let (zr, zf) = (xf.regf(0x101C), xf.regf(0x101F));
