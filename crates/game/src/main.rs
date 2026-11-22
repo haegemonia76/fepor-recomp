@@ -81,7 +81,11 @@ fn import_saves(card: &std::path::Path, imports: &std::path::Path) {
                 changed = true;
                 let _ = std::fs::rename(&f, f.with_extension("gci.imported"));
             }
-            Err(e) => eprintln!("cannot import {}: {e}", f.display()),
+            Err(e) => {
+                // set aside so that it is not tried at every start; the overlay lists it
+                eprintln!("cannot import {}: {e}", f.display());
+                let _ = std::fs::rename(&f, f.with_extension("gci.failed"));
+            }
         }
     }
     if changed {

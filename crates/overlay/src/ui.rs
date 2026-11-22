@@ -1,5 +1,7 @@
 //! The settings pages.
 
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText};
@@ -58,6 +60,11 @@ pub struct UiState {
     card: Option<CardView>,
     card_message: String,
     focus_tabs: bool,
+    /// The file chooser, while the player has it open.
+    picker: Option<Receiver<Vec<PathBuf>>>,
+    /// Saves waiting in the imports folder, re-read every couple of seconds.
+    pending: Vec<String>,
+    pending_at: Option<Instant>,
 }
 
 impl UiState {
@@ -67,6 +74,9 @@ impl UiState {
             card: None,
             card_message: String::new(),
             focus_tabs: true,
+            picker: None,
+            pending: Vec::new(),
+            pending_at: None,
         }
     }
 }
@@ -503,11 +513,42 @@ fn controls(ui: &mut egui::Ui, shared: &Shared) {
 }
 
 fn card(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+    let imports = shared.data_dir.join("imports");
+    // the player's answer from the file chooser, if it came in
+    if let Some(rx) = &st.picker {
+        match rx.try_recv() {
+            Ok(files) => {
+                st.picker = None;
+                st.card_message = queue_imports(&files, &imports);
+                st.pending_at = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.picker = None,
+        }
+    }
+    if st
+        .pending_at
+        .is_none_or(|t| t.elapsed() > Duration::from_secs(2))
+    {
+        st.pending = pending_imports(&imports);
+        st.pending_at = Some(Instant::now());
+    }
     let path = shared.card_path.lock().ok().and_then(|p| p.clone());
-    let Some(path) = path else {
-        ui.label("No memory card in slot A.");
-        return;
-    };
+    match path {
+        Some(path) => card_info(ui, st, shared, &path),
+        None => {
+            ui.label("No memory card in slot A.");
+            if !st.card_message.is_empty() {
+                ui.label(&st.card_message);
+            }
+        }
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    import_section(ui, st, &imports);
+}
+
+fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) {
     ui.label(format!("Slot A: {}", path.display()));
     if st
         .card
@@ -555,15 +596,124 @@ fn card(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     if !st.card_message.is_empty() {
         ui.label(&st.card_message);
     }
-    ui.add_space(8.0);
-    ui.label(
-        RichText::new(format!(
-            ".gci saves put in {} are imported into the card the next time the game starts.",
-            shared.data_dir.join("imports").display()
-        ))
-        .small()
-        .weak(),
-    );
+}
+
+/// A `.gci` file is a 0x40-byte directory entry followed by whole 8 KiB blocks.
+fn check_gci(bytes: &[u8]) -> Result<(), String> {
+    const HEADER: usize = 0x40;
+    const BLOCK: usize = 0x2000;
+    if bytes.len() < HEADER + BLOCK || (bytes.len() - HEADER) % BLOCK != 0 {
+        return Err("not a GameCube save (.gci)".into());
+    }
+    Ok(())
+}
+
+/// Copy the chosen `.gci` files into `dir`, where the game picks them up at its next start. Returns what to
+/// tell the player.
+pub(crate) fn queue_imports(files: &[PathBuf], dir: &Path) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return format!("Cannot create {}: {e}", dir.display());
+    }
+    let (mut queued, mut problems) = (0, Vec::new());
+    for f in files {
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let done = std::fs::read(f)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| check_gci(&bytes).map(|()| bytes))
+            .and_then(|bytes| std::fs::write(dir.join(&name), bytes).map_err(|e| e.to_string()));
+        match done {
+            Ok(()) => queued += 1,
+            Err(e) => problems.push(format!("{name}: {e}")),
+        }
+    }
+    let mut msg = String::new();
+    if queued > 0 {
+        msg = format!("{queued} save(s) queued: they are imported into the card the next time the game starts.");
+    }
+    for p in problems {
+        msg.push_str(&format!("\n{p}"));
+    }
+    msg.trim().to_string()
+}
+
+/// Save files waiting in `dir` for the next start.
+fn pending_imports(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".gci") || n.ends_with(".gci.failed"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Open the native file chooser on its own thread (it blocks until the player is done) and keep the receiver.
+fn start_picker(st: &mut UiState) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let files = rfd::FileDialog::new()
+            .set_title("Choose the saves to import")
+            .add_filter("GameCube save", &["gci"])
+            .pick_files()
+            .unwrap_or_default();
+        let _ = tx.send(files);
+    });
+    st.picker = Some(rx);
+}
+
+fn import_section(ui: &mut egui::Ui, st: &mut UiState, imports: &Path) {
+    ui.label(RichText::new("Import saves").strong());
+    let choosing = st.picker.is_some();
+    if ui
+        .add_enabled(
+            !choosing,
+            egui::Button::new(if choosing {
+                "Choosing..."
+            } else {
+                "Choose .gci files..."
+            }),
+        )
+        .clicked()
+    {
+        start_picker(st);
+    }
+    if st.pending.is_empty() {
+        ui.label(
+            RichText::new("Saves chosen here are put on the card the next time the game starts.")
+                .small()
+                .weak(),
+        );
+        return;
+    }
+    ui.label(format!("In the imports folder ({}):", st.pending.len()));
+    let mut remove = None;
+    for name in &st.pending {
+        ui.horizontal(|ui| {
+            if let Some(base) = name.strip_suffix(".failed") {
+                ui.colored_label(
+                    Color32::LIGHT_RED,
+                    format!("  {base}: not imported (already on the card, or no room)"),
+                );
+            } else {
+                ui.label(format!("  {name}  (imported at the next start)"));
+            }
+            if ui.small_button("Remove").clicked() {
+                remove = Some(name.clone());
+            }
+        });
+    }
+    if let Some(name) = remove {
+        let _ = std::fs::remove_file(imports.join(&name));
+        st.pending_at = None;
+    }
 }
 
 fn export(card: &std::path::Path, dir: &std::path::Path) -> String {
@@ -607,4 +757,37 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
             .small()
             .weak(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gci(blocks: usize) -> Vec<u8> {
+        vec![0u8; 0x40 + 0x2000 * blocks]
+    }
+
+    #[test]
+    fn only_whole_block_saves_are_queued_and_the_rest_is_reported() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let good = src.path().join("01-GFEP-FIREEMBLEM8.gci");
+        let bad = src.path().join("notes.gci");
+        std::fs::write(&good, gci(19)).unwrap();
+        std::fs::write(&bad, b"hello").unwrap();
+        let imports = dst.path().join("imports");
+        let msg = queue_imports(&[good, bad], &imports);
+        assert!(msg.starts_with("1 save(s) queued"), "{msg}");
+        assert!(msg.contains("notes.gci: not a GameCube save"), "{msg}");
+        assert_eq!(
+            pending_imports(&imports),
+            vec!["01-GFEP-FIREEMBLEM8.gci".to_string()]
+        );
+    }
+
+    #[test]
+    fn choosing_nothing_says_nothing() {
+        let dst = tempfile::tempdir().unwrap();
+        assert_eq!(queue_imports(&[], dst.path()), "");
+    }
 }

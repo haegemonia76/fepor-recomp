@@ -13,6 +13,8 @@ wgpu = "26"
 bytemuck = { version = "1", features = ["derive"] }
 ab_glyph = "0.2"
 epaint_default_fonts = "0.37"
+# native file chooser for the memory card page (the launcher GUI uses it too)
+rfd = "0.18.0"
 winit.workspace = true
 
 [dev-dependencies]
