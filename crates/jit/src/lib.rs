@@ -70,17 +70,6 @@ impl Jit {
         hle_symbols: &HleSymbols,
         trace_calls: bool,
     ) -> &'static Jit {
-        let mut flags = settings::builder();
-        flags.set("opt_level", "speed").expect("opt_level");
-        // JIT code and runtime are one image: no PLT/GOT indirection needed
-        flags.set("is_pic", "false").expect("is_pic");
-        let isa = cranelift_native::builder()
-            .expect("host ISA")
-            .finish(settings::Flags::new(flags))
-            .expect("ISA");
-        let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
-        translate::register_symbols(&mut jb, hle_symbols);
-        let module = JITModule::new(jb);
         let functions = analysis.functions.clone();
         let index: HashMap<u32, usize> = functions
             .iter()
@@ -107,15 +96,7 @@ impl Jit {
             table,
             trace_calls,
             trace_jit: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "jit")),
-            state: Mutex::new(State {
-                clif: module.make_context(),
-                module,
-                fbc: FunctionBuilderContext::new(),
-                imports: HashMap::new(),
-                counter: 0,
-                compiled: 0,
-                compile_ms: 0.0,
-            }),
+            state: Mutex::new(new_state(hle_symbols)),
         })
     }
 
@@ -138,13 +119,27 @@ impl Jit {
             return p;
         }
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.compile_with(&mut st, i)
+    }
+
+    /// Compile function `i` with compiler `st` unless already done. Two threads may compile the same
+    /// function; the first to publish wins and the other's code is simply never used.
+    fn compile_with(&self, st: &mut State, i: usize) -> *mut u8 {
         let p = self.table[i].load(Ordering::Acquire);
         if !p.is_null() {
             return p;
         }
         let started = std::time::Instant::now();
-        let p = translate::compile(self, &mut st, i);
-        self.table[i].store(p, Ordering::Release);
+        let p = translate::compile(self, st, i);
+        let p = match self.table[i].compare_exchange(
+            std::ptr::null_mut(),
+            p,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => p,
+            Err(winner) => winner,
+        };
         if self.trace_jit {
             let ms = started.elapsed().as_secs_f64() * 1e3;
             st.compiled += 1;
@@ -161,5 +156,63 @@ impl Jit {
             }
         }
         p
+    }
+
+    /// Compile every function on `workers` background threads, so that the game thread finds its code
+    /// ready instead of stalling a few milliseconds on each first call (a frame is 16 ms). Each thread has
+    /// its own compiler (modules are not shared); calls between functions go through the table.
+    pub fn precompile(&'static self, hle_symbols: HleSymbols, workers: usize) {
+        let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for w in 0..workers {
+            let (syms, next) = (hle_symbols.clone(), next.clone());
+            let spawned = std::thread::Builder::new()
+                .name(format!("jit-{w}"))
+                .spawn(move || {
+                    let mut st = new_state(&syms);
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= self.functions.len() {
+                            break;
+                        }
+                        if self.table[i].load(Ordering::Acquire).is_null() {
+                            // a function that cannot be compiled is left for the game thread to report
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                self.compile_with(&mut st, i)
+                            }));
+                        }
+                    }
+                });
+            if let Err(e) = spawned {
+                eprintln!("jit: cannot start a compiler thread: {e}");
+            }
+        }
+    }
+}
+
+/// A compiler: Cranelift module for the host, with the runtime's symbols.
+fn new_state(hle_symbols: &HleSymbols) -> State {
+    let mut flags = settings::builder();
+    flags.set("opt_level", "speed").expect("opt_level");
+    // the translator emits valid IR: the verifier would only cost compile time
+    flags
+        .set("enable_verifier", "false")
+        .expect("enable_verifier");
+    // JIT code and runtime are one image: no PLT/GOT indirection needed
+    flags.set("is_pic", "false").expect("is_pic");
+    let isa = cranelift_native::builder()
+        .expect("host ISA")
+        .finish(settings::Flags::new(flags))
+        .expect("ISA");
+    let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
+    translate::register_symbols(&mut jb, hle_symbols);
+    let module = JITModule::new(jb);
+    State {
+        clif: module.make_context(),
+        module,
+        fbc: FunctionBuilderContext::new(),
+        imports: HashMap::new(),
+        counter: 0,
+        compiled: 0,
+        compile_ms: 0.0,
     }
 }

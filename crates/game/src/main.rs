@@ -141,14 +141,19 @@ fn install_jit(game_id: &str, dol: &Dol) {
     let analysis = fepor_core::analysis::analyze(dol, &cfg);
     let trace_calls = std::env::var("FEPOR_TRACE")
         .is_ok_and(|v| v.split(',').any(|x| x == "calls" || x == "all"));
-    fepor_jit::Jit::install(
-        dol.clone(),
-        &analysis,
-        &cfg.hle,
-        &fepor_runtime::hle::symbols(),
-        trace_calls,
-    );
+    let symbols = fepor_runtime::hle::symbols();
+    let jit = fepor_jit::Jit::install(dol.clone(), &analysis, &cfg.hle, &symbols, trace_calls);
     abi::set_resolver(|target| fepor_jit::Jit::global()?.entry(target));
+    // The rest of the game's code is compiled in the background, ahead of its first call.
+    // FEPOR_JIT_WORKERS=0 turns it off (functions then compile on first call).
+    let workers = std::env::var("FEPOR_JIT_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            (cores / 4).clamp(1, 4)
+        });
+    jit.precompile(symbols, workers);
 }
 
 fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Result<(), String> {
