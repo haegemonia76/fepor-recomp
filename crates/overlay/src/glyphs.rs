@@ -186,6 +186,10 @@ fn on_symbol(symbol: Symbol, p: (f32, f32)) -> bool {
     }
 }
 
+/// The halo behind the game's A button: a dark translucent grey.
+const HALO_GREY: f32 = 0.2;
+const HALO_ALPHA: f32 = 0.5;
+
 /// Draw `icon` into a straight-alpha RGBA image of `w` x `h` pixels.
 fn draw(icon: &Icon, w: u32, h: u32, shape: Shape) -> Vec<u8> {
     const SS: u32 = 4;
@@ -222,9 +226,9 @@ fn draw(icon: &Icon, w: u32, h: u32, shape: Shape) -> Vec<u8> {
                     if d > radius {
                         // the halo is what the game's A button has around its dot
                         if shape.halo && px.hypot(py) <= halo_radius {
-                            a += 0.55;
+                            a += HALO_ALPHA;
                             for k in 0..3 {
-                                col[k] += 0.33 * 0.55;
+                                col[k] += HALO_GREY * HALO_ALPHA;
                             }
                         }
                         continue;
