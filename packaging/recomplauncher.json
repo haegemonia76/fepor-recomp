@@ -12,7 +12,7 @@
     "args": ["prepare", "--game", "{game}", "--data", "{data}"],
     "label": "Recompiling the game from your disc",
     "timeout": 3600,
-    "version": "0.1.0",
+    "version": "0.1.1",
     "done": ["{data}/prepared.json"]
   },
   "start": {

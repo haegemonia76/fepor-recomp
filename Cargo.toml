@@ -5,7 +5,7 @@ members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates
 default-members = ["crates/core", "crates/cli", "crates/ppc-lift", "crates/gui", "crates/runtime", "crates/gx", "crates/video", "crates/audio", "crates/input", "crates/overlay", "crates/jit"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "GPL-2.0-or-later"
 

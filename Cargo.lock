@@ -1446,7 +1446,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "fepor-audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fepor-core",
  "fepor-runtime",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "ppc750cl",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-game"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fepor-audio",
  "fepor-core",
@@ -1483,11 +1483,11 @@ dependencies = [
 
 [[package]]
 name = "fepor-gx"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "fepor-input"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fepor-runtime",
  "sdl3",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-jit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-overlay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "bytemuck",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-ppc-lift"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fepor-core",
  "ppc750cl",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-recomp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "fepor-core",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-recomp-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "fepor-core",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
  "fepor-core",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "fepor-video"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "fepor-core",
