@@ -27,8 +27,9 @@ pub struct Gx {
     buf: Vec<u8>,
     snapshot: Option<Arc<RenderState>>,
     trace_tlut: bool,
-    /// The last draw, in words, for the message about a stream that is out of step.
-    last_draw: (u8, usize, usize, u32, u32, u32, u32, u32, u32),
+    /// Set when a command is not valid: the stream is out of step and is skipped until a run of zero bytes.
+    lost: bool,
+    zero_run: usize,
 }
 
 enum Step {
@@ -56,7 +57,8 @@ impl Gx {
                 .and_then(|v| v.parse().ok()),
             trace_tlut: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "tlut")),
-            last_draw: (0, 0, 0, 0, 0, 0, 0, 0, 0),
+            lost: false,
+            zero_run: 0,
         }
     }
 
@@ -86,6 +88,20 @@ impl Gx {
 
     fn exec(&mut self, d: &[u8], ram: &[u8], sink: &mut dyn Sink) -> Step {
         let op = d[0];
+        if self.lost {
+            // `GXFlush` pads the pipe to 32 bytes with zeros: a run of them is where the game's commands start
+            // again. Vertex data seldom has so many zero bytes in a row.
+            if op == 0 {
+                self.zero_run += 1;
+                if self.zero_run >= 8 {
+                    self.lost = false;
+                    self.zero_run = 0;
+                }
+            } else {
+                self.zero_run = 0;
+            }
+            return Step::Done(1);
+        }
         if self.log_frame == Some(self.stats.copies) && d.len() >= 5 {
             match op {
                 0x61 => eprintln!(
@@ -178,6 +194,9 @@ impl Gx {
                         }
                     }
                 }
+                // a list is self-contained: what is wrong inside it does not carry over
+                self.lost = false;
+                self.zero_run = 0;
                 Step::Done(9)
             }
             0x61 => {
@@ -232,31 +251,21 @@ impl Gx {
                         &self.tluts,
                     );
                 }
-                let v = (op & 7) as usize;
-                self.last_draw = (
-                    op,
-                    count,
-                    size,
-                    self.cp.vcd_lo,
-                    self.cp.vcd_hi,
-                    self.cp.vat_a[v],
-                    self.cp.vat_b[v],
-                    self.cp.vat_c[v],
-                    self.xf.reg(0x1008),
-                );
                 Step::Done(3 + count * size)
             }
             _ => {
-                // Not a command (the hardware skips one byte, as Dolphin does). It means the stream is out of step
-                // with what the parser took a draw to hold, so say which draw came before.
+                // The stream is out of step: a draw's vertices did not match the format the game had described
+                // (or a command was split wrongly). What follows is vertex data read as commands, which can
+                // overwrite any register, so nothing is run until the game's next flush (see `lost`).
                 self.stats.unknown += 1;
-                if self.stats.unknown <= 8 {
-                    let (op, count, size, vcd_lo, vcd_hi, a, b, c, spec) = self.last_draw;
+                if !self.lost && self.stats.unknown <= 8 {
                     eprintln!(
-                        "gx: command {:#04x} is not valid here (number {}); the last draw was {op:#04x} x{count}, {size} bytes a vertex, VCD {vcd_lo:#x} {vcd_hi:#x}, VAT {a:#x} {b:#x} {c:#x}, XF spec {spec:#x}",
-                        d[0], self.stats.unknown
+                        "gx: command {op:#04x} is not valid here; the stream is out of step, skipping to the next flush (number {})",
+                        self.stats.unknown
                     );
                 }
+                self.lost = true;
+                self.zero_run = 0;
                 Step::Done(1)
             }
         }
