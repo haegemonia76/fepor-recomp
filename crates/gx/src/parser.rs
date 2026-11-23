@@ -26,8 +26,10 @@ pub struct Gx {
     log_frame: Option<u64>,
     buf: Vec<u8>,
     snapshot: Option<Arc<RenderState>>,
-    trace: bool,
     trace_tlut: bool,
+    /// Set when a command is not valid: the stream is out of step and is skipped until a run of zero bytes.
+    lost: bool,
+    zero_run: usize,
 }
 
 enum Step {
@@ -55,8 +57,8 @@ impl Gx {
                 .and_then(|v| v.parse().ok()),
             trace_tlut: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "tlut")),
-            trace: std::env::var("FEPOR_TRACE")
-                .is_ok_and(|v| v.split(',').any(|x| x == "gx" || x == "all")),
+            lost: false,
+            zero_run: 0,
         }
     }
 
@@ -86,6 +88,20 @@ impl Gx {
 
     fn exec(&mut self, d: &[u8], ram: &[u8], sink: &mut dyn Sink) -> Step {
         let op = d[0];
+        if self.lost {
+            // `GXFlush` pads the pipe to 32 bytes with zeros: a run of them is where the game's commands start
+            // again. Vertex data seldom has so many zero bytes in a row.
+            if op == 0 {
+                self.zero_run += 1;
+                if self.zero_run >= 8 {
+                    self.lost = false;
+                    self.zero_run = 0;
+                }
+            } else {
+                self.zero_run = 0;
+            }
+            return Step::Done(1);
+        }
         if self.log_frame == Some(self.stats.copies) && d.len() >= 5 {
             match op {
                 0x61 => eprintln!(
@@ -107,7 +123,8 @@ impl Gx {
             }
         }
         match op {
-            0x00 | 0x48 => Step::Done(1),
+            // NOP, the "reset" and metrics opcodes (nothing to do), and vertex cache invalidation
+            0x00 | 0x01 | 0x44 | 0x48 => Step::Done(1),
             0x08 => {
                 if d.len() < 6 {
                     return Step::NeedMore;
@@ -176,6 +193,9 @@ impl Gx {
                         }
                     }
                 }
+                // a list is self-contained: what is wrong inside it does not carry over
+                self.lost = false;
+                self.zero_run = 0;
                 Step::Done(9)
             }
             0x61 => {
@@ -233,10 +253,18 @@ impl Gx {
                 Step::Done(3 + count * size)
             }
             _ => {
+                // The stream is out of step: a draw's vertices did not match the format the game had described
+                // (or a command was split wrongly). What follows is vertex data read as commands, which can
+                // overwrite any register, so nothing is run until the game's next flush (see `lost`).
                 self.stats.unknown += 1;
-                if self.trace {
-                    eprintln!("gx: unknown command {op:#04x}");
+                if !self.lost && self.stats.unknown <= 8 {
+                    eprintln!(
+                        "gx: command {op:#04x} is not valid here; the stream is out of step, skipping to the next flush (number {})",
+                        self.stats.unknown
+                    );
                 }
+                self.lost = true;
+                self.zero_run = 0;
                 Step::Done(1)
             }
         }
