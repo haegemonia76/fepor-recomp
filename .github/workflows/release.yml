@@ -100,4 +100,5 @@ jobs:
         run: |
           ls -l dist
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" --generate-notes
+            --title "$GITHUB_REF_NAME" --generate-notes \
+            --notes "**Not tested:** the macOS arm64 archive (no arm64 hardware available to the maintainer, on any OS), the Windows and macOS archives (built, never run), and an install through RecompLauncher. Only the Linux x64 archive has been run."

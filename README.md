@@ -10,6 +10,8 @@ Install the release in RecompLauncher (it uses `recomplauncher.json` from the ar
 
 Without the launcher: `fepor-recomp prepare --game <disc> --data <folder>`, then `fepor-recomp run --data <folder>`.
 
+**arm64 is not tested.** The macOS arm64 archive is built by GitHub, but nobody on the project has arm64 hardware (any OS) to run it: it is published as is, untested. Linux and Windows arm64 are not built at all for the same reason (see ticket 28). Linux x64 is the only archive that has been run (headless, from the downloaded release).
+
 ## Building from source
 
 ```
