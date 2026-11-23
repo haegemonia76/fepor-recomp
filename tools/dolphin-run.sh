@@ -7,9 +7,10 @@
 # --card <raw>: raw image as slot A (Dolphin may write to it: pass a copy). --gci <file>: a GCI-folder card holding that one save.
 # --dump-audio: Dolphin writes its audio to <user>/Dump/Audio/*dspdump.wav (compare with FEPOR_DUMP_AUDIO and tools/audio-check.py).
 # --dump-frames: Dolphin writes the video to <user>/Dump/Frames/*.avi (extract frames with ffmpeg to see what was on screen).
+# --log-video: Dolphin logs its video backend (errors, warnings) to <user>/Logs/dolphin.log.
 # Needs dolphin-emu, spectacle (KDE) and ImageMagick for the screenshots. Linux only.
 set -euo pipefail
-iso=""; card=""; gci=""; user="/tmp/dolphin-run-user"; dump_audio=0; dump_frames=0
+iso=""; card=""; gci=""; user="/tmp/dolphin-run-user"; dump_audio=0; dump_frames=0; log_video=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --iso) iso="$2"; shift 2 ;;
@@ -18,6 +19,7 @@ while [ $# -gt 0 ]; do
     --user) user="$2"; shift 2 ;;
     --dump-audio) dump_audio=1; shift ;;
     --dump-frames) dump_frames=1; shift ;;
+    --log-video) log_video=1; shift ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -49,6 +51,10 @@ EOF
 if [ "$dump_frames" = 1 ]; then
   printf '[Movie]\nDumpFrames = True\nDumpFramesSilent = True\n' >> "$user/Config/Dolphin.ini"
 fi
+# Dolphin's own log of the video backend (errors such as an unknown FIFO opcode), in <user>/Logs/dolphin.log
+if [ "$log_video" = 1 ]; then
+  printf '[Options]\nVerbosity = 3\nWriteToFile = True\nWriteToConsole = False\n[Logs]\nVIDEO = True\nVIDEOINTERFACE = True\n' > "$user/Config/Logger.ini"
+fi
 cat > "$user/Config/GCPadNew.ini" <<'EOF'
 [GCPad1]
 Device = Pipe/0/pad
@@ -71,7 +77,9 @@ Main Stick/Right = `Axis X +`
 EOF
 mkfifo "$user/Pipes/pad"
 
-dolphin-emu -u "$user" -b -e "$iso" > "$user/dolphin.log" 2>&1 &
+# DOLPHIN_ARGS adds options (e.g. `-v Null` with QT_QPA_PLATFORM=offscreen: no window, no rendering)
+# shellcheck disable=SC2086
+dolphin-emu -u "$user" ${DOLPHIN_ARGS:-} -b -e "$iso" > "$user/dolphin.log" 2>&1 &
 dolphin=$!
 trap 'kill $dolphin 2>/dev/null; pkill -f "dolphin-emu-x11 -u $user" 2>/dev/null || true' EXIT
 exec 3<>"$user/Pipes/pad"

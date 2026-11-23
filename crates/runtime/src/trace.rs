@@ -9,6 +9,10 @@ pub struct Trace {
     pub irq: bool,
     /// `FEPOR_WATCH=8021952c,...`: print the arguments every time one of these functions is entered.
     pub watch: Vec<u32>,
+    /// `FEPOR_WATCH_MEM=<hex address>` (with `FEPOR_TRACE=calls`): print every change of this word and the calls
+    /// that ran just before the change was seen.
+    pub watch_mem: Option<u32>,
+    pub watch_mem_last: u32,
     ring: Vec<u32>,
     next: usize,
     /// Functions in order of first execution (`FEPOR_TRACE=calls`): the tail shows the newest code paths.
@@ -35,6 +39,10 @@ impl Trace {
                 .split(',')
                 .filter_map(|a| u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok())
                 .collect(),
+            watch_mem: std::env::var("FEPOR_WATCH_MEM")
+                .ok()
+                .and_then(|a| u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()),
+            watch_mem_last: 0,
             ring: vec![0; RING],
             next: 0,
             seen: Default::default(),

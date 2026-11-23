@@ -296,12 +296,25 @@ pub extern "C" fn fepor_enter(addr: u32) {
     if m.trace.calls {
         m.trace.enter(addr);
     }
+    if let Some(a) = m.trace.watch_mem {
+        let v = m.read_u32(a);
+        if v != m.trace.watch_mem_last {
+            eprintln!(
+                "mem {a:08x}: {:08x} -> {v:08x}, entering {addr:08x}, recent calls {:08x?}",
+                m.trace.watch_mem_last,
+                m.trace.recent(8)
+            );
+            m.trace.watch_mem_last = v;
+        }
+    }
     if !m.trace.watch.is_empty() && m.trace.watch.contains(&addr) {
         // SAFETY: the running thread's context.
         let c = unsafe { &*crate::sched::current_context() };
         eprintln!(
-            "watch: {addr:08x} thread#{} r3={:08x} r4={:08x} r5={:08x} r6={:08x} lr={:08x} f1..f4={} {} {} {}",
+            "watch: {addr:08x} thread#{} r2={:08x} r13={:08x} r3={:08x} r4={:08x} r5={:08x} r6={:08x} lr={:08x} f1..f4={} {} {} {}",
             crate::sched::current(),
+            c.r[2],
+            c.r[13],
             c.r[3],
             c.r[4],
             c.r[5],
