@@ -14,16 +14,27 @@ pub struct Version {
     pub analysis: &'static str,
 }
 
-pub const VERSIONS: &[Version] = &[Version {
-    game_id: "GFEP01",
-    name: "Fire Emblem: Path of Radiance (EU)",
-    dol_sha1: "1cf18d42d52c745d533715895c3a6649802324e9",
-    analysis: include_str!("../data/GFEP01.toml"),
-}];
+pub const VERSIONS: &[Version] = &[
+    Version {
+        game_id: "GFEP01",
+        name: "Fire Emblem: Path of Radiance (EU)",
+        dol_sha1: "1cf18d42d52c745d533715895c3a6649802324e9",
+        analysis: include_str!("../data/GFEP01.toml"),
+    },
+    // Only the fan-translated Japanese disc ("Souen no Kiseki", T-En by Shadowofchaos v0.1) has been seen: its
+    // main.dol is the one hashed here. The original Japanese main.dol is not known to differ in the SDK code
+    // the config names, but its hash is not in this table, so it is refused until someone can check it.
+    Version {
+        game_id: "GFEJ01",
+        name: "Fire Emblem: Souen no Kiseki (JP, T-En v0.1 fan translation)",
+        dol_sha1: "9ef55736e1c0968f00aeeafbee5a34ffdb7bba88",
+        analysis: include_str!("../data/GFEJ01.toml"),
+    },
+];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum VersionError {
-    #[error("unsupported game ID {0:?} (supported: GFEP01)")]
+    #[error("unsupported game ID {0:?} (supported: GFEP01, GFEJ01)")]
     Unsupported(String),
     #[error("main.dol hash mismatch for {game_id}: expected {expected}, found {found}")]
     HashMismatch {

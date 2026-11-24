@@ -1,0 +1,24 @@
+# Built-in analysis corrections for GFEJ01 (merged under the user's config). Same layout as GFEP01.toml:
+# the .init section has the same size, so the string and the copy tables are at the same addresses.
+
+# "Metrowerks Target Resident Kernel for PowerPC" string embedded in text.
+[[exclude]]
+start = 0x800034ac
+end = 0x800034e0
+
+# .init ROM copy / BSS clear tables (address, address, size triples).
+[[exclude]]
+start = 0x80005544
+end = 0x80005600
+
+# The same two SDK functions as GFEP01, found by matching the EU code in the Japanese main.dol
+# (OSSaveContext is byte for byte the same code; OSLoadContext differs only in the addresses it loads).
+[[hle]]
+addr = 0x80200350
+name = "OSSaveContext"
+
+[[hle]]
+addr = 0x802003d0
+name = "OSLoadContext"
+unwinds = true
+resumes_at = 0x80200350
