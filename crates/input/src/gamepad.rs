@@ -26,11 +26,36 @@ pub enum Event<'a> {
 }
 
 fn info(subsystem: &GamepadSubsystem, id: u32) -> DeviceInfo {
+    // the sdl3 crate unwraps the UTF-8 conversion of the name: a device with a broken name must not take the
+    // reader thread down
+    let name = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        subsystem.name_for_id(id).unwrap_or_default()
+    }))
+    .unwrap_or_else(|_| "Unknown gamepad".into());
     DeviceInfo {
         id,
         guid: subsystem.guid_for_id(id).string(),
-        name: subsystem.name_for_id(id).unwrap_or_default(),
+        name,
     }
+}
+
+/// Tell the bug report which controllers are connected (name, GUID, player index).
+fn note_pads(subsystem: &sdl3::GamepadSubsystem, open: &HashMap<u32, Gamepad>) {
+    let mut t = format!("SDL {}\n", sdl3::version::version());
+    if open.is_empty() {
+        t.push_str("no controller detected\n");
+    }
+    let mut ids: Vec<&u32> = open.keys().collect();
+    ids.sort();
+    for id in ids {
+        t.push_str(&format!(
+            "controller: {} (GUID {}, player index {:?})\n",
+            open[id].name().unwrap_or_default(),
+            subsystem.guid_for_id(*id).string(),
+            subsystem.player_index_for_id(*id)
+        ));
+    }
+    fepor_core::bugreport::note("controllers", t);
 }
 
 /// Start the reader. `on_event` is called from the reader thread.
@@ -47,21 +72,27 @@ pub fn spawn(mut on_event: impl FnMut(Event<'_>) + Send + 'static) {
             let trace = std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "input" || x == "all"));
             let mut open: HashMap<u32, Gamepad> = HashMap::new();
-            let add =
-                |id: u32, open: &mut HashMap<u32, Gamepad>, on_event: &mut dyn FnMut(Event<'_>)| {
-                    if let Ok(g) = subsystem.open(id) {
+            let add = |id: u32,
+                       open: &mut HashMap<u32, Gamepad>,
+                       on_event: &mut dyn FnMut(Event<'_>)| {
+                match subsystem.open(id) {
+                    Ok(g) => {
                         if trace {
                             eprintln!("input: gamepad connected: {}", g.name().unwrap_or_default());
                         }
                         open.insert(id, g);
+                        note_pads(&subsystem, &open);
                         on_event(Event::Added(info(&subsystem, id)));
                     }
-                };
+                    Err(e) => eprintln!("input: cannot open gamepad {id}: {e}"),
+                }
+            };
             if let Ok(ids) = subsystem.gamepads() {
                 for id in ids {
                     add(id, &mut open, &mut on_event);
                 }
             }
+            note_pads(&subsystem, &open);
             loop {
                 for event in pump.poll_iter() {
                     match event {
@@ -73,6 +104,7 @@ pub fn spawn(mut on_event: impl FnMut(Event<'_>) + Send + 'static) {
                                 if trace {
                                     eprintln!("input: gamepad {which} disconnected");
                                 }
+                                note_pads(&subsystem, &open);
                                 on_event(Event::Removed(which));
                             }
                         }

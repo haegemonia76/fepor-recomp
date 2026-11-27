@@ -30,6 +30,8 @@ pub struct StatsSnapshot {
     pub gpu_busy: Option<f32>,
     /// How long the last batch of GPU work took from submission to completion.
     pub gpu_latency_ms: f32,
+    /// GPU time of the scaling pass (FSR and filters), when the GPU can time it.
+    pub scaling_gpu_ms: Option<f32>,
     pub gpu_name: String,
     pub backend: String,
     /// Render target size in pixels.

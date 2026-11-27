@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,15 +36,28 @@ pub struct Shared {
     pub settings: SettingsHandle,
     pub controls: Arc<Mutex<Controls>>,
     pub data_dir: PathBuf,
+    /// The memory watcher's channel to the guest thread (ADR 0048).
+    pub memory: Arc<fepor_core::memwatch::Link>,
+    /// The cheat list of the running game, applied by the guest thread (ADR 0026).
+    pub cheats: Arc<fepor_core::cheats::CheatStore>,
     /// The memory card in slot A, once the game opened it.
     pub card_path: Mutex<Option<PathBuf>>,
     display_millihz: AtomicU32,
     ui_ppp_x100: AtomicU32,
     guest_fps_x100: AtomicU32,
+    playtime_secs: AtomicU64,
     /// Names of the playback devices, kept up to date by the audio thread.
     pub audio_devices: Arc<Mutex<Vec<String>>>,
+    /// Screenshots and video recording (F12, F10, the Capture page).
+    pub capture: Arc<fepor_core::capture::Capture>,
     stats: Mutex<StatsSnapshot>,
+    report_request: AtomicBool,
+    report_message: Mutex<String>,
+    report_hook: Mutex<Option<ReportHook>>,
 }
+
+/// Builds the `(title, text)` sections of a bug report that only the running game can fill.
+pub type ReportHook = Box<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
 fn key_of(code: KeyCode) -> Option<egui::Key> {
     Some(match code {
@@ -55,6 +68,8 @@ fn key_of(code: KeyCode) -> Option<egui::Key> {
         KeyCode::Enter | KeyCode::NumpadEnter => egui::Key::Enter,
         KeyCode::Space => egui::Key::Space,
         KeyCode::Tab => egui::Key::Tab,
+        KeyCode::Backspace => egui::Key::Backspace,
+        KeyCode::Delete => egui::Key::Delete,
         KeyCode::Home => egui::Key::Home,
         KeyCode::End => egui::Key::End,
         _ => return None,
@@ -85,13 +100,20 @@ impl Shared {
             tab_step: AtomicI32::new(0),
             settings,
             controls,
+            cheats: Arc::new(fepor_core::cheats::CheatStore::new(data_dir.clone())),
+            capture: Arc::new(fepor_core::capture::Capture::new(data_dir.clone())),
             data_dir,
+            memory: Arc::default(),
             card_path: Mutex::new(None),
             display_millihz: AtomicU32::new(0),
             guest_fps_x100: AtomicU32::new(0),
+            playtime_secs: AtomicU64::new(0),
             ui_ppp_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
             stats: Mutex::default(),
+            report_request: AtomicBool::new(false),
+            report_message: Mutex::default(),
+            report_hook: Mutex::default(),
         })
     }
 
@@ -137,12 +159,65 @@ impl Shared {
         self.guest_fps_x100.load(Ordering::Relaxed) as f32 / 100.0
     }
 
+    /// Seconds played (this data folder, this game), published by the playtime counter in the game.
+    pub fn set_playtime_secs(&self, secs: u64) {
+        self.playtime_secs.store(secs, Ordering::Relaxed);
+    }
+
+    pub fn playtime_secs(&self) -> u64 {
+        self.playtime_secs.load(Ordering::Relaxed)
+    }
+
+    /// The Help page asks for a bug report; the renderer makes it at its next frame, so that the picture
+    /// on screen is in it.
+    pub fn request_report(&self) {
+        *self
+            .report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = "Making the bug report...".into();
+        self.report_request.store(true, Ordering::Release);
+    }
+
+    /// Whether a report was asked for since the last call (renderer).
+    pub fn take_report_request(&self) -> bool {
+        self.report_request.swap(false, Ordering::AcqRel)
+    }
+
+    /// Where the report went or why it failed, for the Help page.
+    pub fn set_report_message(&self, message: String) {
+        *self
+            .report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = message;
+    }
+
+    pub fn report_message(&self) -> String {
+        self.report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The game process tells what the report should say about its state (threads, patches, ...).
+    pub fn set_report_hook(&self, hook: ReportHook) {
+        *self.report_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// The sections the game's hook adds to a report.
+    pub fn report_sections(&self) -> Vec<(String, String)> {
+        self.report_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map_or_else(Vec::new, |hook| hook())
+    }
+
     /// The renderer publishes the statistics here a few times per second.
     pub fn set_stats(&self, stats: StatsSnapshot) {
         *self.stats.lock().unwrap_or_else(|e| e.into_inner()) = stats;
     }
 
-    pub(crate) fn stats(&self) -> StatsSnapshot {
+    pub fn stats(&self) -> StatsSnapshot {
         self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
@@ -237,6 +312,7 @@ impl Shared {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(code),
+                        text,
                         state,
                         repeat,
                         ..
@@ -254,6 +330,16 @@ impl Shared {
                     if pressed && !repeat {
                         self.settings
                             .update(|s| s.video.stats = s.video.stats.next());
+                    }
+                    return true;
+                }
+                if *code == KeyCode::F12 || *code == KeyCode::F10 {
+                    if pressed && !repeat {
+                        if *code == KeyCode::F12 {
+                            self.capture.request_screenshot();
+                        } else {
+                            self.capture.toggle_recording();
+                        }
                     }
                     return true;
                 }
@@ -288,6 +374,17 @@ impl Shared {
                     c => {
                         if let Some(k) = key_of(*c) {
                             self.key(k, pressed, *repeat);
+                        }
+                        // typed characters for the text fields (the keys above carry no text of their own)
+                        if pressed {
+                            if let Some(t) = text
+                                .as_deref()
+                                .filter(|t| t.chars().all(|c| !c.is_control()))
+                            {
+                                if !t.is_empty() {
+                                    self.push(egui::Event::Text(t.to_owned()));
+                                }
+                            }
                         }
                     }
                 }
@@ -514,6 +611,32 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn typed_text_reaches_a_text_field() {
+        let (s, _dir) = shared();
+        s.set_open(true);
+        s.push(egui::Event::Text("0x80".into()));
+        let ctx = egui::Context::default();
+        let mut value = String::new();
+        let mut raw = egui::RawInput {
+            focused: true,
+            ..Default::default()
+        };
+        let frame = |ctx: &egui::Context, raw: egui::RawInput, value: &mut String| {
+            let mut out = ctx.run_ui(raw, |ui| {
+                let r = ui.add(egui::TextEdit::singleline(value));
+                if ui.ctx().memory(|m| m.focused()).is_none() {
+                    r.request_focus();
+                }
+            });
+            out.textures_delta.clear();
+        };
+        frame(&ctx, raw.clone(), &mut value);
+        raw.events = s.take_events();
+        frame(&ctx, raw, &mut value);
+        assert_eq!(value, "0x80");
     }
 
     #[test]

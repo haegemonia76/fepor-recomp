@@ -262,6 +262,121 @@ pub fn export_gci(image: &[u8], entry: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Backup copies of a card image, `<data>/memcards/backups/<card name>.<unix seconds>.raw`, newest kept.
+pub fn backups_dir(data: &std::path::Path) -> std::path::PathBuf {
+    data.join("memcards").join("backups")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backup {
+    pub path: std::path::PathBuf,
+    /// Seconds since the Unix epoch when the copy was made.
+    pub stamp: u64,
+}
+
+fn card_stem(card: &std::path::Path) -> String {
+    card.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+}
+
+/// The backups of `card` in `dir`, newest first.
+pub fn list_backups(dir: &std::path::Path, card: &std::path::Path) -> Vec<Backup> {
+    let prefix = format!("{}.", card_stem(card));
+    let mut out: Vec<Backup> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let name = path.file_name()?.to_str()?;
+            let stamp = name.strip_prefix(&prefix)?.strip_suffix(".raw")?;
+            if stamp.is_empty() || !stamp.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let stamp = stamp.parse().ok()?;
+            Some(Backup { path, stamp })
+        })
+        .collect();
+    out.sort_by_key(|b| std::cmp::Reverse(b.stamp));
+    out
+}
+
+/// Copy `card` into `dir` unless the newest backup already holds the same bytes, then delete the oldest
+/// copies beyond `keep`. `keep == 0` turns backups off. A missing card is not an error (nothing to save).
+/// Returns the new copy.
+pub fn backup(
+    card: &std::path::Path,
+    dir: &std::path::Path,
+    keep: usize,
+    now: u64,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    if keep == 0 {
+        return Ok(None);
+    }
+    let image = match std::fs::read(card) {
+        Ok(i) => i,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let existing = list_backups(dir, card);
+    if let Some(newest) = existing.first() {
+        if std::fs::read(&newest.path).is_ok_and(|b| b == image) {
+            return Ok(None);
+        }
+    }
+    std::fs::create_dir_all(dir)?;
+    // a second copy within the same second replaces the first
+    let stamp = existing.first().map_or(now, |n| now.max(n.stamp));
+    let path = dir.join(format!("{}.{stamp:010}.raw", card_stem(card)));
+    std::fs::write(&path, &image)?;
+    for old in list_backups(dir, card).into_iter().skip(keep) {
+        let _ = std::fs::remove_file(old.path);
+    }
+    Ok(Some(path))
+}
+
+/// Replace `card` by the backup `from` (a card image of a valid size).
+pub fn restore(card: &std::path::Path, from: &std::path::Path) -> std::io::Result<()> {
+    let image = std::fs::read(from)?;
+    if image.is_empty() || !image.len().is_multiple_of(BLOCK) {
+        return Err(std::io::Error::other("not a memory card image"));
+    }
+    std::fs::write(card, image)
+}
+
+const PENDING_RESTORE: &str = "restore.pending";
+
+/// Ask for the backup file `name` of `dir` to replace the card at the next start (the running game holds the
+/// card open and would overwrite a restore).
+pub fn queue_restore(dir: &std::path::Path, name: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(PENDING_RESTORE), name)
+}
+
+/// The queued restore, consumed. Only names of files in `dir` are accepted.
+pub fn take_restore(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let marker = dir.join(PENDING_RESTORE);
+    let name = std::fs::read_to_string(&marker).ok()?;
+    let _ = std::fs::remove_file(&marker);
+    let name = name.trim();
+    let path = dir.join(name);
+    (std::path::Path::new(name).file_name().is_some_and(|n| n == name) && path.is_file()).then_some(path)
+}
+
+/// `YYYY-MM-DD HH:MM:SS` (UTC) of a Unix time.
+pub fn format_stamp(secs: u64) -> String {
+    let (days, rem) = ((secs / 86400) as i64, secs % 86400);
+    // civil date from days since 1970-01-01 (Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +474,49 @@ mod tests {
         assert_eq!(&out[DIR_ENTRY..], &gci[DIR_ENTRY..]);
         // importing the same name twice is refused
         assert!(import_gci(&mut img, &gci).is_err());
+    }
+
+    #[test]
+    fn backups_rotate_and_skip_unchanged_images() {
+        let t = tempfile::tempdir().unwrap();
+        let card = t.path().join("MemoryCardA.USA.raw");
+        let dir = t.path().join("backups");
+        assert_eq!(backup(&card, &dir, 3, 100).unwrap(), None, "no card, no backup");
+        for (i, now) in [100u64, 200, 300, 400].into_iter().enumerate() {
+            std::fs::write(&card, vec![i as u8; BLOCK]).unwrap();
+            assert!(backup(&card, &dir, 3, now).unwrap().is_some());
+            assert_eq!(backup(&card, &dir, 3, now + 1).unwrap(), None, "unchanged");
+        }
+        let stamps: Vec<u64> = list_backups(&dir, &card).iter().map(|b| b.stamp).collect();
+        assert_eq!(stamps, [400, 300, 200]);
+        // other cards' backups are not listed nor rotated
+        std::fs::write(dir.join("MemoryCardB.USA.0000000001.raw"), [0]).unwrap();
+        assert_eq!(list_backups(&dir, &card).len(), 3);
+        assert_eq!(backup(&card, &dir, 0, 500).unwrap(), None, "keep 0 is off");
+    }
+
+    #[test]
+    fn restore_replaces_the_card_through_a_queued_request() {
+        let t = tempfile::tempdir().unwrap();
+        let card = t.path().join("MemoryCardA.USA.raw");
+        let dir = t.path().join("backups");
+        std::fs::write(&card, vec![1u8; BLOCK]).unwrap();
+        let first = backup(&card, &dir, 5, 10).unwrap().unwrap();
+        std::fs::write(&card, vec![2u8; BLOCK]).unwrap();
+        queue_restore(&dir, first.file_name().unwrap().to_str().unwrap()).unwrap();
+        let from = take_restore(&dir).unwrap();
+        restore(&card, &from).unwrap();
+        assert_eq!(std::fs::read(&card).unwrap(), vec![1u8; BLOCK]);
+        assert_eq!(take_restore(&dir), None, "consumed");
+        queue_restore(&dir, "../MemoryCardA.USA.raw").unwrap();
+        assert_eq!(take_restore(&dir), None, "only files of the backup folder");
+        std::fs::write(&from, [1, 2, 3]).unwrap();
+        assert!(restore(&card, &from).is_err(), "not a card image");
+    }
+
+    #[test]
+    fn stamps_read_as_utc_dates() {
+        assert_eq!(format_stamp(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(format_stamp(1_796_000_000), "2026-11-30 00:53:20 UTC");
     }
 }
