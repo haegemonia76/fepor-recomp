@@ -24,6 +24,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler.
 - **Start / Origin**: a function start found by analysis and why (`Entry`, `Config`, `Call`, `TailCall`, `DataPointer`, `AddressLoad`, `Gap`). Untrusted origins are rejected when preceding code runs straight into them (mid-function labels).
 - **Data folder**: the single directory (`--data`, `RECOMPLAUNCHER_DATA`) where generated code, the build, saves, config, cache and logs live (ADR 0010).
+- **Playtime**: seconds the guest ran with the overlay closed, per game id, in `<data>/playtime.toml` (ADR 0045). **Presence**: opt-in Discord rich presence over local IPC (ADR 0045).
 - **Prepare**: the setup step (`fepor-recomp prepare`) that builds the game from the player's copy; **profile**: `packaging/recomplauncher.json`, the RecompLauncher integration file.
 - **Config**: shared TOML file read by CLI and GUI (disc path, output dir, function/jump-table overrides, runtime options).
 - **Trace**: opt-in (`FEPOR_TRACE`) log of guest calls, hardware register writes and GX commands, comparable with Dolphin.

@@ -217,12 +217,25 @@ impl Default for Game {
     }
 }
 
+/// Discord rich presence (ADR 0045). Off unless the player turns it on: until then nothing is sent and no
+/// socket is opened.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Presence {
+    pub enabled: bool,
+    /// The application id of the Discord application whose name and pictures are shown. Discord needs one
+    /// to accept an activity; the repository ships none (see ADR 0045), so presence does nothing until it
+    /// is set here.
+    pub client_id: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub video: Video,
     pub audio: Audio,
     pub game: Game,
+    pub presence: Presence,
     /// Developer tools in the overlay (the memory watcher, ADR 0048). `FEPOR_DEVELOPER=1` turns it on for a run.
     pub developer: bool,
 }

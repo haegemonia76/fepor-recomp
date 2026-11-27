@@ -14,6 +14,7 @@ pub mod memcard;
 pub mod memwatch;
 pub mod mods;
 pub mod paths;
+pub mod playtime;
 pub mod settings;
 pub mod stats;
 pub mod text;

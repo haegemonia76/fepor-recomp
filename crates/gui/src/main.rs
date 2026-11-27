@@ -500,6 +500,17 @@ impl eframe::App for App {
                 }
                 _ => {}
             }
+            let played = match self.output.trim() {
+                "" => 0,
+                out => fepor_core::playtime::Playtime::load(&fepor_core::playtime::path_in(
+                    std::path::Path::new(out),
+                ))
+                .total(),
+            };
+            if played > 0 {
+                ui.add_space(8.0);
+                ui.label(format!("Playtime: {}", fepor_core::playtime::format(played)));
+            }
             mods_section(ui, &mut self.mods, self.output.trim());
             if !self.log.is_empty() {
                 ui.add_space(8.0);

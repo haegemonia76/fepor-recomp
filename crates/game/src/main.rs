@@ -2,6 +2,8 @@
 //!
 //! `fepor-game [--data <dir>] [--game <iso|folder>]`: without `--game` the data `prepare` copied to `<data>/disc` is used.
 
+mod presence;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -265,6 +267,43 @@ fn install_jit(game_id: &str, dol: &Dol) {
     jit.precompile(symbols, workers);
 }
 
+/// Count the time the game runs with the overlay closed (ADR 0045) into `<data>/playtime.toml`, and publish
+/// the total for the overlay. Saved every 10 seconds and whenever counting stops (the overlay opening, which
+/// is also the way to the Quit page).
+fn track_playtime(game_id: String, data: PathBuf, overlay: Arc<fepor_overlay::Shared>) {
+    use fepor_core::playtime::{path_in, Counter, Playtime};
+    let path = path_in(&data);
+    let mut record = Playtime::load(&path);
+    overlay.set_playtime_secs(record.get(&game_id));
+    let spawned = std::thread::Builder::new()
+        .name("playtime".into())
+        .spawn(move || {
+            let mut counter = Counter::new();
+            let (mut dirty, mut was_running, mut saved) = (false, true, std::time::Instant::now());
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let running = !overlay.is_open();
+                let secs = counter.tick(running);
+                if secs > 0 {
+                    record.add(&game_id, secs);
+                    overlay.set_playtime_secs(record.get(&game_id));
+                    dirty = true;
+                }
+                if dirty && (!running && was_running || saved.elapsed().as_secs() >= 10) {
+                    match record.save(&path) {
+                        Ok(()) => dirty = false,
+                        Err(e) => eprintln!("playtime: cannot write {}: {e}", path.display()),
+                    }
+                    saved = std::time::Instant::now();
+                }
+                was_running = running;
+            }
+        });
+    if let Err(e) = spawned {
+        eprintln!("playtime: cannot start: {e}");
+    }
+}
+
 /// Serve the files of the enabled mods instead of the disc's (ADR 0034); the rest of the disc is untouched.
 fn replace_files(
     disc: Box<dyn fepor_core::Disc>,
@@ -353,6 +392,9 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
     #[cfg(feature = "jit")]
     install_jit(disc.game_id(), &dol);
+
+    track_playtime(disc.game_id().to_string(), data.clone(), overlay.clone());
+    presence::spawn(overlay.clone());
 
     let m = machine();
     if std::env::var_os("FEPOR_NO_VIDEO").is_none() {

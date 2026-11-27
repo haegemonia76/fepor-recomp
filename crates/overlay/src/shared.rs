@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,7 @@ pub struct Shared {
     display_millihz: AtomicU32,
     ui_ppp_x100: AtomicU32,
     guest_fps_x100: AtomicU32,
+    playtime_secs: AtomicU64,
     /// Names of the playback devices, kept up to date by the audio thread.
     pub audio_devices: Arc<Mutex<Vec<String>>>,
     stats: Mutex<StatsSnapshot>,
@@ -101,6 +102,7 @@ impl Shared {
             card_path: Mutex::new(None),
             display_millihz: AtomicU32::new(0),
             guest_fps_x100: AtomicU32::new(0),
+            playtime_secs: AtomicU64::new(0),
             ui_ppp_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
             stats: Mutex::default(),
@@ -150,6 +152,15 @@ impl Shared {
 
     pub fn guest_fps(&self) -> f32 {
         self.guest_fps_x100.load(Ordering::Relaxed) as f32 / 100.0
+    }
+
+    /// Seconds played (this data folder, this game), published by the playtime counter in the game.
+    pub fn set_playtime_secs(&self, secs: u64) {
+        self.playtime_secs.store(secs, Ordering::Relaxed);
+    }
+
+    pub fn playtime_secs(&self) -> u64 {
+        self.playtime_secs.load(Ordering::Relaxed)
     }
 
     /// The Help page asks for a bug report; the renderer makes it at its next frame, so that the picture
