@@ -188,6 +188,7 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         m.hw.set_audio_sink(sink);
     }
     m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
+    m.patches.attach_watcher(overlay.memory.clone());
     // physical ranges of the DOL's code: recompiled, so cheats writing there would do nothing
     let code = dol
         .text_sections()
