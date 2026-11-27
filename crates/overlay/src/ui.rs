@@ -19,18 +19,20 @@ pub enum Page {
     Controls,
     Card,
     Mods,
+    Cheats,
     Help,
     Quit,
 }
 
 impl Page {
-    pub const ALL: [Page; 8] = [
+    pub const ALL: [Page; 9] = [
         Page::Video,
         Page::Audio,
         Page::Language,
         Page::Controls,
         Page::Card,
         Page::Mods,
+        Page::Cheats,
         Page::Help,
         Page::Quit,
     ];
@@ -42,6 +44,7 @@ impl Page {
             Page::Controls => "Controls",
             Page::Card => "Memory card",
             Page::Mods => "Mods",
+            Page::Cheats => "Cheats",
             Page::Language => "Language",
             Page::Help => "Help",
             Page::Quit => "Quit",
@@ -71,6 +74,9 @@ pub struct UiState {
     /// Saves waiting in the imports folder, re-read every couple of seconds.
     pending: Vec<String>,
     pending_at: Option<Instant>,
+    /// The INI chooser of the cheats page, and what came of the last import.
+    cheat_picker: Option<Receiver<Option<PathBuf>>>,
+    cheat_message: Option<Result<String, String>>,
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
@@ -87,6 +93,8 @@ impl UiState {
             picker: None,
             pending: Vec::new(),
             pending_at: None,
+            cheat_picker: None,
+            cheat_message: None,
             pad: crate::pad::PadView::default(),
             mods: crate::mods::ModsView::default(),
             pad_selected: None,
@@ -325,6 +333,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
             Page::Mods => crate::mods::page(ui, &mut st.mods, shared),
+            Page::Cheats => cheats(ui, st, shared),
             Page::Help => help(ui, shared),
             Page::Quit => quit(ui),
         });
@@ -613,6 +622,94 @@ fn card(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     ui.add_space(8.0);
     ui.separator();
     import_section(ui, st, &imports);
+}
+
+fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+    if let Some(rx) = &st.cheat_picker {
+        match rx.try_recv() {
+            Ok(file) => {
+                st.cheat_picker = None;
+                st.cheat_message = file.map(|f| {
+                    shared
+                        .cheats
+                        .import(&f)
+                        .map(|n| format!("{n} code(s) imported from {}.", f.display()))
+                });
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.cheat_picker = None,
+        }
+    }
+    let Some(game) = shared.cheats.game() else {
+        ui.label("Cheats are available once the game has started.");
+        return;
+    };
+    let choosing = st.cheat_picker.is_some();
+    if ui
+        .add_enabled(
+            !choosing,
+            egui::Button::new(if choosing { "Choosing..." } else { "Import a Dolphin game INI..." }),
+        )
+        .clicked()
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                rfd::FileDialog::new()
+                    .set_title("Choose a Dolphin game INI with Gecko or Action Replay codes")
+                    .add_filter("Dolphin game INI", &["ini"])
+                    .pick_file(),
+            );
+        });
+        st.cheat_picker = Some(rx);
+    }
+    match &st.cheat_message {
+        Some(Ok(m)) => {
+            ui.label(m);
+        }
+        Some(Err(e)) => {
+            ui.colored_label(Color32::LIGHT_RED, e);
+        }
+        None => {}
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    let list = shared.cheats.list();
+    if list.is_empty() {
+        ui.label(format!("No codes for {game} yet. Import the game's INI (for example GFEP01.ini from Dolphin)."));
+    }
+    for c in list {
+        let mut on = c.enabled;
+        ui.horizontal_wrapped(|ui| {
+            let label = if c.author.is_empty() {
+                c.name.clone()
+            } else {
+                format!("{}  [{}]", c.name, c.author)
+            };
+            if ui.add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label)).changed() {
+                shared.cheats.set_enabled(&c.key, on);
+            }
+            ui.label(RichText::new(c.kind.label()).small().weak());
+        });
+        if let Err(why) = &c.supported {
+            ui.label(RichText::new(format!("    not supported: {why}")).small().weak());
+        }
+        if let Some(s) = &c.status {
+            ui.colored_label(Color32::LIGHT_RED, format!("    not applied: {s}"));
+        }
+        for n in &c.notes {
+            ui.label(RichText::new(format!("    {n}")).small().weak());
+        }
+    }
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new(
+            "Codes hold their value every frame while on; turning one off puts the game's value back. Only plain \
+             writes to data run: conditionals, loops, pointers and code insertion are listed as not supported.",
+        )
+        .small()
+        .weak(),
+    );
 }
 
 fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) {
