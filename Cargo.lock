@@ -1566,6 +1566,8 @@ dependencies = [
  "cc",
  "fepor-core",
  "fepor-gx",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
