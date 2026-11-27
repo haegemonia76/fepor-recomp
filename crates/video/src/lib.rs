@@ -338,17 +338,67 @@ const MAX_MOVE: f32 = 0.4;
 struct Targets {
     efb: wgpu::Texture,
     efb_view: wgpu::TextureView,
+    /// With MSAA the draws go to these multisampled targets (colour, depth) and each pass resolves into
+    /// `efb_view`, which therefore always holds the finished single-sample picture that copies, readbacks
+    /// and the presenter use (ADR 0041).
+    efb_ms: Option<wgpu::TextureView>,
     depth_view: wgpu::TextureView,
     /// A second colour/depth target for interpolated frames, and a copy of the last real frame.
     alt: wgpu::Texture,
     alt_view: wgpu::TextureView,
+    alt_ms: Option<wgpu::TextureView>,
     alt_depth_view: wgpu::TextureView,
     xfb: wgpu::Texture,
     xfb_view: wgpu::TextureView,
 }
 
-fn make_targets(device: &wgpu::Device, scale: u32) -> Targets {
-    let tex = |label: &'static str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
+/// The sample counts (2, 4, 8) the adapter can multisample and resolve for the render target formats. Without
+/// the device feature for adapter-specific format features wgpu only accepts the 4 samples the spec guarantees.
+fn supported_samples(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Vec<u32> {
+    let specific = device
+        .features()
+        .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
+    let flags = |f| adapter.get_texture_format_features(f).flags;
+    let colour = flags(wgpu::TextureFormat::Rgba8Unorm);
+    let depth = flags(wgpu::TextureFormat::Depth32Float);
+    let resolve = colour.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE);
+    [2, 4, 8]
+        .into_iter()
+        .filter(|&n| {
+            (specific || n == 4)
+                && resolve
+                && colour.sample_count_supported(n)
+                && depth.sample_count_supported(n)
+        })
+        .collect()
+}
+
+/// The sample count to use for a request: the largest supported one not above it, 1 when none.
+fn pick_samples(supported: &[u32], wanted: u32) -> u32 {
+    supported
+        .iter()
+        .copied()
+        .filter(|&n| n <= wanted)
+        .max()
+        .unwrap_or(1)
+}
+
+/// Colour attachment view and resolve target of a pass over a target pair.
+fn colour_attachment<'a>(
+    ms: &'a Option<wgpu::TextureView>,
+    single: &'a wgpu::TextureView,
+) -> (&'a wgpu::TextureView, Option<&'a wgpu::TextureView>) {
+    match ms {
+        Some(m) => (m, Some(single)),
+        None => (single, None),
+    }
+}
+
+fn make_targets(device: &wgpu::Device, scale: u32, samples: u32) -> Targets {
+    let tex = |label: &'static str,
+               format: wgpu::TextureFormat,
+               usage: wgpu::TextureUsages,
+               sample_count: u32| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -357,7 +407,7 @@ fn make_targets(device: &wgpu::Device, scale: u32) -> Targets {
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count,
             dimension: wgpu::TextureDimension::D2,
             format,
             usage,
@@ -366,20 +416,34 @@ fn make_targets(device: &wgpu::Device, scale: u32) -> Targets {
     };
     use wgpu::TextureFormat::{Depth32Float, Rgba8Unorm};
     use wgpu::TextureUsages as U;
+    let ms_view = |label: &'static str| {
+        (samples > 1).then(|| {
+            tex(label, Rgba8Unorm, U::RENDER_ATTACHMENT, samples).create_view(&Default::default())
+        })
+    };
     let efb = tex(
         "efb",
         Rgba8Unorm,
         U::RENDER_ATTACHMENT | U::COPY_SRC | U::TEXTURE_BINDING,
+        1,
     );
-    let depth = tex("efb depth", Depth32Float, U::RENDER_ATTACHMENT);
+    let depth = tex("efb depth", Depth32Float, U::RENDER_ATTACHMENT, samples);
     let alt = tex(
         "efb interp",
         Rgba8Unorm,
         U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
+        1,
     );
-    let alt_depth = tex("efb interp depth", Depth32Float, U::RENDER_ATTACHMENT);
-    let xfb = tex("xfb", Rgba8Unorm, U::COPY_DST | U::TEXTURE_BINDING);
+    let alt_depth = tex(
+        "efb interp depth",
+        Depth32Float,
+        U::RENDER_ATTACHMENT,
+        samples,
+    );
+    let xfb = tex("xfb", Rgba8Unorm, U::COPY_DST | U::TEXTURE_BINDING, 1);
     Targets {
+        efb_ms: ms_view("efb ms"),
+        alt_ms: ms_view("efb interp ms"),
         efb_view: efb.create_view(&Default::default()),
         depth_view: depth.create_view(&Default::default()),
         alt_view: alt.create_view(&Default::default()),
@@ -450,6 +514,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     efb: wgpu::Texture,
     efb_view: wgpu::TextureView,
+    efb_ms: Option<wgpu::TextureView>,
     depth_view: wgpu::TextureView,
     texture_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
@@ -458,6 +523,11 @@ pub struct Renderer {
     shader_srcs: FastMap<u64, (u64, Rc<str>)>,
     pipelines: FastMap<PipelineKey, wgpu::RenderPipeline>,
     samplers: FastMap<(u8, u8, bool, bool), wgpu::Sampler>,
+    /// MSAA sample count in use (1 = off) and the counts the adapter offers (ADR 0041).
+    samples: u32,
+    sample_counts: Vec<u32>,
+    /// Anisotropic filtering of guest textures, 1 (off) to 16.
+    anisotropy: u16,
     textures: FastMap<TexKey, Rc<wgpu::TextureView>>,
     efb_textures: Vec<EfbTexture>,
     white: Rc<wgpu::TextureView>,
@@ -476,6 +546,7 @@ pub struct Renderer {
     /// Draws and clears go to the interpolation target (`alt_*`) while a frame is replayed.
     use_alt: bool,
     alt_view: wgpu::TextureView,
+    alt_ms: Option<wgpu::TextureView>,
     alt: wgpu::Texture,
     /// `read_efb` reads the interpolation target instead (frame dumps).
     read_alt: bool,
@@ -598,6 +669,9 @@ impl Renderer {
         .map_err(|e| format!("no GPU adapter: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("fepor"),
+            // without it wgpu only allows the 1 and 4 samples the spec guarantees, not 2 or 8
+            required_features: adapter.features()
+                & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
             ..Default::default()
         }))
         .map_err(|e| format!("device: {e}"))?;
@@ -621,16 +695,26 @@ impl Renderer {
         });
 
         let scale = settings.get().video.resolution;
+        let sample_counts = supported_samples(&adapter, &device);
+        let samples = pick_samples(&sample_counts, settings.get().video.msaa);
+        if samples != settings.get().video.msaa.max(1) {
+            eprintln!(
+                "video: {}x MSAA not available (adapter offers {sample_counts:?}); using {samples}x",
+                settings.get().video.msaa
+            );
+        }
         let Targets {
             efb,
             efb_view,
+            efb_ms,
             depth_view,
             alt,
             alt_view,
+            alt_ms,
             alt_depth_view,
             xfb,
             xfb_view,
-        } = make_targets(&device, scale);
+        } = make_targets(&device, scale, samples);
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("tev uniforms"),
@@ -713,6 +797,7 @@ impl Renderer {
             queue,
             efb,
             efb_view,
+            efb_ms,
             depth_view,
             texture_layout,
             pipeline_layout,
@@ -720,6 +805,9 @@ impl Renderer {
             shader_srcs: FastMap::default(),
             pipelines: FastMap::default(),
             samplers: FastMap::default(),
+            samples,
+            sample_counts,
+            anisotropy: settings.get().video.anisotropy.clamp(1, 16) as u16,
             textures: FastMap::default(),
             efb_textures: Vec::new(),
             white,
@@ -732,6 +820,7 @@ impl Renderer {
             scale,
             use_alt: false,
             alt_view,
+            alt_ms,
             alt_depth_view,
             xfb,
             alt,
@@ -824,6 +913,12 @@ impl Renderer {
     fn sampler(&mut self, d: &TextureDesc) -> wgpu::Sampler {
         let key = (d.wrap_s, d.wrap_t, d.mag_linear, d.min_linear);
         let device = &self.device;
+        // wgpu allows anisotropy only when every filter is linear: nearest-filtered guest maps stay as drawn
+        let anisotropy = if d.mag_linear && d.min_linear {
+            self.anisotropy
+        } else {
+            1
+        };
         self.samplers
             .entry(key)
             .or_insert_with(|| {
@@ -844,6 +939,8 @@ impl Renderer {
                     address_mode_v: wrap(d.wrap_t),
                     mag_filter: f(d.mag_linear),
                     min_filter: f(d.min_linear),
+                    mipmap_filter: f(anisotropy > 1),
+                    anisotropy_clamp: anisotropy,
                     ..Default::default()
                 })
             })
@@ -1294,7 +1391,10 @@ impl Renderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState {
+                    count: self.samples,
+                    ..Default::default()
+                },
                 multiview: None,
                 cache: None,
             });
@@ -1543,10 +1643,12 @@ impl Renderer {
             self.pass = None; // a clear is a load op: it needs a fresh pass
         }
         if self.pass.is_none() {
-            let (efb_view, depth_view) = if self.use_alt {
-                (&self.alt_view, &self.alt_depth_view)
+            let (efb_view, resolve, depth_view) = if self.use_alt {
+                let (c, r) = colour_attachment(&self.alt_ms, &self.alt_view);
+                (c, r, &self.alt_depth_view)
             } else {
-                (&self.efb_view, &self.depth_view)
+                let (c, r) = colour_attachment(&self.efb_ms, &self.efb_view);
+                (c, r, &self.depth_view)
             };
             let enc = self
                 .encoder
@@ -1557,7 +1659,7 @@ impl Renderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: efb_view,
                         depth_slice: None,
-                        resolve_target: None,
+                        resolve_target: resolve,
                         ops: wgpu::Operations {
                             load: match clear {
                                 Some((c, _)) => wgpu::LoadOp::Clear(wgpu::Color {
@@ -1665,10 +1767,12 @@ impl Renderer {
             });
         }
         self.end_pass();
-        let (efb_view, depth_view) = if self.use_alt {
-            (&self.alt_view, &self.alt_depth_view)
+        let (efb_view, resolve, depth_view) = if self.use_alt {
+            let (c, r) = colour_attachment(&self.alt_ms, &self.alt_view);
+            (c, r, &self.alt_depth_view)
         } else {
-            (&self.efb_view, &self.depth_view)
+            let (c, r) = colour_attachment(&self.efb_ms, &self.efb_view);
+            (c, r, &self.depth_view)
         };
         let enc = self
             .encoder
@@ -1678,7 +1782,7 @@ impl Renderer {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: efb_view,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: resolve,
                 ops: wgpu::Operations {
                     load: if color_update {
                         wgpu::LoadOp::Clear(wgpu::Color {
@@ -1824,15 +1928,30 @@ impl Renderer {
         if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
             p.set_present(&self.device, mult > 1, self.vsync);
         }
-        if s.video.resolution != self.scale {
+        let anisotropy = s.video.anisotropy.clamp(1, 16) as u16;
+        if anisotropy != self.anisotropy {
+            self.anisotropy = anisotropy;
+            self.samplers.clear();
+            self.tex_binds.clear();
+        }
+        let samples = pick_samples(&self.sample_counts, s.video.msaa);
+        if s.video.resolution != self.scale || samples != self.samples {
             self.flush();
+            if samples != self.samples {
+                // the pipelines are made for one sample count
+                self.pipelines.clear();
+                self.pstate = PassState::default();
+            }
+            self.samples = samples;
             self.scale = s.video.resolution;
-            let t = make_targets(&self.device, self.scale);
+            let t = make_targets(&self.device, self.scale, self.samples);
             self.efb = t.efb;
             self.efb_view = t.efb_view;
+            self.efb_ms = t.efb_ms;
             self.depth_view = t.depth_view;
             self.alt = t.alt;
             self.alt_view = t.alt_view;
+            self.alt_ms = t.alt_ms;
             self.alt_depth_view = t.alt_depth_view;
             self.xfb = t.xfb;
             self.xfb_view = t.xfb_view;
@@ -2395,5 +2514,20 @@ impl Renderer {
             ax,
             ai,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_samples;
+
+    #[test]
+    fn sample_count_falls_back_to_the_next_lower_supported() {
+        assert_eq!(pick_samples(&[2, 4, 8], 8), 8);
+        assert_eq!(pick_samples(&[2, 4], 8), 4);
+        assert_eq!(pick_samples(&[4], 2), 1);
+        assert_eq!(pick_samples(&[], 4), 1);
+        assert_eq!(pick_samples(&[2, 4, 8], 1), 1);
+        assert_eq!(pick_samples(&[2, 4, 8], 0), 1);
     }
 }

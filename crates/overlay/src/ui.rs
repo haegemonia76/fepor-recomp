@@ -365,6 +365,42 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
             .custom_formatter(|v, _| format!("x{v:.0}  ({}x{})", 640 * v as u32, 528 * v as u32)),
     );
     ui.add_space(8.0);
+    ui.label(crate::theme::caption("Anti-aliasing (MSAA)"));
+    ui.horizontal(|ui| {
+        for n in [1, 2, 4, 8] {
+            let label = if n == 1 {
+                "Off".into()
+            } else {
+                format!("{n}x")
+            };
+            ui.radio_value(&mut s.video.msaa, n, label);
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Applies at once. A GPU without that sample count uses the next lower one it has.",
+        )
+        .small()
+        .weak(),
+    );
+    ui.add_space(8.0);
+    ui.label(crate::theme::caption("Anisotropic filtering"));
+    ui.horizontal(|ui| {
+        for n in [1, 2, 4, 8, 16] {
+            let label = if n == 1 {
+                "Off".into()
+            } else {
+                format!("{n}x")
+            };
+            ui.radio_value(&mut s.video.anisotropy, n, label);
+        }
+    });
+    ui.label(
+        RichText::new("Applies at once. Sharper textures on slanted surfaces.")
+            .small()
+            .weak(),
+    );
+    ui.add_space(8.0);
     ui.label(crate::theme::caption("Picture shape"));
     for a in Aspect::ALL {
         ui.radio_value(&mut s.video.aspect, a, a.label());
@@ -842,7 +878,7 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
     ));
     ui.add_space(6.0);
     ui.label(
-        RichText::new("FEPOR_FPS_MULT, FEPOR_RES and FEPOR_ASPECT override the saved video settings for one run.")
+        RichText::new("FEPOR_FPS_MULT, FEPOR_RES, FEPOR_MSAA, FEPOR_ANISO and FEPOR_ASPECT override the saved video settings for one run.")
             .small()
             .weak(),
     );

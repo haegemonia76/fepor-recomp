@@ -179,6 +179,11 @@ pub struct Video {
     pub frame_multiplier: u32,
     /// Internal resolution factor over the GameCube's 640x528. 1..=4.
     pub resolution: u32,
+    /// Multisample anti-aliasing of the render targets: 1 (off), 2, 4 or 8 samples. A GPU that lacks a count
+    /// uses the next lower one it has.
+    pub msaa: u32,
+    /// Anisotropic filtering of guest textures: 1 (off), 2, 4, 8 or 16.
+    pub anisotropy: u32,
     pub aspect: Aspect,
     pub fullscreen: bool,
     /// Wait for the display's refresh (no tearing). Off presents at once: lower latency, tearing possible.
@@ -197,6 +202,8 @@ impl Default for Video {
         Video {
             frame_multiplier: 1,
             resolution: 1,
+            msaa: 1,
+            anisotropy: 1,
             aspect: Aspect::Fit,
             fullscreen: false,
             vsync: true,
@@ -307,6 +314,19 @@ impl Settings {
     pub fn clamp(&mut self) {
         self.video.frame_multiplier = self.video.frame_multiplier.clamp(1, 8);
         self.video.resolution = self.video.resolution.clamp(1, 4);
+        self.video.msaa = match self.video.msaa {
+            0..=1 => 1,
+            2..=3 => 2,
+            4..=7 => 4,
+            _ => 8,
+        };
+        self.video.anisotropy = match self.video.anisotropy {
+            0..=1 => 1,
+            2..=3 => 2,
+            4..=7 => 4,
+            8..=15 => 8,
+            _ => 16,
+        };
         self.video.overlay_scale = self.video.overlay_scale.clamp(0.0, 4.0);
         self.video.filters.clamp();
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
@@ -336,7 +356,7 @@ impl Settings {
     }
 
     /// The environment overrides the debugging tools have always had (`FEPOR_FPS_MULT`, `FEPOR_RES`,
-    /// `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
+    /// `FEPOR_MSAA`, `FEPOR_ANISO`, `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
     pub fn with_env_overrides(mut self) -> Settings {
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
         if let Some(v) = std::env::var("FEPOR_STATS").ok() {
@@ -351,6 +371,12 @@ impl Settings {
         }
         if let Some(n) = num("FEPOR_RES") {
             self.video.resolution = n;
+        }
+        if let Some(n) = num("FEPOR_MSAA") {
+            self.video.msaa = n;
+        }
+        if let Some(n) = num("FEPOR_ANISO") {
+            self.video.anisotropy = n;
         }
         if let Some(a) = std::env::var("FEPOR_ASPECT")
             .ok()
@@ -504,6 +530,16 @@ mod tests {
         std::fs::write(&path, "[video.filters]\ngamma = 9.0\nscanlines = -1.0\n").unwrap();
         let f = Settings::load(&path).video.filters;
         assert_eq!((f.gamma, f.scanlines), (2.0, 0.0));
+        assert_eq!(
+            (
+                Settings::default().video.msaa,
+                Settings::default().video.anisotropy
+            ),
+            (1, 1)
+        );
+        std::fs::write(&path, "[video]\nmsaa = 5\nanisotropy = 99\n").unwrap();
+        let v = Settings::load(&path).video;
+        assert_eq!((v.msaa, v.anisotropy), (4, 16));
     }
 
     #[test]
