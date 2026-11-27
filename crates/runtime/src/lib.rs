@@ -18,6 +18,7 @@ pub mod patch;
 pub mod sched;
 pub mod si;
 pub mod trace;
+pub mod watch;
 
 pub use context::Context;
 pub use machine::{machine, Machine, RAM_SIZE};

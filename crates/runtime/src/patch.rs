@@ -96,6 +96,8 @@ pub struct PatchEngine {
     /// Video retraces seen at the last hook run (several retraces between two runs make one frame).
     last_retrace: u64,
     pub trace: bool,
+    /// The memory watcher's guest-thread side, served from `frame` (ADR 0048).
+    watcher: Option<crate::watch::Watcher>,
 }
 
 fn phys(ea: u32) -> usize {
@@ -116,6 +118,11 @@ impl PatchEngine {
         version::lookup(game_id).ok_or_else(|| PatchError::UnknownGame(game_id.into()))?;
         self.game = Some(game_id.into());
         Ok(())
+    }
+
+    /// Serve the memory watcher's requests from the per-frame hook.
+    pub fn attach_watcher(&mut self, link: std::sync::Arc<fepor_core::memwatch::Link>) {
+        self.watcher = Some(crate::watch::Watcher::new(link));
     }
 
     pub fn game(&self) -> Option<&str> {
@@ -255,6 +262,10 @@ impl PatchEngine {
                 "patch: frame hook #{} (retrace {retraces}), {active} enabled sets",
                 self.frames
             );
+        }
+        if let Some(mut w) = self.watcher.take() {
+            w.service(self, ram);
+            self.watcher = Some(w);
         }
         true
     }
