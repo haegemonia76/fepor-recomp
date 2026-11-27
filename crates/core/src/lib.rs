@@ -18,6 +18,7 @@ pub mod paths;
 pub mod playtime;
 pub mod settings;
 pub mod snap;
+pub mod speed;
 pub mod states;
 pub mod stats;
 pub mod text;

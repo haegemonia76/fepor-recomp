@@ -1,7 +1,5 @@
 //! Audio Interface (0xCC006C00): control register and the sample counter the SDK uses to measure
-//! the sample rate. No audio is produced yet (M5.1).
-
-use std::time::Instant;
+//! the sample rate (measured on the guest clock).
 
 const AICR: u32 = 0x00;
 const AISCNT: u32 = 0x08;
@@ -16,7 +14,7 @@ pub struct Ai {
     control: u32,
     /// Samples counted before the current play period.
     base: u64,
-    playing_since: Option<Instant>,
+    playing_since: Option<u64>,
 }
 
 impl Ai {
@@ -40,7 +38,7 @@ impl Ai {
 
     fn counter(&self) -> u32 {
         let live = self.playing_since.map_or(0, |t| {
-            (t.elapsed().as_micros() as u64 * self.rate()) / 1_000_000
+            ((crate::clock::now_ns() - t) / 1000 * self.rate()) / 1_000_000
         });
         (self.base + live) as u32
     }
@@ -59,12 +57,12 @@ impl Ai {
                 if value & CR_SCRESET != 0 {
                     self.base = 0;
                     if self.playing_since.is_some() {
-                        self.playing_since = Some(Instant::now());
+                        self.playing_since = Some(crate::clock::now_ns());
                     }
                 }
                 let playing = value & CR_PSTAT != 0;
                 if playing && self.playing_since.is_none() {
-                    self.playing_since = Some(Instant::now());
+                    self.playing_since = Some(crate::clock::now_ns());
                 } else if !playing {
                     self.base = self.counter() as u64;
                     self.playing_since = None;
@@ -90,7 +88,10 @@ impl Ai {
         w.u32(self.control);
         w.u64(self.base);
         w.bool(self.playing_since.is_some());
-        w.u64(self.playing_since.map_or(0, |t| t.elapsed().as_micros() as u64));
+        w.u64(
+            self.playing_since
+                .map_or(0, |t| (crate::clock::now_ns() - t) / 1000),
+        );
     }
 
     pub fn load(&mut self, r: &mut fepor_core::snap::R) {

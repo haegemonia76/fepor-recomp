@@ -10,6 +10,7 @@ mod outlines;
 mod pad;
 mod paint;
 mod shared;
+mod speed;
 mod stats;
 mod theme;
 mod ui;

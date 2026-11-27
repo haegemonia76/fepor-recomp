@@ -51,6 +51,7 @@ pub struct Shared {
     /// Screenshots and video recording (F12, F10, the Capture page).
     pub capture: Arc<fepor_core::capture::Capture>,
     stats: Mutex<StatsSnapshot>,
+    speed_keys: crate::speed::SpeedKeys,
     report_request: AtomicBool,
     report_message: Mutex<String>,
     report_hook: Mutex<Option<ReportHook>>,
@@ -111,6 +112,7 @@ impl Shared {
             ui_ppp_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
             stats: Mutex::default(),
+            speed_keys: Default::default(),
             report_request: AtomicBool::new(false),
             report_message: Mutex::default(),
             report_hook: Mutex::default(),
@@ -132,6 +134,7 @@ impl Shared {
             q.held.clear();
         }
         self.tab_step.store(0, Ordering::Release);
+        self.speed_keys.release(&self.settings);
         if let Ok(mut c) = self.controls.lock() {
             if !open {
                 c.cancel_remap();
@@ -333,6 +336,15 @@ impl Shared {
                     }
                     return true;
                 }
+                // Tab (fast-forward) and ` (slow motion) are held; a release always counts, a press only
+                // while the menu is closed
+                if matches!(code, KeyCode::Tab | KeyCode::Backquote) && (!pressed || !open) {
+                    if !*repeat {
+                        self.speed_keys
+                            .hold(&self.settings, *code == KeyCode::Tab, pressed);
+                    }
+                    return !open;
+                }
                 // save states: F5 save, F7 load, F6 next slot, F8 held rewinds (ADR 0035)
                 if matches!(code, KeyCode::F5 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8) {
                     use fepor_core::states;
@@ -404,6 +416,10 @@ impl Shared {
                     }
                 }
                 true
+            }
+            WindowEvent::Focused(false) => {
+                self.speed_keys.release(&self.settings);
+                false
             }
             WindowEvent::CursorMoved { position, .. } if open => {
                 let p = egui::pos2((position.x / scale) as f32, (position.y / scale) as f32);
@@ -490,6 +506,13 @@ impl Shared {
             if pressed {
                 self.toggle();
             }
+            return true;
+        }
+        // right stick pressed: fast-forward, left stick pressed: slow motion (held; GameCube pads have no
+        // stick buttons, so the default bindings leave them free)
+        if matches!(source, "rightstick" | "leftstick") && (!pressed || !self.is_open()) {
+            self.speed_keys
+                .hold(&self.settings, source == "rightstick", pressed);
             return true;
         }
         if !self.is_open() {

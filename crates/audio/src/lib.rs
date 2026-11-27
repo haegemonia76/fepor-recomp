@@ -228,6 +228,30 @@ impl AudioSink for Tee {
     }
 }
 
+/// The sound policy while the game does not run at normal speed (ADR 0036). The game produces its samples
+/// at the speed's pace, so playing them at `rate * factor` keeps the stream continuous: the pitch follows
+/// the speed. Uncapped is too fast to follow, and "Silent" is the player's choice: nothing is played.
+struct SpeedPolicy {
+    inner: Box<dyn AudioSink>,
+    settings: SettingsHandle,
+}
+
+impl AudioSink for SpeedPolicy {
+    fn push(&mut self, rate: u32, samples: &[i16]) {
+        let milli = fepor_core::speed::milli();
+        if milli == 1000 {
+            self.inner.push(rate, samples);
+            return;
+        }
+        use fepor_core::settings::SpeedAudio;
+        if fepor_core::speed::is_uncapped() || self.settings.get().audio.speed == SpeedAudio::Mute {
+            return;
+        }
+        self.inner
+            .push((rate as u64 * milli as u64 / 1000) as u32, samples);
+    }
+}
+
 /// The audio output selected by the environment: SDL3 unless `FEPOR_NO_AUDIO` is set (played at the volume
 /// of `settings`), plus a WAV dump when `FEPOR_DUMP_AUDIO` names a file (always at full volume) and the tap
 /// of the video recorder `capture`.
@@ -237,6 +261,7 @@ pub fn open(
     capture: Arc<fepor_core::capture::Capture>,
 ) -> Option<Box<dyn AudioSink>> {
     let thread_settings = settings.clone();
+    let policy_settings = settings.clone();
     // the recorder gets the audio at full volume, as the WAV dump does
     let mut sinks: Vec<Box<dyn AudioSink>> = vec![Box::new(CaptureSink(capture))];
     if let Ok(path) = std::env::var("FEPOR_DUMP_AUDIO") {
@@ -258,8 +283,12 @@ pub fn open(
             Err(_) => {}
         }
     }
-    match sinks.len() {
-        1 => sinks.pop(),
-        _ => Some(Box::new(Tee(sinks))),
-    }
+    let inner: Box<dyn AudioSink> = match sinks.len() {
+        1 => sinks.pop()?,
+        _ => Box::new(Tee(sinks)),
+    };
+    Some(Box::new(SpeedPolicy {
+        inner,
+        settings: policy_settings,
+    }))
 }

@@ -32,20 +32,22 @@ const REWIND_STEP: Duration = Duration::from_millis(120);
 
 // ---- time ----------------------------------------------------------------------------------------------
 
-/// Microseconds from now until `t` (0 when it is past).
-pub fn until(t: Instant) -> u64 {
-    t.saturating_duration_since(Instant::now()).as_micros() as u64
+// Times in a state are guest-clock values (`crate::clock`, ADR 0036): offsets from the guest's "now", so they
+// do not depend on the speed the state was taken or is loaded at.
+
+/// Guest microseconds from now until the guest-clock time `t_ns` (0 when it is past).
+pub fn until(t_ns: u64) -> u64 {
+    t_ns.saturating_sub(crate::clock::now_ns()) / 1000
 }
 
-pub fn from_now(micros: u64) -> Instant {
-    Instant::now() + Duration::from_micros(micros)
+/// The guest-clock time `micros` guest microseconds from now.
+pub fn from_now(micros: u64) -> u64 {
+    crate::clock::now_ns() + micros * 1000
 }
 
-/// The instant `micros` microseconds ago.
-pub fn ago(micros: u64) -> Instant {
-    let now = Instant::now();
-    now.checked_sub(Duration::from_micros(micros))
-        .unwrap_or(now)
+/// The guest-clock time `micros` guest microseconds ago.
+pub fn ago(micros: u64) -> u64 {
+    crate::clock::now_ns().saturating_sub(micros * 1000)
 }
 
 // ---- capture and apply -----------------------------------------------------------------------------------
@@ -237,11 +239,8 @@ pub fn apply(c: &mut Context, blob: &[u8], source: &str) -> Result<(), String> {
     // restored memory again. The originals they saved when enabled stay as they are.
     m.patches.reapply(&mut m.ram);
     let tb = mach.u64();
-    let ns = tb as u128 * 10_000 / 405;
-    let now = Instant::now();
-    m.started = now
-        .checked_sub(Duration::from_nanos(ns as u64))
-        .unwrap_or(now);
+    // the guest clock continues from the state's time base, at the speed in force now
+    crate::clock::set_ns((tb as u128 * 10_000 / 405) as u64);
     m.enter_count = mach.u32();
     for v in &mut m.cpu_sprs {
         *v = mach.u32();
@@ -258,7 +257,10 @@ pub fn apply(c: &mut Context, blob: &[u8], source: &str) -> Result<(), String> {
     }
     sched::install(&img, ram_ptr);
     c.spr[crate::abi::SPR_UNWIND] = 1;
-    fepor_core::bugreport::note("save state", format!("a state was loaded in this run: {source}"));
+    fepor_core::bugreport::note(
+        "save state",
+        format!("a state was loaded in this run: {source}"),
+    );
     if trace_on() {
         trace_line("loaded");
     }

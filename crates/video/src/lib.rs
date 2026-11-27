@@ -476,6 +476,10 @@ pub struct Renderer {
     pending_clear: Option<([f64; 4], f32)>,
     /// Images shown per guest frame (1 = every frame as it comes).
     mult: u32,
+    /// The game runs faster than real time (ADR 0036): no interpolation, no waiting for the display, and
+    /// only some of the frames are shown. `last_fast_show` is when the last one was.
+    fast: bool,
+    last_fast_show: Option<Instant>,
     /// Internal resolution factor (`FEPOR_RES`): render targets are `scale` times the GameCube's EFB.
     scale: u32,
     /// Draws and clears go to the interpolation target (`alt_*`) while a frame is replayed.
@@ -786,6 +790,8 @@ impl Renderer {
             tex_binds: FastMap::default(),
             pstate: PassState::default(),
             mult,
+            fast: false,
+            last_fast_show: None,
             scale,
             use_alt: false,
             alt_view,
@@ -1893,7 +1899,7 @@ impl Renderer {
         self.vsync = s.video.vsync;
         self.show_stats = s.video.stats != fepor_core::settings::StatsMode::Off;
         if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
-            p.set_present(&self.device, mult > 1, self.vsync);
+            p.set_present(&self.device, mult > 1 || self.fast, self.vsync);
         }
     }
 
@@ -1949,6 +1955,7 @@ impl Renderer {
 
     fn present(&mut self, c: &CopyEfb) {
         self.frame += 1;
+        fepor_core::stats::GAME_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.hash_memo.clear();
         self.fps_frames += 1;
         self.stats_frame();
@@ -2185,7 +2192,31 @@ impl Renderer {
         if self.presenter.is_none() && self.dump.is_none() {
             return;
         }
-        if self.mult <= 1 {
+        let fast = fepor_core::speed::is_fast();
+        if fast != self.fast {
+            self.fast = fast;
+            self.prev = None;
+            self.plan = None;
+            self.rec.clear();
+            if let Some(p) = &mut self.presenter {
+                p.set_present(&self.device, self.mult > 1 || fast, self.vsync);
+            }
+        }
+        if fast {
+            // faster than the display: show a frame every 8 ms at most, never wait for the refresh
+            self.prev = None;
+            self.plan = None;
+            self.rec.clear();
+            let now = Instant::now();
+            if self
+                .last_fast_show
+                .is_some_and(|t| now - t < Duration::from_millis(8))
+            {
+                return;
+            }
+            self.last_fast_show = Some(now);
+        }
+        if self.mult <= 1 || fast {
             if let Some(p) = &mut self.presenter {
                 p.show(
                     &self.device,

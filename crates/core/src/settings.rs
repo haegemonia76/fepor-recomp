@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::speed::{Speed, SpeedAudio};
+
 /// How the 4:3 frame is fitted into the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -304,6 +306,8 @@ pub struct Audio {
     pub volume: f32,
     /// Name of the playback device; `None` follows the system default.
     pub device: Option<String>,
+    /// The sound while fast-forwarding or in slow motion.
+    pub speed: SpeedAudio,
 }
 
 impl Default for Audio {
@@ -311,6 +315,7 @@ impl Default for Audio {
         Audio {
             volume: 1.0,
             device: None,
+            speed: SpeedAudio::Pitch,
         }
     }
 }
@@ -392,6 +397,10 @@ pub struct Game {
     pub language: Language,
     /// Backup copies of the memory card kept (ticket #37); 0 turns the backups off.
     pub card_backups: u32,
+    /// The speed while the fast-forward key is held (ADR 0036).
+    pub fast_forward: Speed,
+    /// The speed while the slow-motion key is held.
+    pub slow_motion: Speed,
 }
 
 impl Default for Game {
@@ -399,6 +408,8 @@ impl Default for Game {
         Game {
             language: Language::default(),
             card_backups: 5,
+            fast_forward: Speed::X4,
+            slow_motion: Speed::Half,
         }
     }
 }
@@ -457,6 +468,12 @@ impl Settings {
         self.video.filters.clamp();
         self.video.fsr.clamp();
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
+        if !Speed::FAST.contains(&self.game.fast_forward) {
+            self.game.fast_forward = Game::default().fast_forward;
+        }
+        if !Speed::SLOW.contains(&self.game.slow_motion) {
+            self.game.slow_motion = Game::default().slow_motion;
+        }
         self.states.rewind_seconds = self.states.rewind_seconds.clamp(10, 600);
         self.game.card_backups = self.game.card_backups.min(50);
     }

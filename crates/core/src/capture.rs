@@ -161,8 +161,19 @@ impl Capture {
     /// Bring the recording in line with what was asked for (starting it with pictures of `w` x `h`, or
     /// stopping it) and say whether the renderer should deliver this frame with [`Capture::frame`].
     pub fn sync_recording(&self, w: u32, h: u32) -> bool {
-        let want = self.want_record.load(Ordering::Acquire);
+        let mut want = self.want_record.load(Ordering::Acquire);
         let mut rec = self.rec.lock().unwrap_or_else(|e| e.into_inner());
+        // a video has one frame rate and real-time sound: it is recorded at normal speed only (ADR 0036)
+        if want && crate::speed::milli() != 1000 {
+            want = false;
+            self.want_record.store(false, Ordering::Release);
+            let what = if rec.is_some() {
+                "recording stopped: the game speed changed"
+            } else {
+                "cannot record: videos are made at normal game speed only (release the fast-forward / slow-motion key)"
+            };
+            Self::say(&self.message, what.into());
+        }
         match (want, rec.is_some()) {
             (true, false) => match Recording::start(&self.data, w & !1, h & !1) {
                 Ok(r) => {
