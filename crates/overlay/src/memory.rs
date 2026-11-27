@@ -11,6 +11,9 @@ use crate::shared::Shared;
 /// Candidates listed (the guest publishes more; narrow the search to see the rest).
 const SHOWN_HITS: usize = 8;
 
+/// Wide enough for `0x80123456` and a decimal 32-bit value.
+const FIELD: f32 = 150.0;
+
 const SCRIPT_STEP_FRAMES: u32 = 45;
 
 pub struct MemoryView {
@@ -153,17 +156,31 @@ pub fn memory(ui: &mut egui::Ui, st: &mut MemoryView, shared: &Shared) {
     }
     let p = link.published();
     ui.label(
-        RichText::new(format!(
-            "Game {}. Values are copies the game thread took after frame {}; nothing here reads the game's memory directly.",
-            p.game.as_deref().unwrap_or("not selected"),
+        RichText::new(
+            "Values are copies the game thread took at a frame boundary; nothing here reads the game's memory directly.",
+        )
+        .small()
+        .weak(),
+    );
+    // the changing parts sit on a short line of fixed-width cells, so nothing above or below re-wraps
+    ui.label(
+        mono(format!(
+            "game {:<8} frame {:>9}",
+            p.game.as_deref().unwrap_or("-"),
             p.frame
         ))
         .small()
         .weak(),
     );
-    if !p.message.is_empty() {
-        ui.colored_label(crate::theme::GOLD, &p.message);
-    }
+    // always one line, so the page below does not move when a message comes or goes
+    ui.colored_label(
+        crate::theme::GOLD,
+        if p.message.is_empty() {
+            " "
+        } else {
+            &p.message
+        },
+    );
     ui.add_space(6.0);
     scan_section(ui, st, link, &p);
     ui.separator();
@@ -184,7 +201,7 @@ fn scan_section(ui: &mut egui::Ui, st: &mut MemoryView, link: &Link, p: &memwatc
             });
         ui.add(
             egui::TextEdit::singleline(&mut st.scan_value)
-                .desired_width(110.0)
+                .desired_width(FIELD)
                 .hint_text("value"),
         );
         let value = memwatch::parse_number(&st.scan_value);
@@ -271,7 +288,10 @@ fn target_section(ui: &mut egui::Ui, st: &mut MemoryView, link: &Link, p: &memwa
                 ui.label(mono(format!("{addr:08X}")));
                 ui.label(width.label());
                 match value {
-                    Some(v) => ui.label(mono(format!("{v:#0w$x}  {v}", w = 2 + 2 * width.bytes()))),
+                    Some(v) => ui.label(mono(format!(
+                        "{v:#0w$x} {v:>10}",
+                        w = 2 + 2 * width.bytes()
+                    ))),
                     None => ui.label("outside RAM"),
                 };
                 if ui.small_button("Use").clicked() {
@@ -290,7 +310,7 @@ fn target_section(ui: &mut egui::Ui, st: &mut MemoryView, link: &Link, p: &memwa
     ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut st.addr)
-                .desired_width(110.0)
+                .desired_width(FIELD)
                 .hint_text("address"),
         );
         egui::ComboBox::from_id_salt("memory_width")
@@ -302,7 +322,7 @@ fn target_section(ui: &mut egui::Ui, st: &mut MemoryView, link: &Link, p: &memwa
             });
         ui.add(
             egui::TextEdit::singleline(&mut st.value)
-                .desired_width(110.0)
+                .desired_width(FIELD)
                 .hint_text("value"),
         );
         ui.checkbox(&mut st.hold, "hold every frame");
@@ -356,7 +376,7 @@ fn target_section(ui: &mut egui::Ui, st: &mut MemoryView, link: &Link, p: &memwa
 
 fn view_section(ui: &mut egui::Ui, st: &mut MemoryView, p: &memwatch::Published) {
     ui.label(crate::theme::caption("Memory"));
-    ui.add(egui::TextEdit::singleline(&mut st.view_addr).desired_width(110.0));
+    ui.add(egui::TextEdit::singleline(&mut st.view_addr).desired_width(FIELD));
     for (i, row) in p.view.chunks(16).take(8).enumerate() {
         let hex: Vec<String> = row.iter().map(|b| format!("{b:02X}")).collect();
         let text: String = row

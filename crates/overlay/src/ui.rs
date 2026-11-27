@@ -661,7 +661,11 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     if ui
         .add_enabled(
             !choosing,
-            egui::Button::new(if choosing { "Choosing..." } else { "Import a Dolphin game INI..." }),
+            egui::Button::new(if choosing {
+                "Choosing..."
+            } else {
+                "Import a Dolphin game INI..."
+            }),
         )
         .clicked()
     {
@@ -689,7 +693,9 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     ui.separator();
     let list = shared.cheats.list();
     if list.is_empty() {
-        ui.label(format!("No codes for {game} yet. Import the game's INI (for example GFEP01.ini from Dolphin)."));
+        ui.label(format!(
+            "No codes for {game} yet. Import the game's INI (for example GFEP01.ini from Dolphin)."
+        ));
     }
     for c in list {
         let mut on = c.enabled;
@@ -699,13 +705,20 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             } else {
                 format!("{}  [{}]", c.name, c.author)
             };
-            if ui.add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label)).changed() {
+            if ui
+                .add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label))
+                .changed()
+            {
                 shared.cheats.set_enabled(&c.key, on);
             }
             ui.label(RichText::new(c.kind.label()).small().weak());
         });
         if let Err(why) = &c.supported {
-            ui.label(RichText::new(format!("    not supported: {why}")).small().weak());
+            ui.label(
+                RichText::new(format!("    not supported: {why}"))
+                    .small()
+                    .weak(),
+            );
         }
         if let Some(s) = &c.status {
             ui.colored_label(Color32::LIGHT_RED, format!("    not applied: {s}"));
