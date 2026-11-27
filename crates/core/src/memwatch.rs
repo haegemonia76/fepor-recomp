@@ -175,12 +175,13 @@ impl Scanner {
             .map_or(self.snapshot.len() / self.width.bytes(), Vec::len)
     }
 
-    /// The first `limit` candidates in address order; none while every address still is one.
-    pub fn hits(&self, ram: &[u8], limit: usize) -> Vec<Hit> {
+    /// The first `limit` candidates at or above address `from`, in address order; none while every address still is one.
+    pub fn hits(&self, ram: &[u8], from: u32, limit: usize) -> Vec<Hit> {
         let w = self.width;
         self.cands
             .iter()
             .flatten()
+            .skip_while(|&&o| o < from & 0x3FFF_FFFF)
             .take(limit)
             .map(|&o| {
                 let o = o as usize;
@@ -258,6 +259,8 @@ pub enum Request {
     /// Stop holding the value at `addr`.
     Release(u32),
     /// The bytes to publish for the hex view.
+    /// List the candidates from this address up.
+    HitsFrom(u32),
     View {
         addr: u32,
         len: u32,
@@ -353,7 +356,7 @@ mod tests {
         let r = ram(&[7, 9, 7, 0]);
         let s = Scanner::start(&r, Width::U32, Some(7));
         assert_eq!(s.count(), 2);
-        let h = s.hits(&r, 10);
+        let h = s.hits(&r, 0, 10);
         assert_eq!(
             h.iter().map(|h| h.addr).collect::<Vec<_>>(),
             [0x8000_0000, 0x8000_0008]
@@ -369,14 +372,14 @@ mod tests {
         let mut s = Scanner::start(&r, Width::U32, None);
         assert_eq!(s.count(), 4);
         assert!(
-            s.hits(&r, 10).is_empty(),
+            s.hits(&r, 0, 10).is_empty(),
             "nothing to list before the first narrowing"
         );
         r[7] = 9; // word 1: 2 -> 9
         r[15] = 0; // word 3: 4 -> 0
         s.narrow(&r, Filter::Changed);
         assert_eq!(
-            s.hits(&r, 10)
+            s.hits(&r, 0, 10)
                 .iter()
                 .map(|h| (h.addr, h.at_scan, h.now))
                 .collect::<Vec<_>>(),
@@ -385,7 +388,7 @@ mod tests {
         r[15] = 5; // only word 3 moves again
         s.narrow(&r, Filter::Unchanged);
         assert_eq!(s.count(), 1);
-        assert_eq!(s.hits(&r, 10)[0].addr, 0x8000_0004);
+        assert_eq!(s.hits(&r, 0, 10)[0].addr, 0x8000_0004);
         s.narrow(&r, Filter::Equal(1));
         assert_eq!(s.count(), 0);
     }
@@ -397,13 +400,13 @@ mod tests {
         r.copy_from_slice(&ram(&[11, 9, 5]));
         s.narrow(&r, Filter::Increased);
         assert_eq!(
-            s.hits(&r, 10).iter().map(|h| h.addr).collect::<Vec<_>>(),
+            s.hits(&r, 0, 10).iter().map(|h| h.addr).collect::<Vec<_>>(),
             [0x8000_0000]
         );
         let mut s = Scanner::start(&ram(&[10, 10, 0xFFFF_FFF0]), Width::U32, None);
         s.narrow(&r, Filter::Decreased);
         assert_eq!(
-            s.hits(&r, 10).iter().map(|h| h.addr).collect::<Vec<_>>(),
+            s.hits(&r, 0, 10).iter().map(|h| h.addr).collect::<Vec<_>>(),
             [0x8000_0004, 0x8000_0008]
         );
     }
@@ -426,7 +429,8 @@ mod tests {
         let r = vec![5u8; 64];
         let s = Scanner::start(&r, Width::U8, Some(5));
         assert_eq!(s.count(), 64);
-        assert_eq!(s.hits(&r, 3).len(), 3);
+        assert_eq!(s.hits(&r, 0, 3).len(), 3);
+        assert_eq!(s.hits(&r, 0x8000_0020, 100).len(), 32);
     }
 
     #[test]

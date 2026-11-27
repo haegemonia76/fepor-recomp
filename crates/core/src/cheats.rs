@@ -97,7 +97,9 @@ pub fn compile_gecko(lines: &[(u32, u32)]) -> Result<Vec<Write>, String> {
             ));
         }
         if a & 0x1000_0000 != 0 {
-            return Err(format!("code type {kind:02X}: pointer-relative addressing is not supported"));
+            return Err(format!(
+                "code type {kind:02X}: pointer-relative addressing is not supported"
+            ));
         }
         let bytes = match (a >> 25) & 7 {
             0 => repeat(&[d as u8], (d >> 8) + 1)?,
@@ -117,9 +119,16 @@ pub fn compile_gecko(lines: &[(u32, u32)]) -> Result<Vec<Write>, String> {
                 b.truncate(len);
                 b
             }
-            _ => return Err(format!("code type {kind:02X} (serial write) is not supported")),
+            _ => {
+                return Err(format!(
+                    "code type {kind:02X} (serial write) is not supported"
+                ))
+            }
         };
-        out.push(Write { addr: address(a), bytes });
+        out.push(Write {
+            addr: address(a),
+            bytes,
+        });
     }
     Ok(out)
 }
@@ -141,7 +150,10 @@ pub fn compile_ar(lines: &[(u32, u32)]) -> Result<Vec<Write>, String> {
             2 => d.to_be_bytes().to_vec(),
             _ => return Err("fill-and-slide write is not supported".into()),
         };
-        out.push(Write { addr: address(a), bytes });
+        out.push(Write {
+            addr: address(a),
+            bytes,
+        });
     }
     Ok(out)
 }
@@ -162,7 +174,10 @@ fn hex_line(l: &str) -> Option<(u32, u32)> {
     if it.next().is_some() || a.len() != 8 || d.len() != 8 {
         return None;
     }
-    Some((u32::from_str_radix(a, 16).ok()?, u32::from_str_radix(d, 16).ok()?))
+    Some((
+        u32::from_str_radix(a, 16).ok()?,
+        u32::from_str_radix(d, 16).ok()?,
+    ))
 }
 
 /// `Name [Author]` header text after the `$`.
@@ -170,7 +185,10 @@ fn split_author(h: &str) -> (String, String) {
     let h = h.trim();
     if let Some(body) = h.strip_suffix(']') {
         if let Some(i) = body.rfind(" [") {
-            return (body[..i].trim().to_string(), body[i + 2..].trim().to_string());
+            return (
+                body[..i].trim().to_string(),
+                body[i + 2..].trim().to_string(),
+            );
         }
     }
     (h.to_string(), String::new())
@@ -217,7 +235,8 @@ pub fn parse_ini(text: &str) -> Ini {
             Section::None => {}
             Section::Enabled(kind) => {
                 if let Some(h) = line.strip_prefix('$') {
-                    ini.enabled.push(format!("{}:{}", kind.tag(), split_author(h).0));
+                    ini.enabled
+                        .push(format!("{}:{}", kind.tag(), split_author(h).0));
                 }
             }
             Section::Codes(kind) => {
@@ -295,8 +314,12 @@ pub struct CheatStore {
 }
 
 fn overlaps_code(w: &Write, code: &[std::ops::Range<u32>]) -> bool {
-    let (s, e) = (w.addr & 0x01FF_FFFF, (w.addr & 0x01FF_FFFF) as u64 + w.bytes.len() as u64);
-    code.iter().any(|r| (s as u64) < r.end as u64 && e > r.start as u64)
+    let (s, e) = (
+        w.addr & 0x01FF_FFFF,
+        (w.addr & 0x01FF_FFFF) as u64 + w.bytes.len() as u64,
+    );
+    code.iter()
+        .any(|r| (s as u64) < r.end as u64 && e > r.start as u64)
 }
 
 impl CheatStore {
@@ -357,7 +380,10 @@ impl CheatStore {
         for c in &mut ini.cheats {
             if let Ok(w) = &c.writes {
                 if w.iter().any(|w| overlaps_code(w, &inner.code)) {
-                    c.writes = Err("writes into the game's code, which is recompiled: it would change nothing".into());
+                    c.writes = Err(
+                        "writes into the game's code, which is recompiled: it would change nothing"
+                            .into(),
+                    );
                 }
             }
         }
@@ -375,7 +401,9 @@ impl CheatStore {
     /// Select the running game: loads `<data>/cheats/<id>.ini` and the enabled list of `<data>/cheats.toml` (the
     /// INI's own `_Enabled` lists the first time). `code` are the guest address ranges of the game's code.
     pub fn set_game(&self, game: &str, code: Vec<std::ops::Range<u32>>) {
-        let ini = std::fs::read_to_string(self.ini_path(game)).map(|t| parse_ini(&t)).unwrap_or_default();
+        let ini = std::fs::read_to_string(self.ini_path(game))
+            .map(|t| parse_ini(&t))
+            .unwrap_or_default();
         let enabled = self
             .load_saved()
             .enabled
@@ -424,17 +452,25 @@ impl CheatStore {
     /// Codes that were on stay on, and so do those the file lists as enabled. Returns the number of codes.
     pub fn import(&self, file: &Path) -> Result<usize, String> {
         let game = self.game().ok_or("no game is running")?;
-        let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        let text = std::fs::read_to_string(file)
+            .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
         let ini = parse_ini(&text);
         if ini.cheats.is_empty() {
             return Err("the file has no [Gecko] or [ActionReplay] codes".into());
         }
         let dest = self.ini_path(&game);
-        std::fs::create_dir_all(dest.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
-        std::fs::write(&dest, &text).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+        std::fs::create_dir_all(dest.parent().unwrap_or(Path::new(".")))
+            .map_err(|e| e.to_string())?;
+        std::fs::write(&dest, &text)
+            .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
         let n = ini.cheats.len();
         let mut inner = self.lock();
-        let mut enabled: Vec<String> = inner.entries.iter().filter(|e| e.enabled).map(|e| e.cheat.key()).collect();
+        let mut enabled: Vec<String> = inner
+            .entries
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.cheat.key())
+            .collect();
         enabled.extend(ini.enabled.iter().cloned());
         Self::fill(&mut inner, ini, &enabled);
         self.save(&inner);
@@ -448,13 +484,24 @@ impl CheatStore {
             .entries
             .iter()
             .filter(|e| e.enabled)
-            .filter_map(|e| Some((e.cheat.key(), e.cheat.name.clone(), e.cheat.writes.clone().ok()?)))
+            .filter_map(|e| {
+                Some((
+                    e.cheat.key(),
+                    e.cheat.name.clone(),
+                    e.cheat.writes.clone().ok()?,
+                ))
+            })
             .collect()
     }
 
     /// The guest thread reports why a wanted code is not applied (`None`: it is). Does not move the generation.
     pub fn set_status(&self, key: &str, status: Option<String>) {
-        if let Some(e) = self.lock().entries.iter_mut().find(|e| e.cheat.key() == key) {
+        if let Some(e) = self
+            .lock()
+            .entries
+            .iter_mut()
+            .find(|e| e.cheat.key() == key)
+        {
             e.status = status;
         }
     }
@@ -499,7 +546,10 @@ $Ignored
 ";
 
     fn find<'a>(i: &'a Ini, n: &str) -> &'a Cheat {
-        i.cheats.iter().find(|c| c.name == n).unwrap_or_else(|| panic!("{n}"))
+        i.cheats
+            .iter()
+            .find(|c| c.name == n)
+            .unwrap_or_else(|| panic!("{n}"))
     }
 
     #[test]
@@ -518,17 +568,26 @@ $Ignored
         let ini = parse_ini(INI);
         assert_eq!(
             find(&ini, "Infinite Money").writes,
-            Ok(vec![Write { addr: 0x8042_A000, bytes: vec![0, 1, 0x86, 0x9F] }])
+            Ok(vec![Write {
+                addr: 0x8042_A000,
+                bytes: vec![0, 1, 0x86, 0x9F]
+            }])
         );
         // 16-bit: count = 2 + 1 of BEEF
         assert_eq!(
             find(&ini, "Fill 16").writes,
-            Ok(vec![Write { addr: 0x8000_1000, bytes: [0xBE, 0xEF].repeat(3) }])
+            Ok(vec![Write {
+                addr: 0x8000_1000,
+                bytes: [0xBE, 0xEF].repeat(3)
+            }])
         );
         // string of 11 bytes over two data lines, the tail of the last line is cut
         assert_eq!(
             find(&ini, "Text").writes,
-            Ok(vec![Write { addr: 0x8000_1100, bytes: b"Hello world".to_vec() }])
+            Ok(vec![Write {
+                addr: 0x8000_1100,
+                bytes: b"Hello world".to_vec()
+            }])
         );
     }
 
@@ -537,8 +596,16 @@ $Ignored
         let ini = parse_ini(INI);
         let e = find(&ini, "Needs a condition").writes.clone().unwrap_err();
         assert!(e.contains("20"), "{e}");
-        assert!(find(&ini, "Bad line").writes.clone().unwrap_err().contains("unreadable"));
-        assert!(find(&ini, "AR Conditional").writes.clone().unwrap_err().contains("C8"));
+        assert!(find(&ini, "Bad line")
+            .writes
+            .clone()
+            .unwrap_err()
+            .contains("unreadable"));
+        assert!(find(&ini, "AR Conditional")
+            .writes
+            .clone()
+            .unwrap_err()
+            .contains("C8"));
     }
 
     #[test]
@@ -547,8 +614,14 @@ $Ignored
         assert_eq!(
             find(&ini, "AR Write").writes,
             Ok(vec![
-                Write { addr: 0x8000_2000, bytes: vec![0x12, 0x34, 0x56, 0x78] },
-                Write { addr: 0x8000_2010, bytes: vec![0; 4] },
+                Write {
+                    addr: 0x8000_2000,
+                    bytes: vec![0x12, 0x34, 0x56, 0x78]
+                },
+                Write {
+                    addr: 0x8000_2010,
+                    bytes: vec![0; 4]
+                },
             ])
         );
     }
@@ -557,10 +630,17 @@ $Ignored
     fn upper_cache_bit_and_pointer_flag() {
         assert_eq!(
             compile_gecko(&[(0x0501_0000, 7)]).unwrap(),
-            vec![Write { addr: 0x8101_0000, bytes: vec![0, 0, 0, 7] }]
+            vec![Write {
+                addr: 0x8101_0000,
+                bytes: vec![0, 0, 0, 7]
+            }]
         );
-        assert!(compile_gecko(&[(0x1400_0000, 7)]).unwrap_err().contains("pointer"));
-        assert!(compile_gecko(&[(0x0800_0000, 7), (0, 0)]).unwrap_err().contains("serial"));
+        assert!(compile_gecko(&[(0x1400_0000, 7)])
+            .unwrap_err()
+            .contains("pointer"));
+        assert!(compile_gecko(&[(0x0800_0000, 7), (0, 0)])
+            .unwrap_err()
+            .contains("serial"));
     }
 
     #[test]
@@ -576,10 +656,20 @@ $Ignored
         assert_eq!(s.import(&file).unwrap(), 7);
         let list = s.list();
         // enabled by the file's own list
-        assert!(list.iter().find(|c| c.name == "Infinite Money").unwrap().enabled);
+        assert!(
+            list.iter()
+                .find(|c| c.name == "Infinite Money")
+                .unwrap()
+                .enabled
+        );
         assert!(list.iter().find(|c| c.name == "AR Write").unwrap().enabled);
         // `Fill 16` writes over the code range: unsupported
-        assert!(list.iter().find(|c| c.name == "Fill 16").unwrap().supported.is_err());
+        assert!(list
+            .iter()
+            .find(|c| c.name == "Fill 16")
+            .unwrap()
+            .supported
+            .is_err());
         let g = s.generation();
         s.set_enabled("gecko:Infinite Money", false);
         s.set_enabled("gecko:Fill 16", true);
@@ -589,7 +679,12 @@ $Ignored
         let again = CheatStore::new(data);
         again.set_game("GFEP01", vec![0x1000..0x1004]);
         let l = again.list();
-        assert!(!l.iter().find(|c| c.name == "Infinite Money").unwrap().enabled);
+        assert!(
+            !l.iter()
+                .find(|c| c.name == "Infinite Money")
+                .unwrap()
+                .enabled
+        );
         assert!(l.iter().find(|c| c.name == "AR Write").unwrap().enabled);
         assert_eq!(again.wanted().len(), 1);
     }

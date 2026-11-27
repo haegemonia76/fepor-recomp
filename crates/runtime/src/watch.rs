@@ -20,6 +20,7 @@ pub struct Watcher {
     link: Arc<Link>,
     scan: Option<Scanner>,
     view: (u32, u32),
+    hits_from: u32,
     watches: Vec<(u32, Width)>,
     held: Vec<(Held, SetId)>,
     message: String,
@@ -37,6 +38,7 @@ impl Watcher {
             link,
             scan: None,
             view: (0x8000_0000, 64),
+            hits_from: 0,
             watches: Vec::new(),
             held: Vec::new(),
             message: String::new(),
@@ -87,6 +89,7 @@ impl Watcher {
             }
             Request::View { addr, len } => self.view = (addr, len.min(VIEW_MAX)),
             Request::Watch(w) => self.watches = w,
+            Request::HitsFrom(a) => self.hits_from = a,
         }
     }
 
@@ -162,7 +165,7 @@ impl Watcher {
             scan: self.scan.as_ref().map(|s| ScanInfo {
                 width: Some(s.width()),
                 count: s.count(),
-                hits: s.hits(main, HITS),
+                hits: s.hits(main, self.hits_from, HITS),
             }),
             view_addr: va,
             view,

@@ -8,8 +8,10 @@ use fepor_core::memwatch::{self, Filter, Link, Request, Width};
 use crate::shared::Shared;
 
 /// Painted frames between two steps of `FEPOR_MEMSCRIPT`, so that the game runs between them.
-/// Candidates listed (the guest publishes more; narrow the search to see the rest).
-const SHOWN_HITS: usize = 8;
+/// Candidates written to the state file (the page lists every published one, in a scroll area).
+const STATE_HITS: usize = 8;
+/// Height of the candidate list: fixed, so the page does not move as the search narrows.
+const LIST_HEIGHT: f32 = 200.0;
 
 /// Wide enough for `0x80123456` and a decimal 32-bit value.
 const FIELD: f32 = 150.0;
@@ -43,6 +45,8 @@ pub struct MemoryView {
     /// `FEPOR_MEMSCRIPT_FILE`: polled for appended steps; the page's state goes to `<file>.state`.
     live: Option<Live>,
     sent_view: Option<(u32, u32)>,
+    hits_from: String,
+    sent_from: Option<u32>,
 }
 
 impl MemoryView {
@@ -76,6 +80,8 @@ impl MemoryView {
                 last_state: String::new(),
             }),
             sent_view: None,
+            hits_from: "0x80000000".into(),
+            sent_from: None,
         }
     }
 
@@ -216,11 +222,8 @@ fn state_text(p: &memwatch::Published) -> String {
     match &p.scan {
         Some(scan) => {
             s += &format!("candidates {}\n", scan.count);
-            for h in scan.hits.iter().take(SHOWN_HITS) {
-                s += &format!(
-                    "candidate {:08X} before {} now {}\n",
-                    h.addr, h.at_scan, h.now
-                );
+            for h in scan.hits.iter().take(STATE_HITS) {
+                s += &format!("candidate {:08X} was {} now {}\n", h.addr, h.at_scan, h.now);
             }
         }
         None => s += "candidates none\n",
@@ -346,32 +349,54 @@ fn scan_section(ui: &mut egui::Ui, st: &mut MemoryView, link: &Link, p: &memwatc
         return;
     };
     let width = scan.width.unwrap_or(Width::U32);
-    egui::Grid::new("memory_hits")
-        .num_columns(4)
-        .striped(true)
-        .show(ui, |ui| {
-            for h in scan.hits.iter().take(SHOWN_HITS) {
-                ui.label(mono(format!("{:08X}", h.addr)));
-                ui.label(mono(format!("{:>10} -> {:>10}", h.at_scan, h.now)));
-                if ui.small_button("Use").clicked() {
-                    st.select(h.addr, width, Some(h.now));
-                }
-                if ui.small_button("Watch").clicked() {
-                    st.watch(link, h.addr, width);
-                }
-                ui.end_row();
+    ui.horizontal(|ui| {
+        ui.label("Show from address");
+        let r = ui.add(egui::TextEdit::singleline(&mut st.hits_from).desired_width(FIELD));
+        if r.changed() || st.sent_from.is_none() {
+            let from = memwatch::parse_number(&st.hits_from).unwrap_or(0);
+            if st.sent_from != Some(from) {
+                link.send(Request::HitsFrom(from));
+                st.sent_from = Some(from);
             }
+        }
+        ui.label(mono(format!(
+            "{:>3} shown of {:>9}",
+            scan.hits.len(),
+            scan.count
+        )));
+    });
+    egui::ScrollArea::vertical()
+        .id_salt("memory_hits_scroll")
+        .min_scrolled_height(LIST_HEIGHT)
+        .max_height(LIST_HEIGHT)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Grid::new("memory_hits")
+                .num_columns(3)
+                .striped(true)
+                .show(ui, |ui| {
+                    for h in &scan.hits {
+                        ui.label(mono(format!(
+                            "{:08X}  was {:>10}  now {:>10}",
+                            h.addr, h.at_scan, h.now
+                        )));
+                        if ui.small_button("Use").clicked() {
+                            st.select(h.addr, width, Some(h.now));
+                        }
+                        if ui.small_button("Watch").clicked() {
+                            st.watch(link, h.addr, width);
+                        }
+                        ui.end_row();
+                    }
+                });
         });
-    if scan.count > SHOWN_HITS {
-        ui.label(
-            RichText::new(format!(
-                "{} more: narrow the search",
-                scan.count - SHOWN_HITS
-            ))
-            .small()
-            .weak(),
-        );
-    }
+    ui.label(
+        RichText::new(
+            "was = value at the previous search step, now = value in memory at the latest frame. Lowest addresses first; raise \"Show from address\" or narrow the search to see others.",
+        )
+        .small()
+        .weak(),
+    );
 }
 
 fn target_section(ui: &mut egui::Ui, st: &mut MemoryView, link: &Link, p: &memwatch::Published) {
