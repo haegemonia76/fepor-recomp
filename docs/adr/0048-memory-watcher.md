@@ -48,6 +48,8 @@ value = 0x00000063
 
 `settings.toml` `developer = true` (checkbox on the Help page, or `FEPOR_DEVELOPER=1` for one run) adds the Memory tab; `FEPOR_OVERLAY=memory` opens it directly. For headless runs and the documentation, `FEPOR_MEMSCRIPT` runs steps in the words of the buttons, separated by `;`, one every 45 painted frames (a frame is painted per presented/dumped image): `new u32 unknown`, `new u16 equal 5`, `changed`, `unchanged`, `inc`, `dec`, `equal N`, `watch ADDR [width]`, `view ADDR`, `poke ADDR width VALUE [hold]`, `select ADDR width [value]`.
 
+**Live steps.** `FEPOR_MEMSCRIPT_FILE=<path>` is polled every 10 painted images; each new whole line appended since the last read is one step (same words as above, plus `clear`, `release ADDR`, and `write`/`hold ADDR width VALUE`; blank lines and `#` comments ignored), run one per 10 images. Steps run whether or not the overlay or the page is shown (the guest hook serves requests regardless). The page's state is rewritten to `<path>.state` when it changes (`game`, `message`, `candidates N`, up to 8 `candidate ADDR before B now N`, `watch ADDR width value`, `held ADDR value`), and the guest keeps publishing while the variable is set, so a script can drive a game it has to play to a given point and read results without screenshots.
+
 ## Limits
 
 No floats or strings, no breakpoints (a "light" debugger: it cannot stop the game), no pointer chains. The watch list and hex view are not persisted. The 200 published hits are the lowest addresses; the page lists the first few (narrow the search to see others). Candidates in the 32-bit search include timers and counters; finding the right one needs a few meaningful steps in the game.

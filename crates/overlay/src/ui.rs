@@ -93,6 +93,15 @@ pub struct UiState {
 }
 
 impl UiState {
+    /// Scripted memory-page steps run whether or not the page (or the overlay) is shown.
+    pub fn memory_tick(&mut self, shared: &Shared) {
+        self.memory.tick(&shared.memory);
+    }
+
+    pub fn memory_live(&self) -> bool {
+        self.memory.live()
+    }
+
     pub fn new(page: Page) -> UiState {
         UiState {
             page,
@@ -143,7 +152,9 @@ pub fn show(
 ) {
     use fepor_core::settings::StatsMode;
     // the guest thread publishes memory copies only while the page is shown
-    shared.memory.set_active(open && st.page == Page::Memory);
+    shared
+        .memory
+        .set_active((open && st.page == Page::Memory) || st.memory.live());
     // the statistics go first so that the settings panel, painted after, covers them
     if stats != StatsMode::Off {
         stats_hud(root, &shared.stats(), stats == StatsMode::Full);

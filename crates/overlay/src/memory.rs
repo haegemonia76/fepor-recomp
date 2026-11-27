@@ -15,6 +15,16 @@ const SHOWN_HITS: usize = 8;
 const FIELD: f32 = 150.0;
 
 const SCRIPT_STEP_FRAMES: u32 = 45;
+/// Painted frames between two polls of `FEPOR_MEMSCRIPT_FILE` and between its steps.
+const LIVE_POLL_FRAMES: u32 = 10;
+
+struct Live {
+    path: std::path::PathBuf,
+    /// Lines of the file already queued.
+    read: usize,
+    polls: u32,
+    last_state: String,
+}
 
 pub struct MemoryView {
     scan_width: Width,
@@ -30,6 +40,8 @@ pub struct MemoryView {
     /// Remaining steps of `FEPOR_MEMSCRIPT` (first is next) and the painted frames until it runs.
     script: Vec<String>,
     script_wait: u32,
+    /// `FEPOR_MEMSCRIPT_FILE`: polled for appended steps; the page's state goes to `<file>.state`.
+    live: Option<Live>,
     sent_view: Option<(u32, u32)>,
 }
 
@@ -57,6 +69,12 @@ impl MemoryView {
             name: "Found value".into(),
             script,
             script_wait: SCRIPT_STEP_FRAMES,
+            live: std::env::var_os("FEPOR_MEMSCRIPT_FILE").map(|p| Live {
+                path: p.into(),
+                read: 0,
+                polls: 0,
+                last_state: String::new(),
+            }),
             sent_view: None,
         }
     }
@@ -110,11 +128,13 @@ impl MemoryView {
             ["watch", a] => self.watch(link, num(a)?, Width::U32),
             ["watch", a, w] => self.watch(link, num(a)?, width(w)?),
             ["view", a] => self.view_addr = format!("{:#010x}", num(a)?),
-            ["poke", a, w, v, rest @ ..] => {
+            ["clear"] => link.send(Request::ClearScan),
+            ["release", a] => link.send(Request::Release(num(a)?)),
+            [cmd @ ("poke" | "write" | "hold"), a, w, v, rest @ ..] => {
                 self.addr = a.to_string();
                 self.width = width(w)?;
                 self.value = v.to_string();
-                self.poke(link, rest == ["hold"])?;
+                self.poke(link, *cmd == "hold" || rest == ["hold"])?;
             }
             ["select", a, w] => self.select(num(a)?, width(w)?, None),
             ["select", a, w, v] => self.select(num(a)?, width(w)?, Some(num(v)?)),
@@ -127,25 +147,102 @@ impl MemoryView {
     }
 }
 
+impl MemoryView {
+    /// Whether the guest thread must keep publishing for the state file.
+    pub fn live(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// Once per painted image, drawn page or not: poll the step file, run one scripted step when due, and
+    /// rewrite the state file when the page's state changed.
+    pub fn tick(&mut self, link: &Link) {
+        if let Some(l) = &mut self.live {
+            l.polls += 1;
+            if l.polls % LIVE_POLL_FRAMES == 1 {
+                if let Ok(text) = std::fs::read_to_string(&l.path) {
+                    // only whole lines: a line still being written has no newline yet
+                    let whole = text.rfind('\n').map_or("", |i| &text[..i]);
+                    let lines: Vec<&str> = if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        whole.lines().collect()
+                    };
+                    for line in lines.iter().skip(l.read) {
+                        let line = line.trim();
+                        if !line.is_empty() && !line.starts_with('#') {
+                            self.script.insert(0, line.to_owned());
+                        }
+                    }
+                    l.read = lines.len().max(l.read);
+                }
+            }
+        }
+        if !self.script.is_empty() {
+            if self.script_wait == 0 {
+                let step = self.script.pop().unwrap_or_default();
+                if let Err(e) = self.run_step(link, &step) {
+                    eprintln!("memory script: {e}");
+                }
+                self.script_wait = if self.live.is_some() {
+                    LIVE_POLL_FRAMES
+                } else {
+                    SCRIPT_STEP_FRAMES
+                };
+            } else {
+                self.script_wait -= 1;
+            }
+        }
+        if let Some(l) = &mut self.live {
+            let state = state_text(&link.published());
+            if state != l.last_state {
+                let mut name = l.path.clone().into_os_string();
+                name.push(".state");
+                if let Err(e) = std::fs::write(&name, &state) {
+                    eprintln!("memory state: {e}");
+                }
+                l.last_state = state;
+            }
+        }
+    }
+}
+
+/// The page's results as text for scripts: the message, the candidates and the watch list.
+fn state_text(p: &memwatch::Published) -> String {
+    let mut s = format!(
+        "game {}\nmessage {}\n",
+        p.game.as_deref().unwrap_or("-"),
+        p.message
+    );
+    match &p.scan {
+        Some(scan) => {
+            s += &format!("candidates {}\n", scan.count);
+            for h in scan.hits.iter().take(SHOWN_HITS) {
+                s += &format!(
+                    "candidate {:08X} before {} now {}\n",
+                    h.addr, h.at_scan, h.now
+                );
+            }
+        }
+        None => s += "candidates none\n",
+    }
+    for (a, w, v) in &p.watches {
+        match v {
+            Some(v) => s += &format!("watch {a:08X} {} {v}\n", w.label()),
+            None => s += &format!("watch {a:08X} {} outside\n", w.label()),
+        }
+    }
+    for h in &p.held {
+        s += &format!("held {:08X} {}\n", h.addr, h.value);
+    }
+    s
+}
+
 fn mono(s: impl Into<String>) -> RichText {
     RichText::new(s).monospace()
 }
 
 pub fn memory(ui: &mut egui::Ui, st: &mut MemoryView, shared: &Shared) {
     let link = &*shared.memory;
-    // the script runs one step at a time
-    if !st.script.is_empty() {
-        if st.script_wait == 0 {
-            let step = st.script.pop().unwrap_or_default();
-            if let Err(e) = st.run_step(link, &step) {
-                eprintln!("memory script: {e}");
-            }
-            st.script_wait = SCRIPT_STEP_FRAMES;
-        } else {
-            st.script_wait -= 1;
-        }
-        ui.ctx().request_repaint();
-    }
     let view_req = memwatch::parse_number(&st.view_addr).map(|a| (a, 128));
     if let Some(v) = view_req.filter(|v| st.sent_view != Some(*v)) {
         link.send(Request::View {
