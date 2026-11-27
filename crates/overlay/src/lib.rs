@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fepor_core::settings::StatsMode;
-pub use shared::Shared;
+pub use shared::{ReportHook, Shared};
 pub use stats::{StatsSnapshot, ThreadLoad};
 
 pub struct Overlay {

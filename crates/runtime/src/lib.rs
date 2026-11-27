@@ -16,6 +16,7 @@ pub mod hw;
 pub mod intr;
 pub mod machine;
 pub mod patch;
+pub mod report;
 pub mod sched;
 pub mod si;
 pub mod trace;

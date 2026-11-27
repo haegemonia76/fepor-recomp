@@ -100,6 +100,15 @@ pub struct PatchEngine {
     watcher: Option<crate::watch::Watcher>,
 }
 
+/// The sets and their state as text, kept up to date by the engine for bug reports (the engine itself
+/// belongs to the guest thread).
+static SUMMARY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// What the patch engine holds, by source: enabled or not, patches and bytes. No contents.
+pub fn summary() -> String {
+    SUMMARY.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 fn phys(ea: u32) -> usize {
     (ea & 0x3FFF_FFFF) as usize
 }
@@ -123,6 +132,27 @@ impl PatchEngine {
     /// Serve the memory watcher's requests from the per-frame hook.
     pub fn attach_watcher(&mut self, link: std::sync::Arc<fepor_core::memwatch::Link>) {
         self.watcher = Some(crate::watch::Watcher::new(link));
+    }
+
+    fn publish(&self) {
+        let mut v: Vec<String> = self
+            .sets
+            .values()
+            .map(|e| {
+                format!(
+                    "{}: {}, {} patches, {} bytes{}",
+                    e.set.source,
+                    if e.saved.is_some() { "enabled" } else { "disabled" },
+                    e.set.patches.len(),
+                    e.set.patches.iter().map(|p| p.bytes.len()).sum::<usize>(),
+                    if e.set.continuous { ", continuous" } else { "" }
+                )
+            })
+            .collect();
+        v.sort();
+        let mut t = format!("game: {}\nframes run: {}\n", self.game.as_deref().unwrap_or("none"), self.frames);
+        t.extend(v.iter().map(|l| format!("{l}\n")));
+        *SUMMARY.lock().unwrap_or_else(|e| e.into_inner()) = t;
     }
 
     pub fn game(&self) -> Option<&str> {
@@ -150,13 +180,16 @@ impl PatchEngine {
         let id = SetId(self.next);
         self.next += 1;
         self.sets.insert(id, Entry { set, saved: None });
+        self.publish();
         Ok(id)
     }
 
     /// Drop a set, reverting it first when enabled.
     pub fn unregister(&mut self, id: SetId, ram: &mut [u8]) -> Result<PatchSet, PatchError> {
         self.disable(id, ram)?;
-        Ok(self.sets.remove(&id).ok_or(PatchError::NoSuchSet)?.set)
+        let set = self.sets.remove(&id).ok_or(PatchError::NoSuchSet)?.set;
+        self.publish();
+        Ok(set)
     }
 
     pub fn is_enabled(&self, id: SetId) -> bool {
@@ -215,6 +248,7 @@ impl PatchEngine {
             );
         }
         e.saved = Some(saved);
+        self.publish();
         Ok(())
     }
 
@@ -230,6 +264,7 @@ impl PatchEngine {
             if self.trace {
                 eprintln!("patch: disabled {:?}", e.set.source);
             }
+            self.publish();
         }
         Ok(())
     }

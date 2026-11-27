@@ -191,6 +191,8 @@ struct App {
     rx: Option<Receiver<Msg>>,
     child: Option<Arc<Mutex<Child>>>,
     cancelled: bool,
+    /// Where the last bug report went, or why it failed.
+    report: Option<Result<String, String>>,
     mods: ModsPanel,
 }
 
@@ -214,6 +216,7 @@ impl App {
             rx: None,
             child: None,
             cancelled: false,
+            report: None,
             mods: ModsPanel::default(),
         }
     }
@@ -451,7 +454,29 @@ impl eframe::App for App {
                 {
                     self.start(ctx);
                 }
+                if ui
+                    .add_enabled(
+                        !running && !self.output.trim().is_empty(),
+                        egui::Button::new("Bug report"),
+                    )
+                    .on_hover_text("Zip the log, settings and system information (no saves, no game data) to attach to a report")
+                    .clicked()
+                {
+                    self.report = Some(
+                        fepor_core::bugreport::create_default(Path::new(self.output.trim()), Default::default())
+                            .map(|p| p.display().to_string()),
+                    );
+                }
             });
+            match &self.report {
+                Some(Ok(p)) => {
+                    ui.label(format!("Saved {p}"));
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(egui::Color32::from_rgb(200, 70, 60), e);
+                }
+                None => {}
+            }
 
             if running || self.progress > 0.0 {
                 ui.add_space(8.0);

@@ -1,6 +1,9 @@
 //! Core library shared by the CLI and GUI: configuration, disc reading, extraction.
 
 pub mod analysis;
+pub mod anonymise;
+pub mod applog;
+pub mod bugreport;
 pub mod cheats;
 pub mod config;
 pub mod disc;

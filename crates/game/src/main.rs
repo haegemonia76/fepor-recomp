@@ -50,6 +50,72 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(default_data_dir)
 }
 
+/// What a bug report says about the game: ID, version, region, and the kind and size of the copy (never
+/// its path: the folder is only recorded so that the report can remove it).
+fn note_game(data: &std::path::Path, game: &std::path::Path, v: &version::Version) {
+    let region = match v.game_id.as_bytes().get(3) {
+        Some(b'P') => "Europe",
+        Some(b'E') => "USA",
+        Some(b'J') => "Japan",
+        _ => "unknown",
+    };
+    let copy = match std::fs::metadata(game) {
+        Ok(m) if m.is_file() => format!(
+            "disc image .{}, {} bytes",
+            game.extension().and_then(|e| e.to_str()).unwrap_or("?"),
+            m.len()
+        ),
+        _ => "extracted folder".into(),
+    };
+    fepor_core::bugreport::update_session(data, |s| {
+        s.game_id = v.game_id.into();
+        s.disc_dir = if game.is_dir() { game } else { game.parent().unwrap_or(game) }
+            .to_string_lossy()
+            .into_owned();
+    });
+    fepor_core::bugreport::note(
+        "game",
+        format!("game ID: {}\nversion: {}\nregion: {region}\ncopy: {copy}", v.game_id, v.name),
+    );
+}
+
+/// What the game process records for `fepor-recomp bug-report` at start: build, engine, the `FEPOR_*` and
+/// `RECOMPLAUNCHER_*` variables and the command line (the report anonymises them).
+fn note_start(data: &std::path::Path) {
+    fepor_core::bugreport::update_session(data, |s| {
+        s.build = fepor_core::bugreport::build_string();
+        s.engine = if cfg!(feature = "jit") { "jit" } else { "cpp" }.into();
+        s.trace = std::env::var("FEPOR_TRACE").unwrap_or_default();
+    });
+    let mut vars: Vec<String> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("FEPOR_") || k.starts_with("RECOMPLAUNCHER_"))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    vars.sort();
+    fepor_core::bugreport::note(
+        "environment",
+        if vars.is_empty() { "no FEPOR_* or RECOMPLAUNCHER_* variables set".into() } else { vars.join("\n") },
+    );
+    let args: Vec<String> = std::env::args().collect();
+    fepor_core::bugreport::note("arguments", args.join(" "));
+}
+
+/// The state the Help page's bug report adds: the guest machine and the compiler.
+fn report_sections(started: std::time::Instant) -> Vec<(String, String)> {
+    let mut v = vec![
+        (
+            "session".to_string(),
+            format!("running for {} s (playtime this session)", started.elapsed().as_secs()),
+        ),
+        ("runtime".to_string(), fepor_runtime::report::state()),
+    ];
+    #[cfg(feature = "jit")]
+    if let Some(j) = fepor_jit::Jit::global() {
+        v.push(("jit".to_string(), j.summary()));
+    }
+    v
+}
+
 /// `.gci` saves dropped in `imports` are put on the card image at `card` (and renamed `.imported`). The card
 /// must already be formatted: format it in the game first.
 fn import_saves(card: &std::path::Path, imports: &std::path::Path) {
@@ -282,7 +348,8 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     let mods = fepor_core::mods::ModList::load(&data);
     disc = replace_files(disc, &mods, &game_id)?;
     let bytes = disc.dol().map_err(|e| e.to_string())?;
-    version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
+    let version = version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
+    note_game(&data, &game, version);
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
     #[cfg(feature = "jit")]
     install_jit(disc.game_id(), &dol);
@@ -337,7 +404,7 @@ fn spawn_guest(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>)
                 }
                 Err(_) => 70,
             };
-            std::process::exit(code);
+            fepor_core::applog::exit(code);
         })
         .expect("spawn guest thread");
 }
@@ -397,7 +464,7 @@ impl ApplicationHandler<()> for App {
             }
             Err(e) => {
                 eprintln!("error: cannot create a window: {e}");
-                std::process::exit(1);
+                fepor_core::applog::exit(1);
             }
         }
     }
@@ -412,7 +479,7 @@ impl ApplicationHandler<()> for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => std::process::exit(0),
+            WindowEvent::CloseRequested => fepor_core::applog::exit(0),
             WindowEvent::Focused(false) => {
                 if let Ok(mut c) = self.controls.lock() {
                     c.release_keyboard();
@@ -442,8 +509,13 @@ impl ApplicationHandler<()> for App {
 fn main() {
     // FEPOR_HEADLESS=1 renders without a window (frame dumps); FEPOR_NO_VIDEO=1 does not render at all.
     let data = data_dir();
+    fepor_core::applog::install(&data);
+    fepor_core::bugreport::init(&data);
+    note_start(&data);
     let controls = Arc::new(Mutex::new(Controls::new(data.join("input.toml"))));
     let overlay = fepor_overlay::Shared::new(SettingsHandle::load(&data), controls.clone(), data);
+    let started = std::time::Instant::now();
+    overlay.set_report_hook(Box::new(move || report_sections(started)));
     if std::env::var_os("FEPOR_HEADLESS").is_some() || std::env::var_os("FEPOR_NO_VIDEO").is_some()
     {
         spawn_guest(None, overlay);
@@ -455,7 +527,7 @@ fn main() {
         .build()
         .unwrap_or_else(|e| {
             eprintln!("error: no display ({e}); set FEPOR_HEADLESS=1 to run without a window");
-            std::process::exit(1)
+            fepor_core::applog::exit(1)
         });
     el.set_control_flow(ControlFlow::Wait);
     let mut app = App {
@@ -467,6 +539,6 @@ fn main() {
     };
     if let Err(e) = el.run_app(&mut app) {
         eprintln!("error: {e}");
-        std::process::exit(1);
+        fepor_core::applog::exit(1);
     }
 }

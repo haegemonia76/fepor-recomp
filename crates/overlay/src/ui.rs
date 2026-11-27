@@ -1012,6 +1012,19 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         shared.settings.update(|x| x.developer = developer);
     }
     ui.add_space(6.0);
+    if ui.button("Make bug report").clicked() {
+        shared.request_report();
+    }
+    ui.label(
+        RichText::new("A zip with the log, settings, bindings, system and game state and the picture on screen. No saves, no game data; names, paths and addresses are anonymised. Attach it to the report.")
+            .small()
+            .weak(),
+    );
+    let message = shared.report_message();
+    if !message.is_empty() {
+        ui.label(message);
+    }
+    ui.add_space(6.0);
     ui.label(
         RichText::new("FEPOR_FPS_MULT, FEPOR_RES and FEPOR_ASPECT override the saved video settings for one run.")
             .small()
