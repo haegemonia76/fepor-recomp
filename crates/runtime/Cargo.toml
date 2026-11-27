@@ -12,6 +12,7 @@ dispatch = []
 [dependencies]
 fepor-core.workspace = true
 fepor-gx.workspace = true
+thiserror.workspace = true
 
 [build-dependencies]
 cc.workspace = true
