@@ -200,10 +200,21 @@ impl Language {
 }
 
 /// Options of the game itself, applied when it starts.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Game {
     pub language: Language,
+    /// Backup copies of the memory card kept (ticket #37); 0 turns the backups off.
+    pub card_backups: u32,
+}
+
+impl Default for Game {
+    fn default() -> Game {
+        Game {
+            language: Language::default(),
+            card_backups: 5,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -212,6 +223,8 @@ pub struct Settings {
     pub video: Video,
     pub audio: Audio,
     pub game: Game,
+    /// Developer tools in the overlay (the memory watcher, ADR 0048). `FEPOR_DEVELOPER=1` turns it on for a run.
+    pub developer: bool,
 }
 
 impl Settings {
@@ -221,6 +234,7 @@ impl Settings {
         self.video.resolution = self.video.resolution.clamp(1, 4);
         self.video.overlay_scale = self.video.overlay_scale.clamp(0.0, 4.0);
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
+        self.game.card_backups = self.game.card_backups.min(50);
     }
 
     /// Load `path`; the defaults when it does not exist or cannot be read.
@@ -250,6 +264,9 @@ impl Settings {
     /// `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
     pub fn with_env_overrides(mut self) -> Settings {
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+        if std::env::var("FEPOR_DEVELOPER").is_ok_and(|v| v != "0") {
+            self.developer = true;
+        }
         if let Some(v) = std::env::var("FEPOR_STATS").ok() {
             self.video.stats = if v == "fps" {
                 StatsMode::Fps

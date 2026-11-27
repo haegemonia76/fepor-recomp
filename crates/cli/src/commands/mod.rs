@@ -4,3 +4,4 @@ pub mod extract;
 pub mod generate;
 pub mod inspect;
 pub mod run;
+pub mod text;

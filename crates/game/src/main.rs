@@ -95,6 +95,48 @@ fn import_saves(card: &std::path::Path, imports: &std::path::Path) {
     }
 }
 
+/// Seconds between backups of a card the game modified.
+const BACKUP_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn backup_card(card: &std::path::Path, dir: &std::path::Path, overlay: &fepor_overlay::Shared) {
+    let keep = overlay.settings.get().game.card_backups as usize;
+    match fepor_core::memcard::backup(card, dir, keep, unix_now()) {
+        Ok(Some(p)) => eprintln!("memory card backup: {}", p.display()),
+        Ok(None) => {}
+        Err(e) => eprintln!("memory card backup of {}: {e}", card.display()),
+    }
+}
+
+/// Apply the restore the overlay queued, back the card up before the run, and keep backing it up while the
+/// game modifies it (a copy is made only when the image differs from the newest one).
+fn protect_card(card: &std::path::Path, base: &std::path::Path, overlay: &Arc<fepor_overlay::Shared>) {
+    let dir = fepor_core::memcard::backups_dir(base);
+    if let Some(from) = fepor_core::memcard::take_restore(&dir) {
+        // the card being replaced is itself kept as a backup first, and read before rotation can drop `from`
+        let image = std::fs::read(&from);
+        backup_card(card, &dir, overlay);
+        match image.and_then(|_| fepor_core::memcard::restore(card, &from)) {
+            Ok(()) => eprintln!("memory card restored from {}", from.display()),
+            Err(e) => eprintln!("cannot restore {}: {e}", from.display()),
+        }
+    }
+    backup_card(card, &dir, overlay);
+    let (card, overlay) = (card.to_path_buf(), overlay.clone());
+    let timer = move || loop {
+        std::thread::sleep(BACKUP_EVERY);
+        backup_card(&card, &dir, &overlay);
+    };
+    if let Err(e) = std::thread::Builder::new().name("card-backup".into()).spawn(timer) {
+        eprintln!("memory card backups while playing are off: {e}");
+    }
+}
+
 /// Memory cards: raw Dolphin-format images, `<data>/memcards/MemoryCard{A,B}.<region>.raw`, or the files named
 /// by `FEPOR_MEMCARD_A` / `FEPOR_MEMCARD_B` (`none` leaves the slot empty). New cards are 16 Mbit (251 blocks)
 /// and unformatted; the game offers to format them.
@@ -102,7 +144,7 @@ fn insert_cards(
     m: &mut fepor_runtime::Machine,
     game_id: &str,
     data: Option<&std::path::Path>,
-    overlay: &fepor_overlay::Shared,
+    overlay: &Arc<fepor_overlay::Shared>,
 ) {
     let region = match game_id.as_bytes().get(3) {
         Some(b'E') => "USA",
@@ -122,6 +164,7 @@ fn insert_cards(
             (None, _) => continue,
         };
         if slot == 0 {
+            protect_card(&path, &base, overlay);
             import_saves(&path, &base.join("imports"));
             *overlay.card_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
         }
@@ -156,6 +199,71 @@ fn install_jit(game_id: &str, dol: &Dol) {
     jit.precompile(symbols, workers);
 }
 
+/// Serve the files of the enabled mods instead of the disc's (ADR 0034); the rest of the disc is untouched.
+fn replace_files(
+    disc: Box<dyn fepor_core::Disc>,
+    mods: &fepor_core::mods::ModList,
+    game_id: &str,
+) -> Result<Box<dyn fepor_core::Disc>, String> {
+    for c in mods.conflicts(Some(game_id)) {
+        eprintln!("mods: {c}");
+    }
+    let files = mods.replacements(game_id);
+    if files.is_empty() {
+        return Ok(disc);
+    }
+    let modded = fepor_core::disc::ModdedDisc::new(disc, &files).map_err(|e| e.to_string())?;
+    for path in &modded.unmatched {
+        eprintln!("mods: {path} is not a file of this disc: ignored");
+    }
+    eprintln!("mods: {} disc file(s) replaced", modded.replaced());
+    Ok(Box::new(modded))
+}
+
+/// Register and enable the memory patches of the enabled mods, highest priority first. A mod whose bytes
+/// another enabled mod already patches stays off (the engine refuses it). Patches over the DOL's code change
+/// nothing (ADR 0025), so they are reported.
+fn apply_patch_mods(
+    m: &mut fepor_runtime::Machine,
+    mods: &fepor_core::mods::ModList,
+    game_id: &str,
+    dol: &Dol,
+) {
+    use fepor_runtime::patch::{Patch, PatchSet};
+    for md in mods.patch_mods(game_id) {
+        let patches: Vec<Patch> = md
+            .manifest
+            .patches
+            .iter()
+            .map(|p| Patch::new(p.address, p.bytes.clone()))
+            .collect();
+        for p in &md.manifest.patches {
+            let r = p.range();
+            let over_code = |s: &fepor_core::dol::Section| {
+                let start = (s.addr & 0x3FFF_FFFF) as u64;
+                r.start < start + s.size as u64 && start < r.end
+            };
+            if dol.text_sections().any(over_code) {
+                eprintln!("mods: {}: patch at {:#010x} is over the game's code and changes nothing", md.id, p.address);
+            }
+        }
+        let set = PatchSet {
+            source: format!("mod:{}", md.id),
+            game_id: game_id.to_string(),
+            patches,
+            continuous: md.manifest.continuous,
+        };
+        let done = m
+            .patches
+            .register(set)
+            .and_then(|id| m.patches.enable(id, &mut m.ram));
+        match done {
+            Ok(()) => eprintln!("mods: {}: {} patch(es) applied", md.id, md.manifest.patches.len()),
+            Err(e) => eprintln!("mods: {}: patches not applied: {e}", md.id),
+        }
+    }
+}
+
 fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Result<(), String> {
     // Keep the exported runtime symbols linked for the generated library.
     std::hint::black_box(abi::exports());
@@ -170,6 +278,9 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         )
     })?;
     let mut disc = open_disc(&game).map_err(|e| e.to_string())?;
+    let game_id = disc.game_id().to_string();
+    let mods = fepor_core::mods::ModList::load(&data);
+    disc = replace_files(disc, &mods, &game_id)?;
     let bytes = disc.dol().map_err(|e| e.to_string())?;
     version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
     // for `fepor-recomp bug-report`; the renderer adds the GPU adapter
@@ -197,10 +308,20 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     if let Some(sink) = fepor_audio::open(overlay.settings.clone(), overlay.audio_devices.clone()) {
         m.hw.set_audio_sink(sink);
     }
+    m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
+    m.patches.attach_watcher(overlay.memory.clone());
+    // physical ranges of the DOL's code: recompiled, so cheats writing there would do nothing
+    let code = dol
+        .text_sections()
+        .map(|s| (s.addr & 0x01FF_FFFF)..(s.addr & 0x01FF_FFFF) + s.size)
+        .collect();
+    overlay.cheats.set_game(disc.game_id(), code);
+    m.cheats.attach(overlay.cheats.clone());
     insert_cards(m, disc.game_id(), Some(&data), &overlay);
     m.hw.set_language(overlay.settings.get().game.language.sram_code());
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
+    apply_patch_mods(m, &mods, &game_id, &dol);
     abi::start_watchdog();
     let mut ctx = Context::new(m.ram_ptr());
     fepor_runtime::sched::init(&mut *ctx);

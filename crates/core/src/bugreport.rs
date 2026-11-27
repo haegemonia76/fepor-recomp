@@ -1,5 +1,5 @@
 //! The bug report bundle (ticket #47, ADR 0047): one zip with what a developer needs to read a problem report
-//! and nothing the player would not want to send: the log, `settings.toml`, `input.toml`, version and system
+//! and nothing the player would not want to send: the log, `settings.toml`, `input.toml`, `mods/mods.toml`, `cheats.toml`, version and system
 //! information, the newest screenshot. No saves, no memory cards, no game data. The home directory is
 //! replaced by `~` in every text file. Shared by `fepor-recomp bug-report` and the overlay's Help page.
 
@@ -151,6 +151,23 @@ fn os_name() -> String {
     std::env::consts::OS.into()
 }
 
+/// File names and sizes in `<data>/memcards/backups`: the card images themselves are never read.
+fn backups(data: &Path) -> String {
+    let Ok(dir) = std::fs::read_dir(crate::memcard::backups_dir(data)) else {
+        return "none".into();
+    };
+    let mut v: Vec<String> = dir
+        .filter_map(|e| e.ok())
+        .filter_map(|e| Some(format!("{} ({} bytes)", e.file_name().to_string_lossy(), e.metadata().ok()?.len())))
+        .collect();
+    v.sort();
+    if v.is_empty() {
+        "none".into()
+    } else {
+        v.join(", ")
+    }
+}
+
 /// `report.txt`: versions, system and the list of files in the bundle.
 fn report(data: &Path, files: &[String]) -> String {
     let s: Session = std::fs::read_to_string(session_path(data))
@@ -170,6 +187,7 @@ fn report(data: &Path, files: &[String]) -> String {
     line("OS", format!("{} ({}, {})", os_name(), std::env::consts::OS, std::env::consts::ARCH));
     line("data folder", data.display().to_string());
     line("files", files.join(", "));
+    line("card backups (names and sizes only)", backups(data));
     t
 }
 
@@ -208,7 +226,8 @@ pub fn create(data: &Path, out: &Path, homes: &[String]) -> Result<PathBuf, Stri
     };
     // (name in the zip, file, is text)
     let mut entries: Vec<(String, PathBuf, bool)> = Vec::new();
-    for name in ["settings.toml", "input.toml"] {
+    // the two small files that name the enabled mods and cheats; nothing else of either folder goes in
+    for name in ["settings.toml", "input.toml", "mods/mods.toml", "cheats.toml"] {
         entries.push((name.into(), data.join(name), true));
     }
     for p in log_files(data).into_iter().chain([session_path(data)]) {
@@ -294,11 +313,12 @@ mod tests {
             "MemoryCardA.raw",
             "backup/slot.GCI",
             "main.dol",
+            "memcards/backups/MemoryCardA.EU.100.raw",
             "imports\\a.gci.imported",
         ] {
             assert!(is_excluded(p), "{p}");
         }
-        for p in ["settings.toml", "input.toml", "logs/fepor-game.log", "screenshot.png", "disc.log", "logs/session.toml"] {
+        for p in ["settings.toml", "input.toml", "mods/mods.toml", "cheats.toml", "logs/fepor-game.log", "screenshot.png", "disc.log", "logs/session.toml"] {
             assert!(!is_excluded(p), "{p}");
         }
     }
@@ -318,6 +338,12 @@ mod tests {
         w("logs/fepor-game.1.log", b"old\n");
         w("logs/leak.raw", b"card");
         w("memcards/MemoryCardA.EU.raw", b"card");
+        w("memcards/backups/MemoryCardA.EU.100.raw", b"secretcard");
+        w("mods/mods.toml", b"[[mod]]\nname = \"x\"\nenabled = true\n");
+        w("mods/x/mod.toml", b"name = \"x\"\n");
+        w("mods/x/data.bin", b"modfile");
+        w("cheats.toml", b"[GFEP01]\nenabled = [\"a\"]\n");
+        w("cheats/GFEP01.ini", b"code");
         w("disc/sys/boot.bin", b"disc");
         w("imports/a.gci", b"save");
         w("screenshots/a.png", b"\x89PNG");
@@ -333,10 +359,12 @@ mod tests {
         assert_eq!(
             names,
             [
+                "cheats.toml",
                 "input.toml",
                 "logs/fepor-game.1.log",
                 "logs/fepor-game.log",
                 "logs/session.toml",
+                "mods/mods.toml",
                 "report.txt",
                 "screenshot.png",
                 "settings.toml"
@@ -347,6 +375,8 @@ mod tests {
         assert_eq!(text, "loaded ~/Games/x\n");
         text.clear();
         z.by_name("report.txt").unwrap().read_to_string(&mut text).unwrap();
+        assert!(text.contains("MemoryCardA.EU.100.raw (10 bytes)"), "{text}");
+        assert!(!text.contains("secretcard"));
         assert!(text.contains("GPU adapter: Test GPU") && text.contains("game ID: GFEP01"), "{text}");
     }
 }
