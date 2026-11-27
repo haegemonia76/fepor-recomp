@@ -505,7 +505,7 @@ mod tests {
             focused: true,
             ..Default::default()
         };
-        let mut frame = |ctx: &egui::Context, raw: egui::RawInput, value: &mut String| {
+        let frame = |ctx: &egui::Context, raw: egui::RawInput, value: &mut String| {
             let mut out = ctx.run_ui(raw, |ui| {
                 let r = ui.add(egui::TextEdit::singleline(value));
                 if ui.ctx().memory(|m| m.focused()).is_none() {
