@@ -255,7 +255,10 @@ mod tests {
 
     /// A stand-in for the Discord client: answers the handshake with READY, acknowledges each command and
     /// returns the frames it received.
-    fn fake_discord(dir: &std::path::Path, commands: usize) -> std::thread::JoinHandle<Vec<(u32, String)>> {
+    fn fake_discord(
+        dir: &std::path::Path,
+        commands: usize,
+    ) -> std::thread::JoinHandle<Vec<(u32, String)>> {
         let listener = UnixListener::bind(dir.join("discord-ipc-0")).unwrap();
         std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
@@ -277,7 +280,10 @@ mod tests {
         c.set_activity(Activity::InMenu, 1700000000).unwrap();
         c.clear().unwrap();
         let got = server.join().unwrap();
-        assert_eq!(got[0], (0, "{\"v\":1,\"client_id\":\"12\\\"34\"}".to_string()));
+        assert_eq!(
+            got[0],
+            (0, "{\"v\":1,\"client_id\":\"12\\\"34\"}".to_string())
+        );
         assert_eq!(got[1].0, 1);
         let act = &got[1].1;
         assert!(act.contains("\"cmd\":\"SET_ACTIVITY\""));
@@ -294,7 +300,12 @@ mod tests {
         std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
             read_frame(&mut s).unwrap();
-            write_frame(&mut s, 2, "{\"code\":4000,\"message\":\"Invalid Client ID\"}").unwrap();
+            write_frame(
+                &mut s,
+                2,
+                "{\"code\":4000,\"message\":\"Invalid Client ID\"}",
+            )
+            .unwrap();
         });
         assert!(connect(&[dir.path().to_path_buf()], "x").is_none());
     }

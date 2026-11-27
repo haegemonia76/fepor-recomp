@@ -441,7 +441,7 @@ pub fn show(
     controls: &mut Controls,
     selected: &mut Option<&'static str>,
 ) {
-    let family = controls.config().glyphs;
+    let family = controls.glyphs();
     let (_, height) = outline(family);
     // as wide as the page allows, but never taller than a screenful
     let scale = (ui.available_width() / WIDTH).min(560.0 / (TOP + height * WIDTH + BOTTOM));
@@ -471,7 +471,7 @@ pub fn show(
     }
     draw_pad_body(&painter, &frame, family);
 
-    let cfg = controls.config().clone();
+    let gamepad = controls.gamepad_bindings().clone();
     let ctx = ui.ctx().clone();
     let mut clicked = None;
     for spot in layout(family) {
@@ -527,7 +527,7 @@ pub fn show(
             );
         }
         // the GameCube button bound to it, outside the arrow or beside the icon
-        if let Some(action) = cfg.bindings.gamepad.get(spot.source) {
+        if let Some(action) = gamepad.get(spot.source) {
             tag(&painter, spot.shape, spot.source, rect, c, action.short());
         }
         let r = r.on_hover_text(pad_name(family, spot.source));
@@ -738,7 +738,8 @@ fn show_game_cube(ui: &mut egui::Ui, painter: &Painter, f: &Frame, controls: &mu
         Stroke::new(1.0, rgb(0xd88a1c)),
     );
 
-    let cfg = controls.config().clone();
+    let glyphs = controls.glyphs();
+    let gamepad = controls.gamepad_bindings().clone();
     let waiting = controls
         .remap_target()
         .and_then(|(keyboard, a)| (!keyboard).then_some(a));
@@ -819,9 +820,12 @@ fn show_game_cube(ui: &mut egui::Ui, painter: &Painter, f: &Frame, controls: &mu
             );
         }
         // the input of the pad that does it
-        let bound = cfg.sources_of(false, spot.action).into_iter().next();
+        let bound = gamepad
+            .iter()
+            .find(|(_, a)| **a == spot.action)
+            .map(|(s, _)| s.as_str());
         let text = bound
-            .map(|b| pad_name(cfg.glyphs, b))
+            .map(|b| pad_name(glyphs, b))
             .unwrap_or_else(|| "-".to_string());
         let shape = match spot.kind {
             GcKind::Arrow(d) => Shape::Arrow(d),

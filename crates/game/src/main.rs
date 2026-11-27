@@ -71,13 +71,20 @@ fn note_game(data: &std::path::Path, game: &std::path::Path, v: &version::Versio
     };
     fepor_core::bugreport::update_session(data, |s| {
         s.game_id = v.game_id.into();
-        s.disc_dir = if game.is_dir() { game } else { game.parent().unwrap_or(game) }
-            .to_string_lossy()
-            .into_owned();
+        s.disc_dir = if game.is_dir() {
+            game
+        } else {
+            game.parent().unwrap_or(game)
+        }
+        .to_string_lossy()
+        .into_owned();
     });
     fepor_core::bugreport::note(
         "game",
-        format!("game ID: {}\nversion: {}\nregion: {region}\ncopy: {copy}", v.game_id, v.name),
+        format!(
+            "game ID: {}\nversion: {}\nregion: {region}\ncopy: {copy}",
+            v.game_id, v.name
+        ),
     );
 }
 
@@ -96,7 +103,11 @@ fn note_start(data: &std::path::Path) {
     vars.sort();
     fepor_core::bugreport::note(
         "environment",
-        if vars.is_empty() { "no FEPOR_* or RECOMPLAUNCHER_* variables set".into() } else { vars.join("\n") },
+        if vars.is_empty() {
+            "no FEPOR_* or RECOMPLAUNCHER_* variables set".into()
+        } else {
+            vars.join("\n")
+        },
     );
     let args: Vec<String> = std::env::args().collect();
     fepor_core::bugreport::note("arguments", args.join(" "));
@@ -107,7 +118,10 @@ fn report_sections(started: std::time::Instant) -> Vec<(String, String)> {
     let mut v = vec![
         (
             "session".to_string(),
-            format!("running for {} s (playtime this session)", started.elapsed().as_secs()),
+            format!(
+                "running for {} s (playtime this session)",
+                started.elapsed().as_secs()
+            ),
         ),
         ("runtime".to_string(), fepor_runtime::report::state()),
     ];
@@ -183,7 +197,11 @@ fn backup_card(card: &std::path::Path, dir: &std::path::Path, overlay: &fepor_ov
 
 /// Apply the restore the overlay queued, back the card up before the run, and keep backing it up while the
 /// game modifies it (a copy is made only when the image differs from the newest one).
-fn protect_card(card: &std::path::Path, base: &std::path::Path, overlay: &Arc<fepor_overlay::Shared>) {
+fn protect_card(
+    card: &std::path::Path,
+    base: &std::path::Path,
+    overlay: &Arc<fepor_overlay::Shared>,
+) {
     let dir = fepor_core::memcard::backups_dir(base);
     if let Some(from) = fepor_core::memcard::take_restore(&dir) {
         // the card being replaced is itself kept as a backup first, and read before rotation can drop `from`
@@ -200,7 +218,10 @@ fn protect_card(card: &std::path::Path, base: &std::path::Path, overlay: &Arc<fe
         std::thread::sleep(BACKUP_EVERY);
         backup_card(&card, &dir, &overlay);
     };
-    if let Err(e) = std::thread::Builder::new().name("card-backup".into()).spawn(timer) {
+    if let Err(e) = std::thread::Builder::new()
+        .name("card-backup".into())
+        .spawn(timer)
+    {
         eprintln!("memory card backups while playing are off: {e}");
     }
 }
@@ -349,7 +370,10 @@ fn apply_patch_mods(
                 r.start < start + s.size as u64 && start < r.end
             };
             if dol.text_sections().any(over_code) {
-                eprintln!("mods: {}: patch at {:#010x} is over the game's code and changes nothing", md.id, p.address);
+                eprintln!(
+                    "mods: {}: patch at {:#010x} is over the game's code and changes nothing",
+                    md.id, p.address
+                );
             }
         }
         let set = PatchSet {
@@ -363,7 +387,11 @@ fn apply_patch_mods(
             .register(set)
             .and_then(|id| m.patches.enable(id, &mut m.ram));
         match done {
-            Ok(()) => eprintln!("mods: {}: {} patch(es) applied", md.id, md.manifest.patches.len()),
+            Ok(()) => eprintln!(
+                "mods: {}: {} patch(es) applied",
+                md.id,
+                md.manifest.patches.len()
+            ),
             Err(e) => eprintln!("mods: {}: patches not applied: {e}", md.id),
         }
     }
@@ -411,7 +439,9 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     ) {
         m.hw.set_audio_sink(sink);
     }
-    m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
+    m.patches
+        .set_game(disc.game_id())
+        .map_err(|e| e.to_string())?;
     m.patches.attach_watcher(overlay.memory.clone());
     // physical ranges of the DOL's code: recompiled, so cheats writing there would do nothing
     let code = dol
@@ -498,12 +528,22 @@ impl ApplicationHandler<()> for App {
                     self.overlay.clone(),
                     self.proxy.clone(),
                 );
-                fepor_input::gamepad::spawn(move |source, value| {
-                    if overlay.gamepad_input(source, value) {
-                        return;
+                fepor_input::gamepad::spawn(move |event| {
+                    use fepor_input::gamepad::Event;
+                    match event {
+                        Event::Input { source, value, .. }
+                            if overlay.gamepad_input(source, value) =>
+                        {
+                            return;
+                        }
+                        _ => {}
                     }
                     if let Ok(mut c) = controls.lock() {
-                        c.input(false, source, value);
+                        match event {
+                            Event::Added(info) => c.device_added(info),
+                            Event::Removed(id) => c.device_removed(id),
+                            Event::Input { id, source, value } => c.pad_input(id, source, value),
+                        }
                         if c.message.is_some() {
                             let _ = proxy.send_event(());
                         }
@@ -548,7 +588,7 @@ impl ApplicationHandler<()> for App {
             } => {
                 let pressed = state == ElementState::Pressed;
                 if let Ok(mut c) = self.controls.lock() {
-                    c.input(true, &format!("{code:?}"), if pressed { 1.0 } else { 0.0 });
+                    c.keyboard_input(&format!("{code:?}"), if pressed { 1.0 } else { 0.0 });
                 }
                 self.refresh_title();
             }
@@ -564,6 +604,19 @@ fn main() {
     fepor_core::bugreport::init(&data);
     note_start(&data);
     let controls = Arc::new(Mutex::new(Controls::new(data.join("input.toml"))));
+    // FEPOR_FAKE_PADS=<name>[,<name>...] plugs in gamepads that do not exist (headless runs, screenshots of
+    // the controls page, profiles and hot-plug logic without hardware)
+    if let Ok(names) = std::env::var("FEPOR_FAKE_PADS") {
+        if let Ok(mut c) = controls.lock() {
+            for (i, name) in names.split(',').filter(|n| !n.is_empty()).enumerate() {
+                c.device_added(fepor_input::DeviceInfo {
+                    id: 1000 + i as u32,
+                    guid: format!("fake-{}", name.to_lowercase().replace(' ', "-")),
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
     let overlay = fepor_overlay::Shared::new(SettingsHandle::load(&data), controls.clone(), data);
     let started = std::time::Instant::now();
     overlay.set_report_hook(Box::new(move || report_sections(started)));

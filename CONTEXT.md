@@ -20,7 +20,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **HLE**: high-level emulation. Guest SDK functions (OS, DVD, PAD, CARD, AX, VI) replaced by native C++.
 - **LLE**: low-level emulation. Used only for the GX FIFO: guest code writes to the write-gather pipe and the runtime parses the CP/XF/BP command stream.
 - **GX backend**: renderer built on SDL_GPU consuming the parsed FIFO. Renders into a resizable virtual EFB.
-- **Virtual pad**: GameCube controller abstraction fed by the input layer (remapping, glyph sets Xbox/Nintendo/PlayStation).
+- **Virtual pad**: GameCube controller abstraction fed by the input layer (remapping, glyph sets Xbox/Nintendo/PlayStation). Gamepads are hot-pluggable; each model has a **profile** (bindings and glyph set keyed by SDL GUID in `input.toml`), and the pad plugged in or pressed last feeds port 1 together with the keyboard (single-player game, port 1 only; ADR 0038).
 - **Render filters**: post-process of the presented image only (scanlines, gamma, saturation/contrast/brightness, screen mask); `[video.filters]` in `settings.toml`, Video page of the overlay, never applied to the EFB or the overlay (ADR 0039).
 - **FSR**: AMD FidelityFX Super Resolution 1 (EASU upscale, RCAS sharpening) in the presentation pass, before the render filters and never on the overlay; `[video.fsr]` in `settings.toml`, Video page of the overlay; while on it chooses the internal resolution from a quality preset (ADR 0042).
 - **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler.

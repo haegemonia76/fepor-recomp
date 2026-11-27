@@ -104,7 +104,11 @@ impl Overlay {
         let open = self.shared.is_open();
         self.ui.memory_tick(&self.shared);
         let video = self.shared.settings.get().video;
-        if !open && video.stats == StatsMode::Off && !ui::capture_hud_shown(&self.shared.capture) {
+        if !open
+            && video.stats == StatsMode::Off
+            && !ui::capture_hud_shown(&self.shared.capture)
+            && self.shared.notice().is_none()
+        {
             self.shared.memory.set_active(self.ui.memory_live());
             return;
         }
