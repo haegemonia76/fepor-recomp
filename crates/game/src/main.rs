@@ -187,6 +187,7 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     if let Some(sink) = fepor_audio::open(overlay.settings.clone(), overlay.audio_devices.clone()) {
         m.hw.set_audio_sink(sink);
     }
+    m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
     insert_cards(m, disc.game_id(), Some(&data), &overlay);
     m.hw.set_language(overlay.settings.get().game.language.sram_code());
     let entry = boot::setup(m, &mut *disc, &dol)?;
