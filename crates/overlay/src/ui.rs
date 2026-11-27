@@ -803,6 +803,16 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
     );
     ui.label("PgUp / PgDn or LB / RB: previous / next page.");
     ui.add_space(6.0);
+    ui.label(format!(
+        "Playtime: {}",
+        fepor_core::playtime::format(shared.playtime_secs())
+    ));
+    ui.label(
+        RichText::new("Counted while the game runs with this menu closed.")
+            .small()
+            .weak(),
+    );
+    ui.add_space(6.0);
     ui.label(format!("Data folder: {}", shared.data_dir.display()));
     ui.label(format!(
         "Settings: {}",
@@ -812,6 +822,22 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         "Bindings: {}",
         shared.data_dir.join("input.toml").display()
     ));
+    ui.add_space(6.0);
+    let before = shared.settings.get().presence;
+    let mut on = before.enabled;
+    ui.checkbox(&mut on, "Discord rich presence");
+    if on != before.enabled {
+        shared.settings.update(|x| x.presence.enabled = on);
+    }
+    ui.label(
+        RichText::new(if before.client_id.is_empty() {
+            "Off by default; nothing is sent. It also needs presence.client_id in settings.toml."
+        } else {
+            "Shows that you are playing and for how long, to a running Discord client. Nothing else is sent."
+        })
+        .small()
+        .weak(),
+    );
     ui.add_space(6.0);
     ui.label(
         RichText::new("FEPOR_FPS_MULT, FEPOR_RES and FEPOR_ASPECT override the saved video settings for one run.")

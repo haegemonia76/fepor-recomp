@@ -1478,6 +1478,7 @@ dependencies = [
  "fepor-overlay",
  "fepor-runtime",
  "fepor-video",
+ "tempfile",
  "winit",
 ]
 
