@@ -188,6 +188,13 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         m.hw.set_audio_sink(sink);
     }
     m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
+    // physical ranges of the DOL's code: recompiled, so cheats writing there would do nothing
+    let code = dol
+        .text_sections()
+        .map(|s| (s.addr & 0x01FF_FFFF)..(s.addr & 0x01FF_FFFF) + s.size)
+        .collect();
+    overlay.cheats.set_game(disc.game_id(), code);
+    m.cheats.attach(overlay.cheats.clone());
     insert_cards(m, disc.game_id(), Some(&data), &overlay);
     m.hw.set_language(overlay.settings.get().game.language.sram_code());
     let entry = boot::setup(m, &mut *disc, &dol)?;
