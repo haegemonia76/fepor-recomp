@@ -223,6 +223,8 @@ pub struct Settings {
     pub video: Video,
     pub audio: Audio,
     pub game: Game,
+    /// Developer tools in the overlay (the memory watcher, ADR 0048). `FEPOR_DEVELOPER=1` turns it on for a run.
+    pub developer: bool,
 }
 
 impl Settings {
@@ -262,6 +264,9 @@ impl Settings {
     /// `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
     pub fn with_env_overrides(mut self) -> Settings {
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+        if std::env::var("FEPOR_DEVELOPER").is_ok_and(|v| v != "0") {
+            self.developer = true;
+        }
         if let Some(v) = std::env::var("FEPOR_STATS").ok() {
             self.video.stats = if v == "fps" {
                 StatsMode::Fps
