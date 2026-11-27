@@ -1,0 +1,37 @@
+# Native cheats for GFEP01 (Fire Emblem: Path of Radiance, Europe), ADR 0033: addresses, sizes and values only.
+# The funds and event-points fields are in the game's global struct at 0x8033A708 (the debug text "Funds :%7dG" /
+# "EvtPts:%7dP" of the game reads +0x18 / +0x1C).
+
+[[cheat]]
+name = "Max funds"
+description = "Funds stay at 9,999,999 gold (the game's cap)."
+game = "GFEP01"
+continuous = true
+[[cheat.write]]
+address = 0x8033A720
+size = 4
+value = 9999999
+
+[[cheat]]
+name = "Max bonus EXP"
+description = "Bonus experience (event points) stays at 99,999."
+game = "GFEP01"
+continuous = true
+[[cheat.write]]
+address = 0x8033A724
+size = 4
+value = 99999
+
+[[cheat]]
+name = "Ike HP 99 (prologue)"
+description = "Ike's current HP is held at 99. The address is where the prologue map keeps Ike; it only applies while Ike's record is there."
+game = "GFEP01"
+continuous = true
+[[cheat.write]]
+address = 0x802BBB6C
+size = 1
+value = 99
+[cheat.write.when]
+address = 0x802BBB50
+size = 4
+value = 0x80900E10

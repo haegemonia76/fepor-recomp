@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     Gecko,
     ActionReplay,
+    /// An entry of the native TOML cheat files (ADR 0033, `fepor_core::native`).
+    Native,
 }
 
 impl Kind {
@@ -23,6 +25,7 @@ impl Kind {
         match self {
             Kind::Gecko => "Gecko",
             Kind::ActionReplay => "Action Replay",
+            Kind::Native => "Native",
         }
     }
 
@@ -30,6 +33,49 @@ impl Kind {
         match self {
             Kind::Gecko => "gecko",
             Kind::ActionReplay => "ar",
+            Kind::Native => "native",
+        }
+    }
+}
+
+/// How a [`Condition`] compares the value in RAM with its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cmp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// A write is made only while the big-endian unsigned value of `size` (1, 2 or 4) bytes at `addr` compares
+/// to `value` as `cmp` says. Evaluated by the patch engine when it writes (once per frame for a continuous
+/// set), on the RAM of that moment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Condition {
+    pub addr: u32,
+    pub size: u8,
+    pub cmp: Cmp,
+    pub value: u32,
+}
+
+impl Condition {
+    /// Whether the condition holds on `ram` (main RAM from physical address 0). An address outside `ram`
+    /// does not hold.
+    pub fn holds(&self, ram: &[u8]) -> bool {
+        let p = (self.addr & 0x3FFF_FFFF) as usize;
+        let Some(b) = ram.get(p..p + self.size as usize) else {
+            return false;
+        };
+        let v = b.iter().fold(0u32, |v, b| v << 8 | *b as u32);
+        match self.cmp {
+            Cmp::Eq => v == self.value,
+            Cmp::Ne => v != self.value,
+            Cmp::Lt => v < self.value,
+            Cmp::Le => v <= self.value,
+            Cmp::Gt => v > self.value,
+            Cmp::Ge => v >= self.value,
         }
     }
 }
@@ -39,6 +85,14 @@ impl Kind {
 pub struct Write {
     pub addr: u32,
     pub bytes: Vec<u8>,
+    /// Only native cheats have one (Gecko and Action Replay writes are unconditional here).
+    pub when: Option<Condition>,
+}
+
+impl Write {
+    pub fn new(addr: u32, bytes: Vec<u8>) -> Write {
+        Write { addr, bytes, when: None }
+    }
 }
 
 /// One code of an INI file.
@@ -53,6 +107,8 @@ pub struct Cheat {
     pub lines: Vec<(u32, u32)>,
     /// The writes the code makes, or why it cannot be run.
     pub writes: Result<Vec<Write>, String>,
+    /// Held every frame (Gecko and Action Replay codes always are) or written once when turned on.
+    pub continuous: bool,
 }
 
 impl Cheat {
@@ -119,7 +175,7 @@ pub fn compile_gecko(lines: &[(u32, u32)]) -> Result<Vec<Write>, String> {
             }
             _ => return Err(format!("code type {kind:02X} (serial write) is not supported")),
         };
-        out.push(Write { addr: address(a), bytes });
+        out.push(Write::new(address(a), bytes));
     }
     Ok(out)
 }
@@ -141,7 +197,7 @@ pub fn compile_ar(lines: &[(u32, u32)]) -> Result<Vec<Write>, String> {
             2 => d.to_be_bytes().to_vec(),
             _ => return Err("fill-and-slide write is not supported".into()),
         };
-        out.push(Write { addr: address(a), bytes });
+        out.push(Write::new(address(a), bytes));
     }
     Ok(out)
 }
@@ -153,6 +209,7 @@ fn compile(kind: Kind, lines: &[(u32, u32)]) -> Result<Vec<Write>, String> {
     match kind {
         Kind::Gecko => compile_gecko(lines),
         Kind::ActionReplay => compile_ar(lines),
+        Kind::Native => Err("native cheats are not compiled from hex lines".into()),
     }
 }
 
@@ -231,6 +288,7 @@ pub fn parse_ini(text: &str) -> Ini {
                         notes: Vec::new(),
                         lines: Vec::new(),
                         writes: Err(String::new()),
+                        continuous: true,
                     });
                 } else if let Some(n) = line.strip_prefix('*') {
                     if let Some(c) = &mut current {
@@ -276,6 +334,9 @@ struct Inner {
     game: Option<String>,
     /// Guest address ranges of the game's code: recompiled, so writes there change nothing (ADR 0025).
     code: Vec<std::ops::Range<u32>>,
+    /// The native cheats of the game (shipped and the player's file), kept to rebuild the list on an import.
+    native: Vec<Cheat>,
+    native_error: Option<String>,
     entries: Vec<Entry>,
 }
 
@@ -297,6 +358,16 @@ pub struct CheatStore {
 fn overlaps_code(w: &Write, code: &[std::ops::Range<u32>]) -> bool {
     let (s, e) = (w.addr & 0x01FF_FFFF, (w.addr & 0x01FF_FFFF) as u64 + w.bytes.len() as u64);
     code.iter().any(|r| (s as u64) < r.end as u64 && e > r.start as u64)
+}
+
+/// A code the guest thread has to apply.
+#[derive(Clone, Debug)]
+pub struct Wanted {
+    pub key: String,
+    pub name: String,
+    pub writes: Vec<Write>,
+    /// Held every frame, or written once when turned on.
+    pub continuous: bool,
 }
 
 impl CheatStore {
@@ -353,16 +424,17 @@ impl CheatStore {
         }
     }
 
-    fn fill(inner: &mut Inner, mut ini: Ini, enabled: &[String]) {
-        for c in &mut ini.cheats {
+    fn fill(inner: &mut Inner, ini: Ini, enabled: &[String]) {
+        let mut cheats = inner.native.clone();
+        cheats.extend(ini.cheats);
+        for c in &mut cheats {
             if let Ok(w) = &c.writes {
                 if w.iter().any(|w| overlaps_code(w, &inner.code)) {
                     c.writes = Err("writes into the game's code, which is recompiled: it would change nothing".into());
                 }
             }
         }
-        inner.entries = ini
-            .cheats
+        inner.entries = cheats
             .into_iter()
             .map(|cheat| Entry {
                 enabled: enabled.contains(&cheat.key()) && cheat.writes.is_ok(),
@@ -372,8 +444,9 @@ impl CheatStore {
             .collect();
     }
 
-    /// Select the running game: loads `<data>/cheats/<id>.ini` and the enabled list of `<data>/cheats.toml` (the
-    /// INI's own `_Enabled` lists the first time). `code` are the guest address ranges of the game's code.
+    /// Select the running game: loads the native cheats (shipped and `<data>/cheats/<id>.toml`, ADR 0033),
+    /// `<data>/cheats/<id>.ini` and the enabled list of `<data>/cheats.toml` (the INI's own `_Enabled` lists the
+    /// first time). `code` are the guest address ranges of the game's code.
     pub fn set_game(&self, game: &str, code: Vec<std::ops::Range<u32>>) {
         let ini = std::fs::read_to_string(self.ini_path(game)).map(|t| parse_ini(&t)).unwrap_or_default();
         let enabled = self
@@ -381,11 +454,19 @@ impl CheatStore {
             .enabled
             .remove(game)
             .unwrap_or_else(|| ini.enabled.clone());
+        let (native, native_error) = crate::native::load(game, &self.data.join("cheats").join(format!("{game}.toml")));
         let mut inner = self.lock();
         inner.game = Some(game.into());
         inner.code = code;
+        inner.native = native;
+        inner.native_error = native_error;
         Self::fill(&mut inner, ini, &enabled);
         self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Why `<data>/cheats/<id>.toml` could not be read, if it could not (the shipped cheats are listed anyway).
+    pub fn native_error(&self) -> Option<String> {
+        self.lock().native_error.clone()
     }
 
     pub fn list(&self) -> Vec<CheatView> {
@@ -442,13 +523,20 @@ impl CheatStore {
         Ok(n)
     }
 
-    /// What the guest thread has to apply: key, display name and writes of the enabled, runnable codes.
-    pub fn wanted(&self) -> Vec<(String, String, Vec<Write>)> {
+    /// What the guest thread has to apply: the enabled, runnable codes.
+    pub fn wanted(&self) -> Vec<Wanted> {
         self.lock()
             .entries
             .iter()
             .filter(|e| e.enabled)
-            .filter_map(|e| Some((e.cheat.key(), e.cheat.name.clone(), e.cheat.writes.clone().ok()?)))
+            .filter_map(|e| {
+                Some(Wanted {
+                    key: e.cheat.key(),
+                    name: e.cheat.name.clone(),
+                    writes: e.cheat.writes.clone().ok()?,
+                    continuous: e.cheat.continuous,
+                })
+            })
             .collect()
     }
 
@@ -518,17 +606,17 @@ $Ignored
         let ini = parse_ini(INI);
         assert_eq!(
             find(&ini, "Infinite Money").writes,
-            Ok(vec![Write { addr: 0x8042_A000, bytes: vec![0, 1, 0x86, 0x9F] }])
+            Ok(vec![Write::new(0x8042_A000, vec![0, 1, 0x86, 0x9F])])
         );
         // 16-bit: count = 2 + 1 of BEEF
         assert_eq!(
             find(&ini, "Fill 16").writes,
-            Ok(vec![Write { addr: 0x8000_1000, bytes: [0xBE, 0xEF].repeat(3) }])
+            Ok(vec![Write::new(0x8000_1000, [0xBE, 0xEF].repeat(3))])
         );
         // string of 11 bytes over two data lines, the tail of the last line is cut
         assert_eq!(
             find(&ini, "Text").writes,
-            Ok(vec![Write { addr: 0x8000_1100, bytes: b"Hello world".to_vec() }])
+            Ok(vec![Write::new(0x8000_1100, b"Hello world".to_vec())])
         );
     }
 
@@ -547,8 +635,8 @@ $Ignored
         assert_eq!(
             find(&ini, "AR Write").writes,
             Ok(vec![
-                Write { addr: 0x8000_2000, bytes: vec![0x12, 0x34, 0x56, 0x78] },
-                Write { addr: 0x8000_2010, bytes: vec![0; 4] },
+                Write::new(0x8000_2000, vec![0x12, 0x34, 0x56, 0x78]),
+                Write::new(0x8000_2010, vec![0; 4]),
             ])
         );
     }
@@ -557,7 +645,7 @@ $Ignored
     fn upper_cache_bit_and_pointer_flag() {
         assert_eq!(
             compile_gecko(&[(0x0501_0000, 7)]).unwrap(),
-            vec![Write { addr: 0x8101_0000, bytes: vec![0, 0, 0, 7] }]
+            vec![Write::new(0x8101_0000, vec![0, 0, 0, 7])]
         );
         assert!(compile_gecko(&[(0x1400_0000, 7)]).unwrap_err().contains("pointer"));
         assert!(compile_gecko(&[(0x0800_0000, 7), (0, 0)]).unwrap_err().contains("serial"));

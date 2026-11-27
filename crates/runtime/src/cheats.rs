@@ -14,7 +14,7 @@ pub struct CheatRunner {
     store: Option<Arc<CheatStore>>,
     seen: u64,
     /// Enabled sets by cheat key, with the patches they were built from.
-    sets: HashMap<String, (SetId, Vec<Patch>)>,
+    sets: HashMap<String, (SetId, Vec<Patch>, bool)>,
 }
 
 fn describe(e: &PatchError) -> String {
@@ -33,7 +33,8 @@ impl CheatRunner {
     }
 
     /// Bring the engine in line with the store: revert the codes turned off, apply those turned on. A cheat is a
-    /// continuous set (a code holds its value, the game's own writes are overwritten every frame).
+    /// continuous set (a code holds its value, the game's own writes are overwritten every frame) unless a native
+    /// cheat asks for one write.
     pub fn sync(&mut self, patches: &mut PatchEngine, ram: &mut [u8]) {
         let Some(store) = &self.store else { return };
         let generation = store.generation();
@@ -45,20 +46,20 @@ impl CheatRunner {
         let wanted: Vec<_> = store
             .wanted()
             .into_iter()
-            .map(|(key, name, w)| {
-                let p: Vec<Patch> = w.into_iter().map(|w| Patch::new(w.addr, w.bytes)).collect();
-                (key, name, p)
+            .map(|w| {
+                let p: Vec<Patch> = w.writes.into_iter().map(|w| Patch::new(w.addr, w.bytes).when(w.when)).collect();
+                (w.key, w.name, p, w.continuous)
             })
             .collect();
         // revert first: a code turned off may free the bytes of one turned on
-        self.sets.retain(|key, (id, old)| {
-            let keep = wanted.iter().any(|(k, _, p)| k == key && p == old);
+        self.sets.retain(|key, (id, old, continuous)| {
+            let keep = wanted.iter().any(|(k, _, p, c)| k == key && p == old && c == continuous);
             if !keep {
                 let _ = patches.unregister(*id, ram);
             }
             keep
         });
-        for (key, name, p) in wanted {
+        for (key, name, p, continuous) in wanted {
             if self.sets.contains_key(&key) {
                 continue;
             }
@@ -66,7 +67,7 @@ impl CheatRunner {
                 source: format!("cheat:{name}"),
                 game_id: game.clone(),
                 patches: p.clone(),
-                continuous: true,
+                continuous,
             };
             let result = patches.register(set).and_then(|id| {
                 patches.enable(id, ram).inspect_err(|_| {
@@ -77,7 +78,7 @@ impl CheatRunner {
             match result {
                 Ok(id) => {
                     store.set_status(&key, None);
-                    self.sets.insert(key, (id, p));
+                    self.sets.insert(key, (id, p, continuous));
                 }
                 Err(e) => store.set_status(&key, Some(describe(&e))),
             }
@@ -141,7 +142,52 @@ mod tests {
         store.set_enabled("gecko:Money", true);
         runner.sync(&mut engine, &mut ram);
         assert_eq!(ram[0x3003], 5);
-        let status = store.list()[0].status.clone().unwrap();
+        let status = store.list().into_iter().find(|c| c.key == "gecko:Money").unwrap().status.unwrap();
         assert!(status.contains("mod:other"), "{status}");
+    }
+
+    #[test]
+    fn a_native_cheat_writes_once_or_holds_and_honours_its_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("cheats")).unwrap();
+        std::fs::write(
+            data.join("cheats/GFEP01.toml"),
+            "[[cheat]]\nname = \"Once\"\n[[cheat.write]]\naddress = 0x80003000\nsize = 1\nvalue = 7\n\
+             [[cheat]]\nname = \"Held if flag\"\ncontinuous = true\n[[cheat.write]]\naddress = 0x80003010\nsize = 2\nvalue = 99\n\
+             [cheat.write.when]\naddress = 0x80003020\nsize = 1\nop = \"ne\"\nvalue = 0\n",
+        )
+        .unwrap();
+        let store = Arc::new(CheatStore::new(data));
+        store.set_game("GFEP01", vec![]);
+        let mut engine = PatchEngine::default();
+        engine.set_game("GFEP01").unwrap();
+        let mut runner = CheatRunner::default();
+        runner.attach(store.clone());
+        let mut ram = vec![0u8; RAM_SIZE];
+        store.set_enabled("native:Once", true);
+        store.set_enabled("native:Held if flag", true);
+        runner.sync(&mut engine, &mut ram);
+        // once: written when turned on, the game's later write stays; the condition is false: nothing yet
+        assert_eq!(ram[0x3000], 7);
+        assert_eq!(ram[0x3010..0x3012], [0, 0]);
+        ram[0x3000] = 1;
+        engine.frame(1, &mut ram);
+        assert_eq!(ram[0x3000], 1);
+        assert_eq!(ram[0x3010..0x3012], [0, 0]);
+        // the flag turns on: the next frame holds the value, even after the game overwrites it
+        ram[0x3020] = 1;
+        engine.frame(2, &mut ram);
+        assert_eq!(ram[0x3010..0x3012], [0, 99]);
+        ram[0x3011] = 5;
+        engine.frame(3, &mut ram);
+        assert_eq!(ram[0x3011], 99);
+        ram[0x3020] = 0;
+        ram[0x3011] = 5;
+        engine.frame(4, &mut ram);
+        assert_eq!(ram[0x3011], 5);
+        // the choice is saved with the Gecko ones
+        let saved = std::fs::read_to_string(dir.path().join("data/cheats.toml")).unwrap();
+        assert!(saved.contains("native:Once") && saved.contains("native:Held if flag"), "{saved}");
     }
 }
