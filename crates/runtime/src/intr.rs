@@ -38,6 +38,8 @@ pub fn poll(c: *mut Context) {
     {
         let m = machine();
         m.hw.pump_audio(&m.ram);
+        m.cheats.sync(&mut m.patches, &mut m.ram);
+        m.patches.frame(m.hw.retraces, &mut m.ram);
     }
     if machine().trace.irq && machine().enter_count % (256 * 2000) == 0 {
         eprintln!(

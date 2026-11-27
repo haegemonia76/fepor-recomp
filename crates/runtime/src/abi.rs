@@ -118,7 +118,7 @@ pub fn start_watchdog() {
             eprintln!("    backtrace:{bt}");
             t = m.read_u32(t + 0x2FC);
         }
-        std::process::exit(124);
+        fepor_core::applog::exit(124);
     });
 }
 
@@ -150,7 +150,7 @@ pub fn die_str(msg: &str) -> ! {
                 .join(" ")
         );
     }
-    std::process::exit(70);
+    fepor_core::applog::exit(70);
 }
 
 #[no_mangle]

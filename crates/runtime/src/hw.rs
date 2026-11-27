@@ -138,6 +138,7 @@ impl Hw {
         while now >= self.vi_next {
             self.vi_next += self.vi_period;
             self.retraces += 1;
+            fepor_core::stats::RETRACES.store(self.retraces, std::sync::atomic::Ordering::Relaxed);
             self.si.retrace(self.retraces);
             for di in &mut self.vi_di {
                 if *di & VI_INT_ENABLE != 0 {

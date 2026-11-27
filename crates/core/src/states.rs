@@ -103,6 +103,20 @@ pub fn slot_path(slot: u8) -> Option<PathBuf> {
         .map(|d| d.join(format!("slot{}.fst", slot + 1)))
 }
 
+static CARD_GUARD: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+/// What to do just before a state load replaces the memory card image (the game registers a card backup).
+pub fn set_card_guard(f: Box<dyn Fn() + Send>) {
+    *CARD_GUARD.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+/// Run the card guard, if one is registered.
+pub fn guard_card() {
+    if let Some(f) = CARD_GUARD.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        f();
+    }
+}
+
 /// A line for the player: shown on screen for a few seconds.
 pub fn set_message(text: impl Into<String>) {
     *MESSAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), text.into()));

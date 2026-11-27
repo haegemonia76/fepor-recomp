@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 fepor-runtime.workspace = true
+fepor-core.workspace = true
 serde.workspace = true
 toml.workspace = true
 # test-mode lifts the crate's "first thread that calls init" rule: audio and gamepads each own a thread

@@ -201,7 +201,7 @@ pub fn capture() -> Option<Vec<u8>> {
 /// at once (the generated code unwinds because `Context::spr[SPR_UNWIND]` is set). The state is checked
 /// before anything is touched; a state that fails later (a component that reads less than was written)
 /// ends the process, because the machine is half replaced.
-pub fn apply(c: &mut Context, blob: &[u8]) -> Result<(), String> {
+pub fn apply(c: &mut Context, blob: &[u8], source: &str) -> Result<(), String> {
     if !crate::abi::jit_active() {
         return Err("save states need the native code backend".into());
     }
@@ -229,8 +229,13 @@ pub fn apply(c: &mut Context, blob: &[u8]) -> Result<(), String> {
     }
 
     sched::kill_others();
+    // the card image goes back with the state: keep the current one as a backup first (ADR 0035)
+    states::guard_card();
     let m = machine();
     m.ram[..RAM_SIZE].copy_from_slice(ram_bytes);
+    // Patch sets and held cheats belong to the session, not to the state: write the enabled ones over the
+    // restored memory again. The originals they saved when enabled stay as they are.
+    m.patches.reapply(&mut m.ram);
     let tb = mach.u64();
     let ns = tb as u128 * 10_000 / 405;
     let now = Instant::now();
@@ -253,6 +258,7 @@ pub fn apply(c: &mut Context, blob: &[u8]) -> Result<(), String> {
     }
     sched::install(&img, ram_ptr);
     c.spr[crate::abi::SPR_UNWIND] = 1;
+    fepor_core::bugreport::note("save state", format!("a state was loaded in this run: {source}"));
     if trace_on() {
         trace_line("loaded");
     }
@@ -416,7 +422,7 @@ struct Control {
 
 static CONTROL: Mutex<Option<Control>> = Mutex::new(None);
 /// A state read from a file, waiting for the guest's next poll point.
-static LOADED: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+static LOADED: Mutex<Option<(Vec<u8>, String)>> = Mutex::new(None);
 static LOADED_READY: AtomicBool = AtomicBool::new(false);
 /// Cheap "anything to do?" for the poll fast path.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -447,6 +453,7 @@ pub fn configure(settings: SettingsHandle, data: &std::path::Path) {
         was_holding: false,
     });
     ACTIVE.store(true, Ordering::Release);
+    fepor_core::bugreport::note("save state", "no state was loaded in this run");
 }
 
 /// The guest's safe point: run what the front ends asked for.
@@ -526,9 +533,9 @@ pub fn poll(c: &mut Context) {
     }
 
     if LOADED_READY.swap(false, Ordering::AcqRel) {
-        let blob = LOADED.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(blob) = blob {
-            match apply(c, &blob) {
+        let loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some((blob, source)) = loaded {
+            match apply(c, &blob, &source) {
                 Ok(()) => {
                     ctl.next_capture = Instant::now() + REWIND_INTERVAL;
                     states::set_message(format!("Loaded slot {}", states::slot() + 1));
@@ -550,7 +557,7 @@ pub fn poll(c: &mut Context) {
         let Ok(Some(blob)) = rx.recv() else {
             return;
         };
-        if let Err(e) = apply(c, &blob) {
+        if let Err(e) = apply(c, &blob, "stepped back in the rewind buffer") {
             states::set_message(format!("Cannot rewind: {e}"));
         }
         return;
@@ -593,12 +600,22 @@ fn load_from_slot(n: u8) {
     let id = disc_id();
     let _ = std::thread::Builder::new()
         .name("state-read".into())
-        .spawn(move || match states::read_file(&path, &id) {
-            Ok(blob) => {
-                *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(blob);
-                LOADED_READY.store(true, Ordering::Release);
+        .spawn(move || {
+            let age = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map_or("unknown age".to_string(), |d| {
+                    format!("saved {} s before", d.as_secs())
+                });
+            match states::read_file(&path, &id) {
+                Ok(blob) => {
+                    let source = format!("slot {}, {age}", n + 1);
+                    *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some((blob, source));
+                    LOADED_READY.store(true, Ordering::Release);
+                }
+                Err(e) => states::set_message(format!("Cannot load slot {}: {e}", n + 1)),
             }
-            Err(e) => states::set_message(format!("Cannot load slot {}: {e}", n + 1)),
         });
 }
 

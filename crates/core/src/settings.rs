@@ -87,6 +87,178 @@ impl StatsMode {
     }
 }
 
+/// The phosphor mask of a CRT, drawn over the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mask {
+    #[default]
+    Off,
+    /// Vertical red, green and blue stripes (aperture grille).
+    Grille,
+    /// Red, green and blue dots in staggered rows (shadow mask).
+    Dots,
+}
+
+impl Mask {
+    pub const ALL: [Mask; 3] = [Mask::Off, Mask::Grille, Mask::Dots];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mask::Off => "Off",
+            Mask::Grille => "Stripes (aperture grille)",
+            Mask::Dots => "Dots (shadow mask)",
+        }
+    }
+}
+
+/// Post-processing of the presented image (ADR 0039). The defaults leave the picture untouched.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Filters {
+    /// Darkness of the gaps between the game's scanlines, 0.0 (none) ..= 1.0 (black).
+    pub scanlines: f32,
+    /// Display gamma: above 1.0 brightens the mid-tones, below darkens them. 0.5..=2.0.
+    pub gamma: f32,
+    /// 0.0 (grey) ..= 2.0; 1.0 is the original colours.
+    pub saturation: f32,
+    /// 0.5 ..= 1.5; 1.0 is the original contrast.
+    pub contrast: f32,
+    /// -0.5 ..= 0.5; 0.0 is the original brightness.
+    pub brightness: f32,
+    pub mask: Mask,
+    /// How strongly the mask darkens the two colours a sub-pixel does not show, 0.0 ..= 1.0.
+    pub mask_strength: f32,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Filters {
+            scanlines: 0.0,
+            gamma: 1.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 0.0,
+            mask: Mask::Off,
+            mask_strength: 0.5,
+        }
+    }
+}
+
+impl Filters {
+    /// Whether the picture is shown exactly as the game drew it.
+    pub fn is_identity(&self) -> bool {
+        self.scanlines <= 0.0
+            && self.gamma == 1.0
+            && self.saturation == 1.0
+            && self.contrast == 1.0
+            && self.brightness == 0.0
+            && (self.mask == Mask::Off || self.mask_strength <= 0.0)
+    }
+
+    pub fn clamp(&mut self) {
+        let fix = |v: &mut f32, lo: f32, hi: f32, default: f32| {
+            *v = if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                default
+            };
+        };
+        fix(&mut self.scanlines, 0.0, 1.0, 0.0);
+        fix(&mut self.gamma, 0.5, 2.0, 1.0);
+        fix(&mut self.saturation, 0.0, 2.0, 1.0);
+        fix(&mut self.contrast, 0.5, 1.5, 1.0);
+        fix(&mut self.brightness, -0.5, 0.5, 0.0);
+        fix(&mut self.mask_strength, 0.0, 1.0, 0.5);
+    }
+}
+
+/// How far AMD FSR 1 upscales: the ratio of the output size to the internal render size (ADR 0042).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FsrQuality {
+    /// No upscaling pass; the internal resolution setting applies.
+    #[default]
+    Off,
+    /// 1.5x.
+    Quality,
+    /// 1.7x.
+    Balanced,
+    /// 2x.
+    Performance,
+    /// 3x.
+    Ultra,
+}
+
+impl FsrQuality {
+    pub const ALL: [FsrQuality; 5] = [
+        FsrQuality::Off,
+        FsrQuality::Quality,
+        FsrQuality::Balanced,
+        FsrQuality::Performance,
+        FsrQuality::Ultra,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FsrQuality::Off => "Off",
+            FsrQuality::Quality => "Quality (1.5x)",
+            FsrQuality::Balanced => "Balanced (1.7x)",
+            FsrQuality::Performance => "Performance (2x)",
+            FsrQuality::Ultra => "Ultra performance (3x)",
+        }
+    }
+
+    /// Output size over internal size (1.0 when off).
+    pub fn ratio(self) -> f32 {
+        match self {
+            FsrQuality::Off => 1.0,
+            FsrQuality::Quality => 1.5,
+            FsrQuality::Balanced => 1.7,
+            FsrQuality::Performance => 2.0,
+            FsrQuality::Ultra => 3.0,
+        }
+    }
+}
+
+/// AMD FSR 1 spatial upscaling of the presented image (ADR 0042).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fsr {
+    pub quality: FsrQuality,
+    /// Strength of the sharpening that follows the upscale, 0.0 (weakest) ..= 1.0 (sharpest).
+    pub sharpness: f32,
+}
+
+impl Default for Fsr {
+    fn default() -> Self {
+        Fsr {
+            quality: FsrQuality::Off,
+            sharpness: 0.9,
+        }
+    }
+}
+
+impl Fsr {
+    pub fn is_on(&self) -> bool {
+        self.quality != FsrQuality::Off
+    }
+
+    /// The internal resolution factor (over the GameCube's EFB height) that gives the chosen quality's
+    /// ratio for an output `out_height` pixels tall, rounded to the whole factors the targets support.
+    pub fn internal_scale(&self, out_height: u32, efb_height: u32) -> u32 {
+        let wanted = out_height as f32 / self.quality.ratio() / efb_height as f32;
+        (wanted.round() as u32).clamp(1, 4)
+    }
+
+    pub fn clamp(&mut self) {
+        self.sharpness = if self.sharpness.is_finite() {
+            self.sharpness.clamp(0.0, 1.0)
+        } else {
+            0.9
+        };
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Video {
@@ -103,6 +275,10 @@ pub struct Video {
     /// Size of the overlay's text and widgets: 0 follows the window height (1x at 720 pixels), otherwise a
     /// multiple of the display's scale factor.
     pub overlay_scale: f32,
+    /// Scanlines, colour correction and mask applied to the presented image (not to the overlay).
+    pub filters: Filters,
+    /// FSR upscaling, applied before the filters; the overlay is never upscaled.
+    pub fsr: Fsr,
 }
 
 impl Default for Video {
@@ -115,6 +291,8 @@ impl Default for Video {
             vsync: true,
             stats: StatsMode::Off,
             overlay_scale: 0.0,
+            filters: Filters::default(),
+            fsr: Fsr::default(),
         }
     }
 }
@@ -199,11 +377,42 @@ impl Language {
     }
 }
 
-/// Options of the game itself, applied when it starts.
+/// Screenshots and video recordings (ADR 0044).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Capture {
+    /// Draw the overlay (menu, statistics, messages) into screenshots and videos.
+    pub overlay: bool,
+}
+
+/// Options of the game itself, applied when it starts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Game {
     pub language: Language,
+    /// Backup copies of the memory card kept (ticket #37); 0 turns the backups off.
+    pub card_backups: u32,
+}
+
+impl Default for Game {
+    fn default() -> Game {
+        Game {
+            language: Language::default(),
+            card_backups: 5,
+        }
+    }
+}
+
+/// Discord rich presence (ADR 0045). Off unless the player turns it on: until then nothing is sent and no
+/// socket is opened.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Presence {
+    pub enabled: bool,
+    /// The application id of the Discord application whose name and pictures are shown. Discord needs one
+    /// to accept an activity; the repository ships none (see ADR 0045), so presence does nothing until it
+    /// is set here.
+    pub client_id: String,
 }
 
 /// Save states (ADR 0035).
@@ -233,6 +442,10 @@ pub struct Settings {
     pub audio: Audio,
     pub game: Game,
     pub states: States,
+    pub capture: Capture,
+    pub presence: Presence,
+    /// Developer tools in the overlay (the memory watcher, ADR 0048). `FEPOR_DEVELOPER=1` turns it on for a run.
+    pub developer: bool,
 }
 
 impl Settings {
@@ -241,8 +454,11 @@ impl Settings {
         self.video.frame_multiplier = self.video.frame_multiplier.clamp(1, 8);
         self.video.resolution = self.video.resolution.clamp(1, 4);
         self.video.overlay_scale = self.video.overlay_scale.clamp(0.0, 4.0);
+        self.video.filters.clamp();
+        self.video.fsr.clamp();
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
         self.states.rewind_seconds = self.states.rewind_seconds.clamp(10, 600);
+        self.game.card_backups = self.game.card_backups.min(50);
     }
 
     /// Load `path`; the defaults when it does not exist or cannot be read.
@@ -272,6 +488,9 @@ impl Settings {
     /// `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
     pub fn with_env_overrides(mut self) -> Settings {
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+        if std::env::var("FEPOR_DEVELOPER").is_ok_and(|v| v != "0") {
+            self.developer = true;
+        }
         if let Some(v) = std::env::var("FEPOR_STATS").ok() {
             self.video.stats = if v == "fps" {
                 StatsMode::Fps
@@ -420,6 +639,8 @@ mod tests {
         let mut s = Settings::default();
         s.video.frame_multiplier = 3;
         s.video.aspect = Aspect::Wide16x9;
+        s.video.filters.scanlines = 0.25;
+        s.video.filters.mask = Mask::Dots;
         s.audio.volume = 0.4;
         s.game.language = Language::Italian;
         s.save(&path).unwrap();
@@ -433,6 +654,30 @@ mod tests {
         assert_eq!(
             (l.video.frame_multiplier, l.video.resolution, l.audio.volume),
             (8, 1, 1.0)
+        );
+        assert!(Settings::default().video.filters.is_identity());
+        std::fs::write(&path, "[video.filters]\ngamma = 9.0\nscanlines = -1.0\n").unwrap();
+        let f = Settings::load(&path).video.filters;
+        assert_eq!((f.gamma, f.scanlines), (2.0, 0.0));
+        std::fs::write(
+            &path,
+            "[video.fsr]\nquality = \"balanced\"\nsharpness = 4.0\n",
+        )
+        .unwrap();
+        let f = Settings::load(&path).video.fsr;
+        assert_eq!((f.quality, f.sharpness), (FsrQuality::Balanced, 1.0));
+        assert!(!Settings::default().video.fsr.is_on());
+        let fsr = Fsr {
+            quality: FsrQuality::Performance,
+            ..Fsr::default()
+        };
+        assert_eq!(
+            (
+                fsr.internal_scale(1080, 528),
+                fsr.internal_scale(2160, 528),
+                fsr.internal_scale(100, 528)
+            ),
+            (1, 2, 1)
         );
     }
 

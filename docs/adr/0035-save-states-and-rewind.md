@@ -36,6 +36,12 @@ A state is only valid for the same layout (`VERSION` in `runtime/src/state.rs`) 
 
 The game keeps its own copy of the card's directory and block map in RAM, so a state that restored RAM without the card would let the game write through a stale map and corrupt the card. The card image is part of the state and is written back to the card file when it differs. The consequence is the one every emulator's states have: loading a state taken before a save undoes that save. The overlay page says so. Rewind states hold the card too (it is a delta of zero pages unless a save happened).
 
+## Patches, cheats and the card backups (integration with ADR 0025 and the card backups)
+
+- **Patch sets and cheats belong to the session, not to the state.** After the RAM is replaced, `PatchEngine::reapply` writes every enabled set over it again (one-shot sets included; continuous ones and held cheats are rewritten by the per-frame hook anyway). The originals a set saved when it was enabled are not touched, so disabling a cheat after a load puts back the bytes of the moment it was enabled, as it always did, and never a value taken from a loaded state. A state taken while a cheat was on holds the cheat's bytes; loading it with the cheat now off leaves them in memory (nothing records what was there before).
+- **The card.** Just before a load replaces the card image, the game's card guard (`states::set_card_guard`, registered by `protect_card`) makes a backup of the current card file with the normal rules (only when it differs from the newest backup, rotated by `game.card_backups`), so a load or a rewind step never destroys a save made since the last backup. The overlay page says so.
+- **Bug reports** carry a `save state` section: no state loaded, or the slot and age (or the rewind buffer) of the last load.
+
 ## Slots and files
 
 Eight slots in `<data>/states/<game id>-v<disc version>/slotN.fst`: a header (magic and the 8 bytes of disc id), then the state deflated. Writing runs on its own thread through a temporary file; reading and inflating run on their own thread and hand the state to the guest, which applies it at its next safe point. Keys: F5 save, F7 load, F6 next slot (handled where F1 and F2 are, `overlay::Shared::window_event`, and swallowed there); the Save states page of the overlay lists the slots with age and size and has Save and Load buttons; messages appear at the bottom left for four seconds (`states::message`).
