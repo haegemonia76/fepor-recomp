@@ -108,6 +108,7 @@ impl Overlay {
             && video.stats == StatsMode::Off
             && !ui::capture_hud_shown(&self.shared.capture)
             && self.shared.notice().is_none()
+            && fepor_core::states::message().is_none()
         {
             self.shared.memory.set_active(self.ui.memory_live());
             return;

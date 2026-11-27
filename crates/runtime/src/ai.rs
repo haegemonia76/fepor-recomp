@@ -83,3 +83,22 @@ impl Default for Ai {
         Ai::new()
     }
 }
+
+impl Ai {
+    pub fn save(&self, w: &mut fepor_core::snap::W) {
+        w.u32s(&self.regs);
+        w.u32(self.control);
+        w.u64(self.base);
+        w.bool(self.playing_since.is_some());
+        w.u64(self.playing_since.map_or(0, |t| t.elapsed().as_micros() as u64));
+    }
+
+    pub fn load(&mut self, r: &mut fepor_core::snap::R) {
+        r.u32s_into(&mut self.regs);
+        self.control = r.u32();
+        self.base = r.u64();
+        let playing = r.bool();
+        let since = r.u64();
+        self.playing_since = playing.then(|| crate::state::ago(since));
+    }
+}

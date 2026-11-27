@@ -19,6 +19,7 @@ pub mod patch;
 pub mod report;
 pub mod sched;
 pub mod si;
+pub mod state;
 pub mod trace;
 pub mod watch;
 

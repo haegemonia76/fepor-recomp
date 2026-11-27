@@ -344,3 +344,77 @@ impl Default for Gx {
         Gx::new()
     }
 }
+
+impl Gx {
+    /// Write the pipeline's registers and memories (save states, ADR 0035). The decoded-state snapshot and
+    /// the statistics are derived and not kept.
+    pub fn save_state(&self, w: &mut fepor_core::snap::W) {
+        let (cp, xf, bp) = (&self.cp, &self.xf, &self.bp);
+        w.u32(cp.vcd_lo);
+        w.u32(cp.vcd_hi);
+        for a in [&cp.vat_a, &cp.vat_b, &cp.vat_c] {
+            w.u32s(a);
+        }
+        w.u32s(&cp.array_base);
+        w.u32s(&cp.array_stride);
+        w.u32(cp.mat_idx_a);
+        w.u32(cp.mat_idx_b);
+        w.u32s(&xf.mem);
+        w.u32s(&xf.regs);
+        w.u32s(&bp.regs);
+        for t in &bp.tev_regs {
+            for &v in t {
+                w.i32(v);
+            }
+        }
+        for k in &bp.konst {
+            w.buf.extend_from_slice(k);
+        }
+        let mut keys: Vec<u32> = self.tluts.data.keys().copied().collect();
+        keys.sort_unstable();
+        w.u32(keys.len() as u32);
+        for k in keys {
+            w.u32(k);
+            w.bytes(&self.tluts.data[&k]);
+        }
+        w.bytes(&self.buf);
+        w.bool(self.lost);
+        w.u32(self.zero_run as u32);
+    }
+
+    pub fn load_state(&mut self, r: &mut fepor_core::snap::R) {
+        let (cp, xf, bp) = (&mut self.cp, &mut self.xf, &mut self.bp);
+        cp.vcd_lo = r.u32();
+        cp.vcd_hi = r.u32();
+        for a in [&mut cp.vat_a, &mut cp.vat_b, &mut cp.vat_c] {
+            r.u32s_into(a);
+        }
+        r.u32s_into(&mut cp.array_base);
+        r.u32s_into(&mut cp.array_stride);
+        cp.mat_idx_a = r.u32();
+        cp.mat_idx_b = r.u32();
+        r.u32s_into(&mut xf.mem);
+        r.u32s_into(&mut xf.regs);
+        r.u32s_into(&mut bp.regs);
+        for t in &mut bp.tev_regs {
+            for v in t {
+                *v = r.i32();
+            }
+        }
+        for k in &mut bp.konst {
+            for b in k {
+                *b = r.u8();
+            }
+        }
+        self.tluts.data.clear();
+        for _ in 0..r.u32() {
+            let k = r.u32();
+            let d = r.bytes().to_vec();
+            self.tluts.data.insert(k, d);
+        }
+        self.buf = r.bytes().to_vec();
+        self.lost = r.bool();
+        self.zero_run = r.u32() as usize;
+        self.snapshot = None;
+    }
+}

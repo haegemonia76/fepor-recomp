@@ -40,6 +40,10 @@ const OFF_RAM: i32 = 4856;
 const SPR_HLE_STATUS: i32 = 1023;
 /// `spr[1022]`: set while the host frames of an interrupted thread are being abandoned (see `Jit::entry`).
 pub(crate) const SPR_UNWIND: i32 = 1022;
+/// `spr[1021]`: the guest address a resume entry (`Jit::resume_entry`) continues at.
+const SPR_RESUME_PC: i32 = 1021;
+/// `spr[1020]`: the guest address the last poll site continues at (an interrupt delivered there resumes it).
+const SPR_POLL_PC: i32 = 1020;
 
 const RAM_SIZE: i64 = 0x0180_0000;
 
@@ -134,6 +138,8 @@ struct Tr<'a, 'm> {
     fixed: Option<Used>,
     blocks: BTreeMap<u32, Block>,
     resume_labels: BTreeMap<u32, u32>,
+    /// Compile the resume variant (see `Jit::resume_entry`): it enters at the address in `spr[1021]`.
+    resume: bool,
     terminated: bool,
 }
 
@@ -162,7 +168,7 @@ fn mask(mb: u8, me: u8) -> u32 {
     }
 }
 
-pub(crate) fn compile(jit: &Jit, st: &mut State, i: usize) -> *mut u8 {
+pub(crate) fn compile(jit: &Jit, st: &mut State, i: usize, resume: bool) -> *mut u8 {
     let f = &jit.functions[i];
     let State {
         module,
@@ -176,7 +182,7 @@ pub(crate) fn compile(jit: &Jit, st: &mut State, i: usize) -> *mut u8 {
     let mut s = Signature::new(module.isa().default_call_conv());
     s.params.push(AbiParam::new(ptr));
     *counter += 1;
-    let name = format!("f_{:08x}_{}", f.start, counter);
+    let name = format!("{}_{:08x}_{}", if resume { "r" } else { "f" }, f.start, counter);
     let id = module
         .declare_function(&name, Linkage::Local, &s)
         .expect("declare function");
@@ -185,12 +191,14 @@ pub(crate) fn compile(jit: &Jit, st: &mut State, i: usize) -> *mut u8 {
     let used = {
         module.clear_context(clif);
         clif.func.signature = s.clone();
-        Tr::new(jit, f, &mut clif.func, fbc, module, imports, ptr, None).run()
+        let mut t = Tr::new(jit, f, &mut clif.func, fbc, module, imports, ptr, None);
+        t.resume = resume;
+        t.run()
     };
     module.clear_context(clif);
     clif.func.signature = s;
     {
-        Tr::new(
+        let mut t = Tr::new(
             jit,
             f,
             &mut clif.func,
@@ -199,8 +207,9 @@ pub(crate) fn compile(jit: &Jit, st: &mut State, i: usize) -> *mut u8 {
             imports,
             ptr,
             Some(used),
-        )
-        .run();
+        );
+        t.resume = resume;
+        t.run();
     }
     if std::env::var_os("FEPOR_JIT_DUMP")
         .is_some_and(|v| v.to_string_lossy() == format!("{:08x}", f.start))
@@ -264,6 +273,7 @@ impl<'a, 'm> Tr<'a, 'm> {
             fixed,
             blocks: BTreeMap::new(),
             resume_labels: BTreeMap::new(),
+            resume: false,
             terminated: false,
         }
     }
@@ -726,7 +736,7 @@ impl<'a, 'm> Tr<'a, 'm> {
         if internal {
             if t <= from {
                 // a loop needs a safe point too: a guest spinning on a flag an interrupt sets never calls anything
-                self.tick();
+                self.tick(t);
             }
             let blk = self.block_at(t);
             self.b.ins().jump(blk, &[]);
@@ -741,7 +751,8 @@ impl<'a, 'm> Tr<'a, 'm> {
         }
     }
 
-    fn tick(&mut self) {
+    /// Safe point of a loop that continues at guest address `resume`.
+    fn tick(&mut self, resume: u32) {
         let addr = std::ptr::addr_of_mut!(fepor_runtime::abi::fepor_ticks) as i64;
         let a = self.b.ins().iconst(self.ptr, addr);
         let v = self.b.ins().load(I32, flags(), a, 0);
@@ -752,7 +763,14 @@ impl<'a, 'm> Tr<'a, 'm> {
         self.b.ins().brif(v, go, &[], poll, &[]);
         self.b.switch_to_block(poll);
         self.out();
+        // a save state taken here, or an interrupt delivered here that switches threads, resumes the loop at `resume`
+        let at = self.c32(resume);
+        self.b
+            .ins()
+            .store(flags(), at, self.ctx, OFF_SPR + 4 * SPR_POLL_PC);
         self.call("fepor_poll", &[self.ptr], None, &[self.ctx]);
+        // a thread whose frames a state load abandons returns from here like from a call
+        self.check_unwind();
         self.inn();
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
@@ -2113,6 +2131,22 @@ impl<'a, 'm> Tr<'a, 'm> {
                 }
             }
         }
+        // the resume variant continues after any call: the registers are in the context there, and the
+        // host frames above are rebuilt from the guest stack (docs/adr/0035)
+        let mut resumable: BTreeSet<u32> = BTreeSet::new();
+        if self.resume {
+            for &(a, ins) in &words {
+                let call = match ins.op {
+                    Opcode::B | Opcode::Bc | Opcode::Bclr | Opcode::Bcctr => ins.field_lk(),
+                    _ => false,
+                };
+                if call && a + 4 <= f.end {
+                    resumable.insert(a + 4);
+                }
+            }
+            resumable.extend(labels.iter().copied());
+            labels.extend(resumable.iter().copied());
+        }
         labels.insert(f.start);
         for &l in &labels {
             let blk = self.b.create_block();
@@ -2125,9 +2159,24 @@ impl<'a, 'm> Tr<'a, 'm> {
             self.call("fepor_enter", &[I32], None, &[a]);
         }
         self.inn();
-        let first = self.blocks[&f.start];
-        self.b.ins().jump(first, &[]);
-        self.terminated = true;
+        if self.resume {
+            let at = self
+                .b
+                .ins()
+                .load(I32, flags(), self.ctx, OFF_SPR + 4 * SPR_RESUME_PC);
+            let mut sw = Switch::new();
+            for &t in &resumable {
+                sw.set_entry(t as u128, self.blocks[&t]);
+            }
+            let default = self.b.create_block();
+            sw.emit(&mut self.b, at, default);
+            self.b.switch_to_block(default);
+            self.unresolved(f.start, at);
+        } else {
+            let first = self.blocks[&f.start];
+            self.b.ins().jump(first, &[]);
+            self.terminated = true;
+        }
 
         for &(a, ins) in &words {
             self.begin(a);

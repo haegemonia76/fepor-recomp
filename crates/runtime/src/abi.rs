@@ -220,6 +220,23 @@ pub fn jit_active() -> bool {
 /// `Context::spr` slot that is non-zero while the JIT's frames are being abandoned.
 pub const SPR_UNWIND: usize = 1022;
 
+/// Resume variants of compiled functions (`fepor_jit::Jit::resume_entry`), registered with the resolver.
+static RESUME_RESOLVER: std::sync::OnceLock<fn(u32) -> Option<HostFn>> = std::sync::OnceLock::new();
+
+pub fn set_resume_resolver(f: fn(u32) -> Option<HostFn>) {
+    let _ = RESUME_RESOLVER.set(f);
+}
+
+/// The function containing `addr`, entered at `addr` (after `Context::spr[SPR_RESUME_PC]` is set).
+pub fn resume_function(addr: u32) -> Option<HostFn> {
+    RESUME_RESOLVER.get().and_then(|r| r(addr))
+}
+
+/// `Context::spr` slot holding the address a resume variant enters at.
+pub const SPR_RESUME_PC: usize = 1021;
+/// `Context::spr` slot the generated loops fill with the address they continue at before a poll.
+pub const SPR_POLL_PC: usize = 1020;
+
 pub fn guest_function(target: u32) -> Option<HostFn> {
     if let Some(r) = RESOLVER.get() {
         return r(target);
@@ -347,6 +364,12 @@ const POLL_INTERVAL: u32 = 256;
 pub extern "C" fn fepor_poll(c: *mut Context) {
     // SAFETY: single guest thread at a time; the generated code passes its live context.
     unsafe { fepor_ticks = POLL_INTERVAL };
+    // SAFETY: as above.
+    crate::state::poll(unsafe { &mut *c });
+    if crate::sched::unwinding() {
+        // a state was loaded: this thread's frames are abandoned
+        return;
+    }
     crate::intr::poll(c);
 }
 

@@ -290,3 +290,44 @@ impl Default for Exi {
         Exi::new()
     }
 }
+
+impl Exi {
+    pub fn save(&self, w: &mut fepor_core::snap::W) {
+        for ch in &self.ch {
+            w.u32(ch.csr);
+            w.u32(ch.mar);
+            w.u32(ch.length);
+            w.u32(ch.cr);
+            w.u32(ch.data);
+            w.opt_u32(ch.cmd);
+            w.u32(ch.pos);
+            w.bool(ch.card.is_some());
+            if let Some(c) = &ch.card {
+                c.save(w);
+            }
+        }
+        w.bytes(&self.sram);
+        w.u32(self.rtc);
+    }
+
+    pub fn load(&mut self, r: &mut fepor_core::snap::R) {
+        for ch in &mut self.ch {
+            ch.csr = r.u32();
+            ch.mar = r.u32();
+            ch.length = r.u32();
+            ch.cr = r.u32();
+            ch.data = r.u32();
+            ch.cmd = r.opt_u32();
+            ch.pos = r.u32();
+            let had_card = r.bool();
+            match (&mut ch.card, had_card) {
+                (Some(c), true) => c.load(r),
+                (None, false) => {}
+                // the card inserted now is not the one the state was taken with
+                _ => r.failed = true,
+            }
+        }
+        r.bytes_into(&mut self.sram);
+        self.rtc = r.u32();
+    }
+}

@@ -333,6 +333,21 @@ impl Shared {
                     }
                     return true;
                 }
+                // save states: F5 save, F7 load, F6 next slot, F8 held rewinds (ADR 0035)
+                if matches!(code, KeyCode::F5 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8) {
+                    use fepor_core::states;
+                    match code {
+                        KeyCode::F8 => states::set_rewind_held(pressed),
+                        _ if !pressed || *repeat => {}
+                        KeyCode::F5 => states::post(states::Command::Save(states::slot())),
+                        KeyCode::F7 => states::post(states::Command::Load(states::slot())),
+                        _ => {
+                            states::set_slot(states::slot() + 1);
+                            states::set_message(format!("State slot {}", states::slot() + 1));
+                        }
+                    }
+                    return true;
+                }
                 if *code == KeyCode::F12 || *code == KeyCode::F10 {
                     if pressed && !repeat {
                         if *code == KeyCode::F12 {

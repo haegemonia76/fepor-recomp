@@ -76,6 +76,11 @@ impl AudioSink for SdlSink {
         };
         let _ = self.tx.send((rate, out));
     }
+
+    fn discard(&mut self) {
+        // an empty buffer at rate 0 tells the audio thread to drop what is queued
+        let _ = self.tx.send((0, Vec::new()));
+    }
 }
 
 fn sdl_thread(
@@ -135,7 +140,7 @@ fn sdl_thread(
                 stream = None;
             }
         }
-        if r != rate || stream.is_none() {
+        if r != 0 && (r != rate || stream.is_none()) {
             rate = r;
             let spec = AudioSpec {
                 freq: Some(r as i32),
@@ -158,6 +163,13 @@ fn sdl_thread(
             if let Some(s) = &stream {
                 let _ = s.resume();
             }
+        }
+        if r == 0 {
+            // the guest loaded a save state: what is queued is from another moment
+            if let Some(s) = &stream {
+                let _ = s.clear();
+            }
+            continue;
         }
         if let Some(s) = &stream {
             let queued = s.queued_bytes().unwrap_or(0);
@@ -206,6 +218,12 @@ impl AudioSink for Tee {
     fn push(&mut self, rate: u32, samples: &[i16]) {
         for s in &mut self.0 {
             s.push(rate, samples);
+        }
+    }
+
+    fn discard(&mut self) {
+        for s in &mut self.0 {
+            s.discard();
         }
     }
 }

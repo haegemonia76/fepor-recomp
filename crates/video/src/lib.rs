@@ -93,6 +93,8 @@ struct TexKey {
 }
 
 struct EfbTexture {
+    /// Kept for the save state, which reads it back.
+    tex: wgpu::Texture,
     addr: u32,
     width: u32,
     height: u32,
@@ -372,7 +374,7 @@ fn make_targets(device: &wgpu::Device, scale: u32) -> Targets {
     let efb = tex(
         "efb",
         Rgba8Unorm,
-        U::RENDER_ATTACHMENT | U::COPY_SRC | U::TEXTURE_BINDING,
+        U::RENDER_ATTACHMENT | U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING,
     );
     let depth = tex("efb depth", Depth32Float, U::RENDER_ATTACHMENT);
     let alt = tex(
@@ -2364,6 +2366,7 @@ impl Renderer {
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
@@ -2436,6 +2439,7 @@ impl Renderer {
                 );
             }
             self.efb_textures.push(EfbTexture {
+                tex,
                 addr: c.dest,
                 width: tw,
                 height: th,
@@ -2494,6 +2498,21 @@ impl Sink for Renderer {
 
     fn recycle(&mut self) -> Vec<fepor_gx::state::Vertex> {
         std::mem::take(&mut self.spare_verts)
+    }
+
+    fn save_state(&mut self, w: &mut fepor_core::snap::W) {
+        self.save_gpu_state(w);
+    }
+
+    fn load_state(&mut self, r: &mut fepor_core::snap::R, ram: &[u8]) {
+        self.load_gpu_state(r, ram);
+    }
+
+    fn picture_hash(&mut self) -> Option<u64> {
+        let px = self.read_efb(0, 0, EFB_WIDTH, EFB_HEIGHT);
+        Some(px.chunks_exact(8).fold(0xcbf2_9ce4_8422_2325u64, |h, c| {
+            (h ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(0x100_0000_01b3)
+        }))
     }
 
     fn event(&mut self, event: Event, ram: &[u8], tluts: &Tluts) {
@@ -2640,5 +2659,203 @@ impl Renderer {
             ax,
             ai,
         );
+    }
+}
+
+// ---- save states (ADR 0035) ------------------------------------------------------------------------------
+
+/// Nearest-neighbour resize of an RGBA8 image (a state taken at another internal resolution).
+fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((dw * dh * 4) as usize);
+    for y in 0..dh {
+        let sy = (y * sh / dh) as usize;
+        for x in 0..dw {
+            let sx = (x * sw / dw) as usize;
+            let i = (sy * sw as usize + sx) * 4;
+            out.extend_from_slice(&src[i..i + 4]);
+        }
+    }
+    out
+}
+
+impl Renderer {
+    /// Read several RGBA8 textures back with one submission and one wait.
+    fn read_textures(&mut self, textures: &[(&wgpu::Texture, u32, u32)]) -> Vec<Vec<u8>> {
+        let rows: Vec<u32> = textures.iter().map(|t| (t.1 * 4).div_ceil(256) * 256).collect();
+        let sizes: Vec<u64> = textures
+            .iter()
+            .zip(&rows)
+            .map(|(t, &r)| r as u64 * t.2 as u64)
+            .collect();
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: sizes.iter().sum::<u64>().max(4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let mut offset = 0u64;
+        for ((t, &row), &size) in textures.iter().zip(&rows).zip(&sizes) {
+            enc.copy_texture_to_buffer(
+                t.0.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset,
+                        bytes_per_row: Some(row),
+                        rows_per_image: Some(t.2),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: t.1,
+                    height: t.2,
+                    depth_or_array_layers: 1,
+                },
+            );
+            offset += size;
+        }
+        self.queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::Wait);
+        let data = slice.get_mapped_range();
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        for ((t, &row), &size) in textures.iter().zip(&rows).zip(&sizes) {
+            let mut px = Vec::with_capacity((t.1 * t.2 * 4) as usize);
+            for y in 0..t.2 as usize {
+                let a = offset + y * row as usize;
+                px.extend_from_slice(&data[a..a + t.1 as usize * 4]);
+            }
+            out.push(px);
+            offset += size as usize;
+        }
+        out
+    }
+
+    /// The picture a state needs that main memory does not hold: the EFB (colour; the depth buffer is
+    /// not kept, the next frame starts with a clear) and the copies of it that textures are read from.
+    fn save_gpu_state(&mut self, w: &mut fepor_core::snap::W) {
+        self.flush();
+        let s = self.scale;
+        let mut list: Vec<(&wgpu::Texture, u32, u32)> =
+            vec![(&self.efb, EFB_WIDTH * s, EFB_HEIGHT * s)];
+        list.extend(
+            self.efb_textures
+                .iter()
+                .map(|t| (&t.tex, t.tex.width(), t.tex.height())),
+        );
+        // `read_textures` needs `&mut self`: copy out what it takes
+        let list: Vec<(wgpu::Texture, u32, u32)> =
+            list.into_iter().map(|(t, w, h)| (t.clone(), w, h)).collect();
+        let refs: Vec<(&wgpu::Texture, u32, u32)> = list.iter().map(|(t, w, h)| (t, *w, *h)).collect();
+        let px = self.read_textures(&refs);
+        w.u32(s);
+        w.bytes(&px[0]);
+        w.u32(self.efb_textures.len() as u32);
+        for (t, px) in self.efb_textures.iter().zip(&px[1..]) {
+            w.u32(t.addr);
+            w.u32(t.width);
+            w.u32(t.height);
+            w.u32(t.tex.width());
+            w.u32(t.tex.height());
+            w.u64(t.ram_len as u64);
+            w.u64(t.ram_fp);
+            w.bytes(px);
+        }
+    }
+
+    fn make_efb_copy(&mut self, w: u32, h: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("efb copy"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    }
+
+    fn upload(&self, tex: &wgpu::Texture, w: u32, h: u32, px: &[u8]) {
+        self.queue.write_texture(
+            tex.as_image_copy(),
+            px,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn load_gpu_state(&mut self, r: &mut fepor_core::snap::R, _ram: &[u8]) {
+        // everything recorded for the old picture is void
+        self.flush();
+        self.plan = None;
+        self.prev = None;
+        self.rec.clear();
+        self.draw_cache = None;
+        self.pending_clear = None;
+        self.hash_memo.clear();
+        let s = self.scale;
+        let saved_scale = r.u32().max(1);
+        let efb = r.bytes();
+        let (sw, sh) = (EFB_WIDTH * saved_scale, EFB_HEIGHT * saved_scale);
+        if efb.len() != (sw * sh * 4) as usize {
+            r.failed = true;
+            return;
+        }
+        let (dw, dh) = (EFB_WIDTH * s, EFB_HEIGHT * s);
+        let efb = if saved_scale == s {
+            efb.to_vec()
+        } else {
+            resample(efb, sw, sh, dw, dh)
+        };
+        self.upload(&self.efb, dw, dh, &efb);
+        self.efb_textures.clear();
+        for _ in 0..r.u32() {
+            let (addr, width, height) = (r.u32(), r.u32(), r.u32());
+            let (tw, th) = (r.u32(), r.u32());
+            let (ram_len, ram_fp) = (r.u64() as usize, r.u64());
+            let px = r.bytes();
+            if r.failed || px.len() != (tw * th * 4) as usize || tw == 0 || th == 0 {
+                r.failed = true;
+                return;
+            }
+            // the copy was made at the saved resolution: its size follows the new one
+            let (nw, nh) = ((tw * s / saved_scale).max(1), (th * s / saved_scale).max(1));
+            let px = if saved_scale == s {
+                px.to_vec()
+            } else {
+                resample(px, tw, th, nw, nh)
+            };
+            let tex = self.make_efb_copy(nw, nh);
+            self.upload(&tex, nw, nh, &px);
+            let view = Rc::new(tex.create_view(&Default::default()));
+            self.efb_textures.push(EfbTexture {
+                tex,
+                addr,
+                width,
+                height,
+                view,
+                ram_len,
+                ram_fp,
+            });
+        }
+        self.tex_binds.clear();
     }
 }

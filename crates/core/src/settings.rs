@@ -415,12 +415,33 @@ pub struct Presence {
     pub client_id: String,
 }
 
+/// Save states (ADR 0035).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct States {
+    /// Keep a rewind buffer: a state every second, held while the rewind key is down. Costs memory and a
+    /// few milliseconds each second, so it is off until asked for.
+    pub rewind: bool,
+    /// Seconds of play the rewind buffer keeps (10..=600), within `REWIND_MEMORY_MIB`.
+    pub rewind_seconds: u32,
+}
+
+impl Default for States {
+    fn default() -> Self {
+        States {
+            rewind: false,
+            rewind_seconds: 60,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub video: Video,
     pub audio: Audio,
     pub game: Game,
+    pub states: States,
     pub capture: Capture,
     pub presence: Presence,
     /// Developer tools in the overlay (the memory watcher, ADR 0048). `FEPOR_DEVELOPER=1` turns it on for a run.
@@ -436,6 +457,7 @@ impl Settings {
         self.video.filters.clamp();
         self.video.fsr.clamp();
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
+        self.states.rewind_seconds = self.states.rewind_seconds.clamp(10, 600);
         self.game.card_backups = self.game.card_backups.min(50);
     }
 
@@ -487,6 +509,9 @@ impl Settings {
             .and_then(|v| Aspect::parse(&v))
         {
             self.video.aspect = a;
+        }
+        if let Ok(v) = std::env::var("FEPOR_REWIND") {
+            self.states.rewind = v != "0";
         }
         // started from the launcher's Big Picture mode: full screen, for this run
         if std::env::var("RECOMPLAUNCHER_MODE").is_ok_and(|m| m == "bigpicture") {
