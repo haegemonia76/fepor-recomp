@@ -18,17 +18,19 @@ pub enum Page {
     Language,
     Controls,
     Card,
+    Mods,
     Help,
     Quit,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [
+    pub const ALL: [Page; 8] = [
         Page::Video,
         Page::Audio,
         Page::Language,
         Page::Controls,
         Page::Card,
+        Page::Mods,
         Page::Help,
         Page::Quit,
     ];
@@ -39,6 +41,7 @@ impl Page {
             Page::Audio => "Audio",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
+            Page::Mods => "Mods",
             Page::Language => "Language",
             Page::Help => "Help",
             Page::Quit => "Quit",
@@ -71,6 +74,7 @@ pub struct UiState {
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
+    mods: crate::mods::ModsView,
 }
 
 impl UiState {
@@ -84,6 +88,7 @@ impl UiState {
             pending: Vec::new(),
             pending_at: None,
             pad: crate::pad::PadView::default(),
+            mods: crate::mods::ModsView::default(),
             pad_selected: None,
         }
     }
@@ -319,6 +324,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
+            Page::Mods => crate::mods::page(ui, &mut st.mods, shared),
             Page::Help => help(ui, shared),
             Page::Quit => quit(ui),
         });
