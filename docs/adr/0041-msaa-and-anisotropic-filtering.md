@@ -40,4 +40,6 @@ must stay exactly what it was.
 
 - MSAA costs fill rate and memory; it smooths geometry edges, not alpha-tested texture edges or shader
   aliasing (the game's own textures and 2D art are untouched).
+- Most of what the game draws in 3D (trees, units) are alpha-tested textured quads, so MSAA changes few pixels in the
+  scenes reachable by a scripted run (terrain polygon edges only); anisotropy reaches the whole ground.
 - Verified on one AMD RX 7800 XT with Vulkan via headless dumps only.
