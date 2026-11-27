@@ -555,6 +555,25 @@ impl Presenter {
         self.window.current_monitor()?.refresh_rate_millihertz()
     }
 
+    /// Window, display and swapchain, for a bug report.
+    pub fn describe(&self) -> String {
+        let size = self.window.inner_size();
+        let monitor = self.window.current_monitor();
+        format!(
+            "window: {}x{} px, scale factor {}, fullscreen {}\ndisplay: {} , refresh {} Hz\nswapchain: {:?}, present mode {:?}\n",
+            size.width,
+            size.height,
+            self.window.scale_factor(),
+            self.window.fullscreen().is_some(),
+            monitor
+                .as_ref()
+                .map_or("unknown".to_string(), |m| format!("{}x{} px", m.size().width, m.size().height)),
+            self.refresh_millihz().map_or("unknown".into(), |m| format!("{:.2}", m as f32 / 1000.0)),
+            self.config.format,
+            self.config.present_mode,
+        )
+    }
+
     /// Choose the present mode. With `vsync` an image waits for the display's refresh (no tearing), except
     /// that the renderer's interpolated images (`paced`) are timed by the renderer itself and must not block
     /// it, so they use the newest-image-wins mode. Without `vsync` images go out at once.

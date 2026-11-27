@@ -100,6 +100,17 @@ impl Jit {
         })
     }
 
+    /// How many functions the program has and how many are compiled so far, for bug reports.
+    pub fn summary(&self) -> String {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        format!(
+            "{} functions analysed, {} compiled on first call so far ({:.0} ms; the background workers have their own count)",
+            self.functions.len(),
+            st.compiled,
+            st.compile_ms
+        )
+    }
+
     /// The compiler of this process, once `install` has run.
     pub fn global() -> Option<&'static Jit> {
         JIT.get()

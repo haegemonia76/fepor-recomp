@@ -378,10 +378,33 @@ impl Language {
 }
 
 /// Options of the game itself, applied when it starts.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Game {
     pub language: Language,
+    /// Backup copies of the memory card kept (ticket #37); 0 turns the backups off.
+    pub card_backups: u32,
+}
+
+impl Default for Game {
+    fn default() -> Game {
+        Game {
+            language: Language::default(),
+            card_backups: 5,
+        }
+    }
+}
+
+/// Discord rich presence (ADR 0045). Off unless the player turns it on: until then nothing is sent and no
+/// socket is opened.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Presence {
+    pub enabled: bool,
+    /// The application id of the Discord application whose name and pictures are shown. Discord needs one
+    /// to accept an activity; the repository ships none (see ADR 0045), so presence does nothing until it
+    /// is set here.
+    pub client_id: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -390,6 +413,9 @@ pub struct Settings {
     pub video: Video,
     pub audio: Audio,
     pub game: Game,
+    pub presence: Presence,
+    /// Developer tools in the overlay (the memory watcher, ADR 0048). `FEPOR_DEVELOPER=1` turns it on for a run.
+    pub developer: bool,
 }
 
 impl Settings {
@@ -401,6 +427,7 @@ impl Settings {
         self.video.filters.clamp();
         self.video.fsr.clamp();
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
+        self.game.card_backups = self.game.card_backups.min(50);
     }
 
     /// Load `path`; the defaults when it does not exist or cannot be read.
@@ -430,6 +457,9 @@ impl Settings {
     /// `FEPOR_ASPECT`, `FEPOR_STATS`). They win over the file for this run and are not saved.
     pub fn with_env_overrides(mut self) -> Settings {
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+        if std::env::var("FEPOR_DEVELOPER").is_ok_and(|v| v != "0") {
+            self.developer = true;
+        }
         if let Some(v) = std::env::var("FEPOR_STATS").ok() {
             self.video.stats = if v == "fps" {
                 StatsMode::Fps
