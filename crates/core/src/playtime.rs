@@ -1,4 +1,4 @@
-//! Playtime per game, kept in `<data>/playtime.toml` (ADR 0025).
+//! Playtime per game, kept in `<data>/playtime.toml` (ADR 0045).
 //!
 //! The data folder is the player's profile (ADR 0010): its saves, settings and this file belong together.
 //! The file holds whole seconds per game id (`[seconds]`, one entry per disc region played). A file that

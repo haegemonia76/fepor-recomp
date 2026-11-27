@@ -158,7 +158,7 @@ fn install_jit(game_id: &str, dol: &Dol) {
     jit.precompile(symbols, workers);
 }
 
-/// Count the time the game runs with the overlay closed (ADR 0025) into `<data>/playtime.toml`, and publish
+/// Count the time the game runs with the overlay closed (ADR 0045) into `<data>/playtime.toml`, and publish
 /// the total for the overlay. Saved every 10 seconds and whenever counting stops (the overlay opening, which
 /// is also the way to the Quit page).
 fn track_playtime(game_id: String, data: PathBuf, overlay: Arc<fepor_overlay::Shared>) {

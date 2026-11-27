@@ -1,4 +1,4 @@
-# 0025 Playtime and Discord rich presence
+# 0045 Playtime and Discord rich presence
 
 Status: accepted (implements ticket #45)
 

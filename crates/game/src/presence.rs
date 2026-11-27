@@ -1,4 +1,4 @@
-//! Discord rich presence (ADR 0025): a minimal client of Discord's local IPC, without a library.
+//! Discord rich presence (ADR 0045): a minimal client of Discord's local IPC, without a library.
 //!
 //! Strictly opt-in (`presence.enabled` in `settings.toml`, the overlay's Help page). While it is off the
 //! thread only reads the setting: no socket is looked for, nothing is written anywhere. What is sent when it
