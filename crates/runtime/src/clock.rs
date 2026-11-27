@@ -1,4 +1,4 @@
-//! The guest's clock: real time scaled by the game speed (`fepor_core::speed`, ADR 0025).
+//! The guest's clock: real time scaled by the game speed (`fepor_core::speed`, ADR 0036).
 //!
 //! The time base, the retrace, the audio DMA and the audio sample counter all measure time here, so changing
 //! the speed makes the whole machine faster or slower at once and the game cannot tell. Time is in guest

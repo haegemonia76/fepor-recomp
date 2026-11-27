@@ -209,7 +209,7 @@ impl Language {
 #[serde(default)]
 pub struct Game {
     pub language: Language,
-    /// The speed while the fast-forward key is held (ADR 0025).
+    /// The speed while the fast-forward key is held (ADR 0036).
     pub fast_forward: Speed,
     /// The speed while the slow-motion key is held.
     pub slow_motion: Speed,

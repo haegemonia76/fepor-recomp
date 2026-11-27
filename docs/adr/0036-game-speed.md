@@ -1,4 +1,4 @@
-# 0025 Fast-forward, slow motion and the guest clock
+# 0036 Fast-forward, slow motion and the guest clock
 
 Status: accepted (ticket #36)
 

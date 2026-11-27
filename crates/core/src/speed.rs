@@ -1,4 +1,4 @@
-//! Game speed (ADR 0025): fast-forward and slow motion.
+//! Game speed (ADR 0036): fast-forward and slow motion.
 //!
 //! The runtime's clock (time base, retrace, audio DMA) runs at `factor()` times real time, so the whole machine
 //! speeds up or slows down together. The factor is set by the window's hotkeys (hold) or `FEPOR_SPEED` and read by

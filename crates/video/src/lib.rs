@@ -417,7 +417,7 @@ pub struct Renderer {
     pending_clear: Option<([f64; 4], f32)>,
     /// Images shown per guest frame (1 = every frame as it comes).
     mult: u32,
-    /// The game runs faster than real time (ADR 0025): no interpolation, no waiting for the display, and
+    /// The game runs faster than real time (ADR 0036): no interpolation, no waiting for the display, and
     /// only some of the frames are shown. `last_fast_show` is when the last one was.
     fast: bool,
     last_fast_show: Option<Instant>,

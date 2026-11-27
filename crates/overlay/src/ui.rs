@@ -456,7 +456,7 @@ fn audio(ui: &mut egui::Ui, shared: &Shared) {
     }
 }
 
-/// Fast-forward and slow motion (ADR 0025): the speeds of the two held keys and the sound while they are used.
+/// Fast-forward and slow motion (ADR 0036): the speeds of the two held keys and the sound while they are used.
 fn speed(ui: &mut egui::Ui, shared: &Shared) {
     use fepor_core::settings::SpeedAudio;
     use fepor_core::speed::Speed;

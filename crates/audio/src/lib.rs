@@ -192,7 +192,7 @@ impl AudioSink for Tee {
     }
 }
 
-/// The sound policy while the game does not run at normal speed (ADR 0025). The game produces its samples
+/// The sound policy while the game does not run at normal speed (ADR 0036). The game produces its samples
 /// at the speed's pace, so playing them at `rate * factor` keeps the stream continuous: the pitch follows
 /// the speed. Uncapped is too fast to follow, and "Silent" is the player's choice: nothing is played.
 struct SpeedPolicy {

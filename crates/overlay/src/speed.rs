@@ -1,4 +1,4 @@
-//! The fast-forward and slow-motion keys (ADR 0025): held, so releasing them returns to normal speed.
+//! The fast-forward and slow-motion keys (ADR 0036): held, so releasing them returns to normal speed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
