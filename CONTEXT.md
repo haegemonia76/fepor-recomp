@@ -17,7 +17,9 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **LLE**: low-level emulation. Used only for the GX FIFO: guest code writes to the write-gather pipe and the runtime parses the CP/XF/BP command stream.
 - **GX backend**: renderer built on SDL_GPU consuming the parsed FIFO. Renders into a resizable virtual EFB.
 - **Virtual pad**: GameCube controller abstraction fed by the input layer (remapping, glyph sets Xbox/Nintendo/PlayStation).
-- **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler.
+- **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler. A fiber is not saved: a **save state** rebuilds it from the guest's own stack (ADR 0035).
+- **Save state**: the whole machine (RAM, ARAM, hardware, GX and the video backend's EFB, threads as `Context`s, memory cards) as one byte string, taken and loaded at a poll point; kept in slots under `<data>/states/<game id>-v<version>`, and as a **rewind buffer** (a state every second, older ones as compressed differences).
+- **Resume variant**: a second compilation of a guest function that enters at a call return address or a loop head instead of at its start (`Jit::resume_entry`): how a loaded thread's host frames are rebuilt.
 - **Start / Origin**: a function start found by analysis and why (`Entry`, `Config`, `Call`, `TailCall`, `DataPointer`, `AddressLoad`, `Gap`). Untrusted origins are rejected when preceding code runs straight into them (mid-function labels).
 - **Data folder**: the single directory (`--data`, `RECOMPLAUNCHER_DATA`) where generated code, the build, saves, config, cache and logs live (ADR 0010).
 - **Prepare**: the setup step (`fepor-recomp prepare`) that builds the game from the player's copy; **profile**: `packaging/recomplauncher.json`, the RecompLauncher integration file.

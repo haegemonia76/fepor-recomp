@@ -9,6 +9,8 @@ pub mod image;
 pub mod memcard;
 pub mod paths;
 pub mod settings;
+pub mod snap;
+pub mod states;
 pub mod stats;
 pub mod version;
 

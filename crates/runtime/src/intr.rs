@@ -124,12 +124,25 @@ fn deliver(c: &mut Context, number: u32) {
         );
     }
     sched::set_irq_ctx(me, Some(ctx_virtual));
+    sched::enter_irq(
+        me,
+        sched::IrqFrame {
+            f: c.f,
+            fpscr: c.fpscr,
+            pc: c.spr[crate::abi::SPR_POLL_PC],
+        },
+    );
     c.r[5] = c.msr; // SRR1
     c.r[3] = number;
     c.r[4] = ctx_virtual;
     c.msr = (c.msr & !MSR_EE) | 0x30;
     let unwound = crate::hle::run(f, c);
+    if sched::unwinding() {
+        // a state load replaced the threads while this one was parked in the handler: nothing here is its any more
+        return;
+    }
     sched::set_irq_ctx(me, outer);
+    sched::leave_irq(me);
 
     if !unwound {
         // The handler returned normally: the interrupted code continues with its own registers.

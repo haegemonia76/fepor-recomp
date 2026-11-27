@@ -71,7 +71,7 @@ impl Overlay {
     ) {
         let open = self.shared.is_open();
         let video = self.shared.settings.get().video;
-        if !open && video.stats == StatsMode::Off {
+        if !open && video.stats == StatsMode::Off && fepor_core::states::message().is_none() {
             return;
         }
         // 0 = auto: 1x at a 720-pixel-high window, growing with it, so the text stays readable on big screens

@@ -18,17 +18,19 @@ pub enum Page {
     Language,
     Controls,
     Card,
+    States,
     Help,
     Quit,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [
+    pub const ALL: [Page; 8] = [
         Page::Video,
         Page::Audio,
         Page::Language,
         Page::Controls,
         Page::Card,
+        Page::States,
         Page::Help,
         Page::Quit,
     ];
@@ -39,6 +41,7 @@ impl Page {
             Page::Audio => "Audio",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
+            Page::States => "Save states",
             Page::Language => "Language",
             Page::Help => "Help",
             Page::Quit => "Quit",
@@ -124,9 +127,31 @@ pub fn show(
     if stats != StatsMode::Off {
         stats_hud(root, &shared.stats(), stats == StatsMode::Full);
     }
+    toast(root);
     if open {
         settings_panel(root, st, shared);
     }
+}
+
+/// The save state line ("Saved slot 2"), at the bottom left for a few seconds.
+fn toast(root: &mut egui::Ui) {
+    let Some(text) = fepor_core::states::message() else {
+        return;
+    };
+    let r = root.max_rect();
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(r.left() + 8.0, r.bottom() - 40.0),
+        egui::vec2(520.0, 32.0),
+    );
+    let ui = &mut root.new_child(egui::UiBuilder::new().max_rect(rect));
+    egui::Frame::new()
+        .fill(crate::theme::BAR.gamma_multiply(0.9))
+        .stroke(egui::Stroke::new(1.0, crate::theme::GOLD_DARK))
+        .corner_radius(4.0)
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).color(Color32::WHITE));
+        });
 }
 
 const GOOD: Color32 = Color32::from_rgb(110, 220, 120);
@@ -319,6 +344,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
+            Page::States => states(ui, shared),
             Page::Help => help(ui, shared),
             Page::Quit => quit(ui),
         });
@@ -791,6 +817,75 @@ fn export(card: &std::path::Path, dir: &std::path::Path) -> String {
     match run() {
         Ok(n) => format!("Exported {n} save(s)."),
         Err(e) => format!("Export failed: {e}"),
+    }
+}
+
+/// How long ago a slot was written, for the list.
+fn ago(t: std::time::SystemTime) -> String {
+    let s = t.elapsed().map_or(0, |d| d.as_secs());
+    match s {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{} h ago", s / 3600),
+        _ => format!("{} days ago", s / 86_400),
+    }
+}
+
+/// Save states (ADR 0035): eight slots, the quick save and load keys, the rewind buffer.
+fn states(ui: &mut egui::Ui, shared: &Shared) {
+    use fepor_core::states;
+    if states::slot_path(0).is_none() {
+        ui.label("Save states are not available (the game has not started).");
+        return;
+    }
+    ui.label("F5 saves and F7 loads the chosen slot, F6 chooses the next one. Hold F8 to rewind.");
+    ui.label(
+        RichText::new(
+            "A state holds the whole machine, the memory card included: loading one puts the card back as it was when the state was saved.",
+        )
+        .small()
+        .weak(),
+    );
+    ui.add_space(6.0);
+    let current = states::slot();
+    let infos = states::list();
+    for (i, info) in infos.iter().enumerate() {
+        let n = i as u8;
+        ui.horizontal(|ui| {
+            if ui.selectable_label(current == n, format!("Slot {}", n + 1)).clicked() {
+                states::set_slot(n);
+            }
+            if ui.button("Save").clicked() {
+                states::set_slot(n);
+                states::post(states::Command::Save(n));
+            }
+            if ui.add_enabled(info.is_some(), egui::Button::new("Load")).clicked() {
+                states::set_slot(n);
+                states::post(states::Command::Load(n));
+            }
+            match info {
+                Some(i) => ui.label(format!("{}   {:.1} MB", ago(i.modified), i.bytes as f64 / 1e6)),
+                None => ui.label(RichText::new("empty").weak()),
+            };
+        });
+    }
+    ui.add_space(10.0);
+    ui.separator();
+    let before = shared.settings.get().states;
+    let mut s = before.clone();
+    ui.checkbox(&mut s.rewind, "Keep a rewind buffer (a state every second)");
+    ui.add_enabled_ui(s.rewind, |ui| {
+        ui.add(egui::Slider::new(&mut s.rewind_seconds, 10..=600).suffix(" s").text("History"));
+    });
+    if s.rewind {
+        ui.label(format!(
+            "Held now: {} s of play (at most {} MiB).",
+            states::rewind_seconds(),
+            states::REWIND_MEMORY_MIB
+        ));
+    }
+    if s != before {
+        shared.settings.update(|x| x.states = s);
     }
 }
 

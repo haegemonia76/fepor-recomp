@@ -139,3 +139,17 @@ impl Default for Di {
         Di::new()
     }
 }
+
+impl Di {
+    pub fn save(&self, w: &mut fepor_core::snap::W) {
+        w.u32s(&self.regs);
+        w.u32(self.status);
+        w.u32(self.cover);
+    }
+
+    pub fn load(&mut self, r: &mut fepor_core::snap::R) {
+        r.u32s_into(&mut self.regs);
+        self.status = r.u32();
+        self.cover = r.u32();
+    }
+}

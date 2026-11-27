@@ -277,6 +277,43 @@ impl MemCard {
     }
 }
 
+impl MemCard {
+    /// The card as a save state keeps it: the whole image and the command state machine.
+    pub fn save(&self, w: &mut fepor_core::snap::W) {
+        w.bytes(&self.data);
+        w.u8(self.status);
+        w.u8(self.interrupt_switch);
+        w.bool(self.interrupt_set);
+        w.u8(self.command);
+        w.u32(self.position);
+        w.u32(self.address);
+        w.buf.extend_from_slice(&self.buffer);
+    }
+
+    /// Restore it and write the image back to the file when it differs: the saves on the card are part
+    /// of the machine's state (the game keeps a copy of the directory in RAM), so they go back with it.
+    pub fn load(&mut self, r: &mut fepor_core::snap::R) {
+        let data = r.bytes();
+        if data.len() != self.data.len() {
+            r.failed = true;
+            return;
+        }
+        if data != &self.data[..] {
+            self.data.copy_from_slice(data);
+            self.persist(0, self.data.len());
+        }
+        self.status = r.u8();
+        self.interrupt_switch = r.u8();
+        self.interrupt_set = r.bool();
+        self.command = r.u8();
+        self.position = r.u32();
+        self.address = r.u32();
+        for b in self.buffer.iter_mut() {
+            *b = r.u8();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

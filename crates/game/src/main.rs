@@ -144,6 +144,7 @@ fn install_jit(game_id: &str, dol: &Dol) {
     let symbols = fepor_runtime::hle::symbols();
     let jit = fepor_jit::Jit::install(dol.clone(), &analysis, &cfg.hle, &symbols, trace_calls);
     abi::set_resolver(|target| fepor_jit::Jit::global()?.entry(target));
+    abi::set_resume_resolver(|addr| fepor_jit::Jit::global()?.resume_entry(addr));
     // The rest of the game's code is compiled in the background, ahead of its first call.
     // FEPOR_JIT_WORKERS=0 turns it off (functions then compile on first call).
     let workers = std::env::var("FEPOR_JIT_WORKERS")
@@ -191,12 +192,17 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     m.hw.set_language(overlay.settings.get().game.language.sram_code());
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
+    fepor_runtime::state::configure(overlay.settings.clone(), &data);
     abi::start_watchdog();
     let mut ctx = Context::new(m.ram_ptr());
     fepor_runtime::sched::init(&mut *ctx);
     let start: HostFn = abi::find_function(entry)
         .ok_or_else(|| format!("entry point {entry:#010x} has no generated function"))?;
     fepor_runtime::hle::run(start, &mut ctx);
+    if fepor_runtime::sched::unwinding() {
+        // a state load abandoned this thread's frames: it serves as a host for the loaded threads
+        fepor_runtime::sched::serve_boot();
+    }
     Err("the game returned from its entry point".into())
 }
 

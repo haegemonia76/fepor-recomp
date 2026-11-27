@@ -53,6 +53,8 @@ pub struct Jit {
     trace_calls: bool,
     /// `FEPOR_TRACE=jit`: how long compiling takes.
     trace_jit: bool,
+    /// Resume variants (`resume_entry`) by function index.
+    resumes: Mutex<HashMap<usize, usize>>,
     state: Mutex<State>,
 }
 
@@ -96,6 +98,7 @@ impl Jit {
             table,
             trace_calls,
             trace_jit: std::env::var("FEPOR_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "jit")),
+            resumes: Mutex::new(HashMap::new()),
             state: Mutex::new(new_state(hle_symbols)),
         })
     }
@@ -110,6 +113,33 @@ impl Jit {
         let i = *self.index.get(&target)?;
         // SAFETY: the pointer is either a finished function of the right signature or null (compile below).
         Some(unsafe { std::mem::transmute::<*mut u8, HostFn>(self.resolve(i)) })
+    }
+
+    /// A variant of the function containing guest address `addr` that continues there instead of at its
+    /// start: `addr` is the instruction after one of its calls or a loop head, the context holds the
+    /// registers, and the caller puts `addr` in `spr[1021]` first (`Context::spr`). This is how a thread
+    /// is rebuilt from its guest stack when a save state is loaded (docs/adr/0035). Compiled when first
+    /// asked for, not in the table: normal calls never reach it.
+    pub fn resume_entry(&self, addr: u32) -> Option<HostFn> {
+        let i = self.functions.partition_point(|f| f.start <= addr).checked_sub(1)?;
+        let f = &self.functions[i];
+        if addr >= f.end || self.hle.contains_key(&f.start) {
+            return None;
+        }
+        if let Some(&p) = self.resumes.lock().unwrap_or_else(|e| e.into_inner()).get(&i) {
+            // SAFETY: a finished function of the right signature.
+            return Some(unsafe { std::mem::transmute::<usize, HostFn>(p) });
+        }
+        let p = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            translate::compile(self, &mut st, i, true) as usize
+        };
+        self.resumes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(i, p);
+        // SAFETY: as above.
+        Some(unsafe { std::mem::transmute::<usize, HostFn>(p) })
     }
 
     /// Compile function `i` unless already done; the code address.
@@ -130,7 +160,7 @@ impl Jit {
             return p;
         }
         let started = std::time::Instant::now();
-        let p = translate::compile(self, st, i);
+        let p = translate::compile(self, st, i, false);
         let p = match self.table[i].compare_exchange(
             std::ptr::null_mut(),
             p,
