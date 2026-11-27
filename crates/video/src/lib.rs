@@ -509,6 +509,10 @@ pub struct Renderer {
     period: Duration,
     frame: u64,
     dump: Option<Dump>,
+    /// Screenshots and recording (hotkeys, overlay page), shared with the overlay.
+    capture: Option<Arc<fepor_core::capture::Capture>>,
+    /// The image a capture with the overlay draws on, so that the game's picture stays untouched.
+    capture_tex: Option<wgpu::Texture>,
     cull: bool,
     /// `FEPOR_DUMP_TEXTURES=dir`: write every newly decoded texture as PNG.
     dump_textures: Option<PathBuf>,
@@ -575,6 +579,13 @@ fn png_bytes(w: u32, h: u32, color: png::ColorType, data: &[u8]) -> Vec<u8> {
         .and_then(|mut w| w.write_image_data(data))
         .expect("encode png");
     out
+}
+
+/// Drop the alpha channel: the EFB's alpha is whatever the draws left there.
+fn to_rgb(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect()
 }
 
 fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
@@ -800,6 +811,8 @@ impl Renderer {
             pending_clear: Some(([0.0; 4], 1.0)),
             frame: 0,
             dump,
+            capture: overlay.as_ref().map(|o| o.shared().capture.clone()),
+            capture_tex: None,
             presenter,
             overlay,
             settings,
@@ -1981,6 +1994,7 @@ impl Renderer {
         if self.overlay.as_ref().is_some_and(|o| o.shared().take_report_request()) {
             self.make_bug_report(c);
         }
+        self.capture_frame(c);
         let Some(d) = &self.dump else { return };
         if self.frame % d.every != 0 {
             return;
@@ -1999,11 +2013,93 @@ impl Renderer {
         } else {
             self.read_filtered(c, false)
         };
-        let rgb: Vec<u8> = rgba
-            .chunks_exact(4)
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect();
-        write_png(&path, pw, ph, png::ColorType::Rgb, &rgb);
+        write_png(&path, pw, ph, png::ColorType::Rgb, &to_rgb(&rgba));
+    }
+
+    /// The presented frame at internal resolution (before the render filters and FSR) as packed RGB, with the
+    /// overlay drawn into it when `overlay`. Shared by screenshots, video frames and the bug report.
+    fn picture_rgb(&mut self, c: &CopyEfb, overlay: bool) -> (u32, u32, Vec<u8>) {
+        let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+        let rgba = if overlay {
+            self.read_efb_with_overlay(c.x, c.y, w, h)
+        } else {
+            self.read_efb(c.x, c.y, w, h)
+        };
+        (w * self.scale, h * self.scale, to_rgb(&rgba))
+    }
+
+    /// Screenshots and video frames (ADR 0044): what `picture_rgb` gives, with the overlay when the settings
+    /// say so.
+    fn capture_frame(&mut self, c: &CopyEfb) {
+        let Some(cap) = self.capture.clone() else {
+            return;
+        };
+        cap.on_frame(self.frame);
+        let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+        let shot = cap.take_screenshot();
+        let recording = cap.sync_recording(w * self.scale, h * self.scale);
+        if shot.is_none() && !recording {
+            return;
+        }
+        let (pw, ph, rgb) = self.picture_rgb(c, self.settings.get().capture.overlay);
+        if let Some(path) = shot {
+            let result = std::fs::write(&path, png_bytes(pw, ph, png::ColorType::Rgb, &rgb))
+                .map_err(|e| e.to_string());
+            cap.screenshot_done(&path, result);
+        }
+        if recording {
+            cap.frame(rgb, pw, ph);
+        }
+    }
+
+    /// The EFB with the overlay drawn over it, read from a copy: the game's own EFB is left as it is.
+    fn read_efb_with_overlay(&mut self, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+        self.flush();
+        let s = self.scale;
+        let size = wgpu::Extent3d {
+            width: EFB_WIDTH * s,
+            height: EFB_HEIGHT * s,
+            depth_or_array_layers: 1,
+        };
+        if self.capture_tex.as_ref().is_none_or(|t| t.size() != size) {
+            self.capture_tex = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capture"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }));
+        }
+        let tex = self.capture_tex.as_ref().expect("capture image");
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_texture(self.efb.as_image_copy(), tex.as_image_copy(), size);
+        if let Some(o) = &mut self.overlay {
+            o.paint_capture(
+                &self.device,
+                &self.queue,
+                &mut enc,
+                &tex.create_view(&Default::default()),
+                wgpu::TextureFormat::Rgba8Unorm,
+                [size.width, size.height],
+                s as f32,
+            );
+        }
+        self.queue.submit([enc.finish()]);
+        read_texture(
+            &self.device,
+            &self.queue,
+            tex,
+            (x.min(EFB_WIDTH) * s, y.min(EFB_HEIGHT) * s),
+            (
+                w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
+                h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)) * s,
+            ),
+        )
     }
 
     /// The Help page's "Make bug report" (ADR 0047): the picture being shown now and the renderer's state go
@@ -2012,13 +2108,8 @@ impl Renderer {
         let Some(shared) = self.overlay.as_ref().map(|o| o.shared().clone()) else {
             return;
         };
-        let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
-        let rgb: Vec<u8> = self
-            .read_efb(c.x, c.y, w, h)
-            .chunks_exact(4)
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect();
-        let screenshot = png_bytes(w * self.scale, h * self.scale, png::ColorType::Rgb, &rgb);
+        let (w, h, rgb) = self.picture_rgb(c, false);
+        let screenshot = png_bytes(w, h, png::ColorType::Rgb, &rgb);
         let mut sections = vec![("video".to_string(), self.report_text(&shared))];
         sections.extend(shared.report_sections());
         let made = fepor_core::bugreport::create_default(

@@ -15,6 +15,7 @@ use crate::shared::Shared;
 pub enum Page {
     Video,
     Audio,
+    Capture,
     Language,
     Controls,
     Card,
@@ -27,9 +28,10 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 10] = [
+    pub const ALL: [Page; 11] = [
         Page::Video,
         Page::Audio,
+        Page::Capture,
         Page::Language,
         Page::Controls,
         Page::Card,
@@ -52,6 +54,7 @@ impl Page {
         match self {
             Page::Video => "Video",
             Page::Audio => "Audio",
+            Page::Capture => "Capture",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
             Page::Mods => "Mods",
@@ -127,10 +130,11 @@ impl UiState {
 }
 
 /// Quit page: one button, no confirmation.
-fn quit(ui: &mut egui::Ui) {
+fn quit(ui: &mut egui::Ui, shared: &Shared) {
     ui.label("Leave the game and close the window.");
     if ui.button("Quit the game").clicked() {
-        // memory card writes already went to the file; nothing else needs flushing
+        // memory card writes already went to the file; a recording in progress is completed
+        shared.capture.finish();
         std::process::exit(0);
     }
 }
@@ -165,8 +169,48 @@ pub fn show(
     if stats != StatsMode::Off {
         stats_hud(root, &shared.stats(), stats == StatsMode::Full);
     }
+    capture_hud(root, &shared.capture);
     if open {
         settings_panel(root, st, shared);
+    }
+}
+
+/// Whether the recording indicator or a capture message is on screen.
+pub fn capture_hud_shown(capture: &fepor_core::capture::Capture) -> bool {
+    capture.is_recording() || capture.toast().is_some()
+}
+
+/// The recording indicator and the last capture message, in the top-right corner.
+fn capture_hud(root: &mut egui::Ui, capture: &fepor_core::capture::Capture) {
+    let mut lines = Vec::new();
+    if let Some(s) = capture.recording_secs() {
+        lines.push((BAD, format!("REC {}:{:02}", s / 60, s % 60)));
+    }
+    if let Some(t) = capture.toast() {
+        lines.push((Color32::WHITE, t));
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let screen = root.max_rect();
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(screen.left() + 6.0, screen.bottom() - 60.0),
+        egui::vec2((screen.width() - 12.0).max(100.0), 54.0),
+    );
+    let ui = &mut root.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::bottom_up(egui::Align::Min)),
+    );
+    for (color, text) in lines.into_iter().rev() {
+        egui::Frame::new()
+            .fill(crate::theme::BAR.gamma_multiply(0.85))
+            .stroke(egui::Stroke::new(1.0, crate::theme::GOLD_DARK))
+            .corner_radius(4.0)
+            .inner_margin(4.0)
+            .show(ui, |ui| {
+                ui.label(RichText::new(text).small().color(color));
+            });
     }
 }
 
@@ -366,6 +410,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| match st.page {
             Page::Video => video(ui, shared),
             Page::Audio => audio(ui, shared),
+            Page::Capture => capture(ui, shared),
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
@@ -373,7 +418,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Memory => crate::memory::memory(ui, &mut st.memory, shared),
             Page::Cheats => cheats(ui, st, shared),
             Page::Help => help(ui, shared),
-            Page::Quit => quit(ui),
+            Page::Quit => quit(ui, shared),
         });
         ui.separator();
         ui.label(
@@ -539,6 +584,48 @@ fn audio(ui: &mut egui::Ui, shared: &Shared) {
         });
     if device != before.audio.device {
         shared.settings.update(|x| x.audio.device = device);
+    }
+}
+
+/// Screenshots and video recording; the same actions as F12 and F10.
+fn capture(ui: &mut egui::Ui, shared: &Shared) {
+    let c = &shared.capture;
+    ui.horizontal(|ui| {
+        if ui.button("Take a screenshot (F12)").clicked() {
+            c.request_screenshot();
+        }
+        let label = if c.is_recording() {
+            "Stop recording (F10)"
+        } else {
+            "Record a video (F10)"
+        };
+        if ui.button(label).clicked() {
+            c.toggle_recording();
+        }
+    });
+    ui.add_space(8.0);
+    let mut overlay = shared.settings.get().capture.overlay;
+    if ui
+        .checkbox(&mut overlay, "Include the overlay (menu, statistics, messages)")
+        .changed()
+    {
+        shared.settings.update(|x| x.capture.overlay = overlay);
+    }
+    ui.add_space(8.0);
+    ui.label("Pictures are taken at the internal resolution (Video page), without the window's borders and bars.");
+    ui.label(format!(
+        "Screenshots: {}",
+        shared.data_dir.join("screenshots").display()
+    ));
+    ui.label(format!("Videos: {}", shared.data_dir.join("videos").display()));
+    ui.label(
+        RichText::new("Videos need ffmpeg: on the PATH, next to the game, or named by FEPOR_FFMPEG.")
+            .small()
+            .weak(),
+    );
+    if let Some(t) = c.toast() {
+        ui.add_space(6.0);
+        ui.label(t);
     }
 }
 
@@ -1063,6 +1150,7 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         "Navigation: arrows and Enter, D-pad / left stick and A, or the mouse. B or Esc closes.",
     );
     ui.label("PgUp / PgDn or LB / RB: previous / next page.");
+    ui.label("F12: screenshot. F10: start / stop recording a video (Capture page).");
     ui.add_space(6.0);
     ui.label(format!(
         "Playtime: {}",

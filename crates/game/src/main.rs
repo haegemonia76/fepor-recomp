@@ -404,7 +404,11 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
             Err(e) => eprintln!("video disabled: {e}"),
         }
     }
-    if let Some(sink) = fepor_audio::open(overlay.settings.clone(), overlay.audio_devices.clone()) {
+    if let Some(sink) = fepor_audio::open(
+        overlay.settings.clone(),
+        overlay.audio_devices.clone(),
+        overlay.capture.clone(),
+    ) {
         m.hw.set_audio_sink(sink);
     }
     m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
@@ -437,6 +441,7 @@ fn spawn_guest(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>)
         .name("guest".into())
         .stack_size(256 << 20)
         .spawn(move || {
+            let capture = overlay.capture.clone();
             let guest = std::panic::AssertUnwindSafe(|| run(window, overlay));
             let code = match std::panic::catch_unwind(guest) {
                 Ok(Ok(())) => 0,
@@ -446,6 +451,7 @@ fn spawn_guest(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>)
                 }
                 Err(_) => 70,
             };
+            capture.finish();
             fepor_core::applog::exit(code);
         })
         .expect("spawn guest thread");
@@ -521,7 +527,10 @@ impl ApplicationHandler<()> for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => fepor_core::applog::exit(0),
+            WindowEvent::CloseRequested => {
+                self.overlay.capture.finish();
+                fepor_core::applog::exit(0)
+            }
             WindowEvent::Focused(false) => {
                 if let Ok(mut c) = self.controls.lock() {
                     c.release_keyboard();

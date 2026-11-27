@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod anonymise;
 pub mod applog;
 pub mod bugreport;
+pub mod capture;
 pub mod cheats;
 pub mod config;
 pub mod disc;
