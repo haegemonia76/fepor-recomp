@@ -5,6 +5,7 @@
 
 pub mod glyphs;
 mod mods;
+mod memory;
 mod outlines;
 mod pad;
 mod paint;
@@ -71,8 +72,10 @@ impl Overlay {
         ppp: f32,
     ) {
         let open = self.shared.is_open();
+        self.ui.memory_tick(&self.shared);
         let video = self.shared.settings.get().video;
         if !open && video.stats == StatsMode::Off {
+            self.shared.memory.set_active(self.ui.memory_live());
             return;
         }
         // 0 = auto: 1x at a 720-pixel-high window, growing with it, so the text stays readable on big screens
