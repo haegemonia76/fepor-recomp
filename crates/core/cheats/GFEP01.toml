@@ -2,29 +2,48 @@
 # The funds and event-points fields are in the game's global struct at 0x8033A708 (the debug text "Funds :%7dG" /
 # "EvtPts:%7dP" of the game reads +0x18 / +0x1C).
 
-[[cheat]]
-name = "Max funds"
-description = "Funds stay at 9,999,999 gold (the game's cap)."
-game = "GFEP01"
-continuous = true
-[[cheat.write]]
-address = 0x8033A720
-size = 4
-value = 9999999
+# Funds and bonus EXP are one-shot (kind add / set): the Cheats page has an input and an Apply button, the value is
+# written once and never reverted. The caps are the game's: 9,999,999 gold, 99,999 bonus EXP.
 
 [[cheat]]
-name = "Max bonus EXP"
-description = "Bonus experience (event points) stays at 99,999."
+name = "Add funds"
+description = "Adds the typed amount of gold once (cap 9,999,999). Nothing is held or reverted."
 game = "GFEP01"
-continuous = true
+kind = "add"
+max = 9999999
+[[cheat.write]]
+address = 0x8033A720
+
+[[cheat]]
+name = "Set funds"
+description = "Sets the gold to the typed value once (0 to 9,999,999). Nothing is held or reverted."
+game = "GFEP01"
+kind = "set"
+max = 9999999
+[[cheat.write]]
+address = 0x8033A720
+
+[[cheat]]
+name = "Add bonus EXP"
+description = "Adds the typed amount of bonus experience once (cap 99,999). Nothing is held or reverted."
+game = "GFEP01"
+kind = "add"
+max = 99999
 [[cheat.write]]
 address = 0x8033A724
-size = 4
-value = 99999
+
+[[cheat]]
+name = "Set bonus EXP"
+description = "Sets the bonus experience to the typed value once (0 to 99,999). Nothing is held or reverted."
+game = "GFEP01"
+kind = "set"
+max = 99999
+[[cheat.write]]
+address = 0x8033A724
 
 [[cheat]]
 name = "Ike HP 99 (prologue)"
-description = "Ike's current HP is held at 99. The address is where the prologue map keeps Ike; it only applies while Ike's record is there."
+description = "Held kind: Ike's current HP is held at 99 every frame while on; turning it off puts back the value it had when turned on. The address is where the prologue map keeps Ike; it only applies while Ike's record is there."
 game = "GFEP01"
 continuous = true
 [[cheat.write]]
@@ -34,4 +53,113 @@ value = 99
 [cheat.write.when]
 address = 0x802BBB50
 size = 4
+value = 0x80900E10
+
+# Ike's stats in the prologue map (ADR 0033, ticket #66). The unit object of Ike is at 0x802BB9C4 and keeps a pointer
+# to his record at +0x18C (0x802BBB50); the record is a heap object, so every write is guarded by that pointer.
+# The record's bytes +0x44..+0x4B are the BASE stats HP, Str, Mag, Skl, Spd, (not Lck), Def, Res: the status
+# screen shows base + the class bonus (Ike: HP +1, Str +2, Skl +3, Spd +3), clamped to the class caps.
+
+[[cheat]]
+name = "Set Ike current HP (prologue)"
+description = "Sets Ike's current HP once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 255
+[[cheat.write]]
+address = 0x802bbb6c
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
+value = 0x80900E10
+
+[[cheat]]
+name = "Set Ike base max HP (prologue)"
+description = "Sets Ike's base HP once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 99
+[[cheat.write]]
+address = 0x80900e54
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
+value = 0x80900E10
+
+[[cheat]]
+name = "Set Ike base Str (prologue)"
+description = "Sets Ike's base strength once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 99
+[[cheat.write]]
+address = 0x80900e55
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
+value = 0x80900E10
+
+[[cheat]]
+name = "Set Ike base Mag (prologue)"
+description = "Sets Ike's base magic once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 99
+[[cheat.write]]
+address = 0x80900e56
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
+value = 0x80900E10
+
+[[cheat]]
+name = "Set Ike base Skl (prologue)"
+description = "Sets Ike's base skill once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 99
+[[cheat.write]]
+address = 0x80900e57
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
+value = 0x80900E10
+
+[[cheat]]
+name = "Set Ike base Spd (prologue)"
+description = "Sets Ike's base speed once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 99
+[[cheat.write]]
+address = 0x80900e58
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
+value = 0x80900E10
+
+[[cheat]]
+name = "Set Ike base Def (prologue)"
+description = "Sets Ike's base defense once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 99
+[[cheat.write]]
+address = 0x80900e5a
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
+value = 0x80900E10
+
+[[cheat]]
+name = "Set Ike base Res (prologue)"
+description = "Sets Ike's base resistance once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+game = "GFEP01"
+kind = "set"
+max = 99
+[[cheat.write]]
+address = 0x80900e5b
+size = 1
+[cheat.write.when]
+address = 0x802BBB50
 value = 0x80900E10

@@ -5,7 +5,8 @@
 //! name = "Max gold"
 //! description = "Gold stays at the cap."   # optional, shown under the name
 //! game = "GFEP01"                          # optional: skipped for another game
-//! continuous = true                        # held every frame; absent/false: written once when turned on
+//! kind = "hold"                            # hold (default) | add | set, see below
+//! continuous = true                        # hold: every frame; absent/false: written once when turned on
 //!
 //! [[cheat.write]]
 //! address = 0x80123456                     # cached, uncached or physical form of a main RAM address
@@ -19,6 +20,11 @@
 //! value = 0
 //! ```
 //!
+//! `kind = "add"` / `"set"` are one-shot: no checkbox, the Cheats page has an input and an Apply button; one
+//! `[[cheat.write]]` without `value` (address, size, optional `when`) and optional `min` / `max` (default 0 and
+//! the largest value of the size). Add reads the current value, adds the typed amount, clamps, writes it once;
+//! set writes the typed value clamped. Nothing is held and nothing is ever reverted.
+//!
 //! The cheats of the repository are in `crates/core/cheats/<game id>.toml` (addresses, sizes and values only, no
 //! game data, ADR 0003) and compiled in; the player can add or replace cheats (by name) in
 //! `<data>/cheats/<game id>.toml`. One cheat that cannot be read (a typo, an address outside RAM) is listed as
@@ -29,7 +35,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::cheats::{Cheat, Cmp, Condition, Kind, Write};
+use crate::cheats::{Action, Cheat, Cmp, Condition, Kind, Write};
 
 /// Main RAM size of the GameCube.
 const RAM_SIZE: u32 = 0x0180_0000;
@@ -51,6 +57,10 @@ struct Raw {
     description: Option<String>,
     #[serde(default)]
     continuous: bool,
+    /// "hold" (default), "add" or "set".
+    kind: Option<String>,
+    min: Option<i64>,
+    max: Option<i64>,
     #[serde(default)]
     write: Vec<RawWrite>,
 }
@@ -61,7 +71,7 @@ struct RawWrite {
     address: i64,
     #[serde(default = "four")]
     size: u8,
-    value: i64,
+    value: Option<i64>,
     when: Option<RawWhen>,
 }
 
@@ -114,9 +124,14 @@ fn value(v: i64, size: u8) -> Result<u32, String> {
     }
 }
 
-fn compile(w: RawWrite) -> Result<Write, String> {
+fn compile(w: RawWrite, once: bool) -> Result<Write, String> {
     width(w.size)?;
-    let v = value(w.value, w.size)?;
+    let v = match (w.value, once) {
+        (Some(v), false) => value(v, w.size)?,
+        (None, false) => return Err("a held cheat needs a value".into()),
+        (None, true) => 0,
+        (Some(_), true) => return Err("an add/set cheat takes its value from the Cheats page: remove `value`".into()),
+    };
     let when = w
         .when
         .map(|c| {
@@ -145,11 +160,37 @@ fn compile(w: RawWrite) -> Result<Write, String> {
     })
 }
 
-fn compile_cheat(raw: Raw) -> Result<Vec<Write>, String> {
+/// The action, the bounds and the writes of a cheat. For add/set the single write has no value (the page
+/// supplies it) and `min`/`max` default to 0 and the largest value of the write's size.
+fn compile_cheat(raw: Raw) -> Result<(Action, i64, i64, Vec<Write>), String> {
+    let action = match raw.kind.as_deref() {
+        None | Some("hold") => Action::Hold,
+        Some("add") => Action::Add,
+        Some("set") => Action::Set,
+        Some(other) => return Err(format!("kind {other:?} is not hold, add or set")),
+    };
     if raw.write.is_empty() {
         return Err("the cheat has no [[cheat.write]]".into());
     }
-    raw.write.into_iter().map(compile).collect()
+    if action.once() {
+        if raw.continuous {
+            return Err("`continuous` only applies to a held cheat".into());
+        }
+        if raw.write.len() != 1 {
+            return Err("an add/set cheat has exactly one [[cheat.write]]".into());
+        }
+    } else if raw.min.is_some() || raw.max.is_some() {
+        return Err("`min` and `max` only apply to an add/set cheat".into());
+    }
+    let size = raw.write[0].size;
+    width(size)?;
+    let top = if size == 4 { u32::MAX as i64 } else { (1i64 << (8 * size)) - 1 };
+    let (min, max) = (raw.min.unwrap_or(0), raw.max.unwrap_or(top));
+    if min < 0 || max > top || min > max {
+        return Err(format!("min {min} and max {max} must satisfy 0 <= min <= max <= {top} for {size} byte(s)"));
+    }
+    let writes = raw.write.into_iter().map(|w| compile(w, action.once())).collect::<Result<_, _>>()?;
+    Ok((action, min, max, writes))
 }
 
 /// The cheats of a TOML text for `game`. `Err` only when the text is not TOML at all; a cheat that cannot be
@@ -165,14 +206,22 @@ pub fn parse(text: &str, game: &str) -> Result<Vec<Cheat>, String> {
                 if raw.game.as_deref().is_some_and(|g| g != game) {
                     continue;
                 }
+                let (name, notes, continuous) = (raw.name.clone(), raw.description.iter().cloned().collect(), raw.continuous);
+                let (action, min, max, writes) = match compile_cheat(raw) {
+                    Ok((a, min, max, w)) => (a, min, max, Ok(w)),
+                    Err(e) => (Action::Hold, 0, 0, Err(e)),
+                };
                 Cheat {
                     kind: Kind::Native,
-                    name: raw.name.clone(),
+                    name,
                     author: String::new(),
-                    notes: raw.description.iter().cloned().collect(),
+                    notes,
                     lines: Vec::new(),
-                    continuous: raw.continuous,
-                    writes: compile_cheat(raw),
+                    continuous,
+                    action,
+                    min,
+                    max,
+                    writes,
                 }
             }
             Err(e) => Cheat {
@@ -182,6 +231,9 @@ pub fn parse(text: &str, game: &str) -> Result<Vec<Cheat>, String> {
                 notes: Vec::new(),
                 lines: Vec::new(),
                 continuous: false,
+                action: Action::Hold,
+                min: 0,
+                max: 0,
                 writes: Err(e.message().to_string()),
             },
         };
@@ -337,6 +389,129 @@ value = 1
         assert!(why("Empty").contains("no [[cheat.write]]"));
         assert!(why("Bad op").contains("approx"));
         assert!(find(&c, "Money").writes.is_ok());
+    }
+
+    const ONCE: &str = r#"
+[[cheat]]
+name = "Gold"
+kind = "add"
+max = 9999999
+[[cheat.write]]
+address = 0x80001000
+
+[[cheat]]
+name = "Level"
+kind = "set"
+min = 1
+max = 20
+[[cheat.write]]
+address = 0x80001010
+size = 1
+[cheat.write.when]
+address = 0x80001008
+value = 7
+
+[[cheat]]
+name = "Bad kind"
+kind = "mul"
+[[cheat.write]]
+address = 0x80001000
+
+[[cheat]]
+name = "Add with value"
+kind = "add"
+[[cheat.write]]
+address = 0x80001000
+value = 5
+
+[[cheat]]
+name = "Hold no value"
+[[cheat.write]]
+address = 0x80001000
+
+[[cheat]]
+name = "Add two writes"
+kind = "add"
+[[cheat.write]]
+address = 0x80001000
+[[cheat.write]]
+address = 0x80001004
+
+[[cheat]]
+name = "Range"
+kind = "set"
+max = 300
+[[cheat.write]]
+address = 0x80001000
+size = 1
+
+[[cheat]]
+name = "Min above max"
+kind = "set"
+min = 5
+max = 2
+[[cheat.write]]
+address = 0x80001000
+"#;
+
+    #[test]
+    fn add_and_set_schema() {
+        let c = parse(ONCE, "GFEP01").unwrap();
+        let g = find(&c, "Gold");
+        assert_eq!((g.action, g.min, g.max), (Action::Add, 0, 9_999_999));
+        assert_eq!(g.writes.as_ref().unwrap()[0].bytes.len(), 4);
+        let l = find(&c, "Level");
+        assert_eq!((l.action, l.min, l.max), (Action::Set, 1, 20));
+        assert!(l.writes.as_ref().unwrap()[0].when.is_some());
+        let why = |n: &str| find(&c, n).writes.clone().unwrap_err();
+        assert!(why("Bad kind").contains("mul"));
+        assert!(why("Add with value").contains("remove `value`"));
+        assert!(why("Hold no value").contains("needs a value"));
+        assert!(why("Add two writes").contains("exactly one"));
+        assert!(why("Range").contains("max 300"));
+        assert!(why("Min above max").contains("min 5"));
+    }
+
+    #[test]
+    fn add_clamps_to_the_cap_and_is_never_reverted() {
+        let c = parse(ONCE, "GFEP01").unwrap();
+        let g = find(&c, "Gold");
+        let mut ram = vec![0u8; 0x2000];
+        ram[0x1000..0x1004].copy_from_slice(&5000u32.to_be_bytes());
+        let a = g.apply(1000, &mut ram).unwrap();
+        assert_eq!((a.before, a.after, a.clamped), (5000, 6000, false));
+        assert_eq!(ram[0x1000..0x1004], 6000u32.to_be_bytes());
+        // the game changes the value: nothing remembers 5000
+        ram[0x1000..0x1004].copy_from_slice(&9_999_000u32.to_be_bytes());
+        let a = g.apply(5000, &mut ram).unwrap();
+        assert_eq!((a.after, a.clamped), (9_999_999, true));
+        // a negative amount subtracts, floored at min
+        let a = g.apply(-20_000_000, &mut ram).unwrap();
+        assert_eq!((a.after, a.clamped), (0, true));
+        assert_eq!(ram[0x1000..0x1004], [0; 4]);
+    }
+
+    #[test]
+    fn set_writes_the_value_once_clamped_and_checks_its_condition() {
+        let c = parse(ONCE, "GFEP01").unwrap();
+        let l = find(&c, "Level");
+        let mut ram = vec![0u8; 0x2000];
+        ram[0x1010] = 3;
+        // condition (word 0x1008 == 7) does not hold yet
+        assert!(l.apply(10, &mut ram).unwrap_err().contains("condition"));
+        assert_eq!(ram[0x1010], 3);
+        ram[0x100B] = 7;
+        assert_eq!(l.apply(10, &mut ram).unwrap().after, 10);
+        assert_eq!(ram[0x1010], 10);
+        assert_eq!(l.apply(99, &mut ram).unwrap().after, 20);
+        assert_eq!(l.apply(0, &mut ram).unwrap().after, 1);
+        assert_eq!(ram[0x1011], 0, "only one byte written");
+    }
+
+    #[test]
+    fn a_hold_cheat_cannot_be_applied() {
+        let c = parse(TEXT, "GFEP01").unwrap();
+        assert!(find(&c, "Money").apply(1, &mut [0; 0x2000_0]).is_err());
     }
 
     #[test]

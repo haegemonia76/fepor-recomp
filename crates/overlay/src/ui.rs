@@ -90,6 +90,8 @@ pub struct UiState {
     /// The INI chooser of the cheats page, and what came of the last import.
     cheat_picker: Option<Receiver<Option<PathBuf>>>,
     cheat_message: Option<Result<String, String>>,
+    /// The amount typed for each add/set cheat (by key).
+    cheat_amounts: std::collections::HashMap<String, String>,
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
@@ -99,7 +101,7 @@ pub struct UiState {
 impl UiState {
     /// Scripted memory-page steps run whether or not the page (or the overlay) is shown.
     pub fn memory_tick(&mut self, shared: &Shared) {
-        self.memory.tick(&shared.memory);
+        self.memory.tick(shared);
     }
 
     pub fn memory_live(&self) -> bool {
@@ -118,6 +120,7 @@ impl UiState {
             pending_at: None,
             cheat_picker: None,
             cheat_message: None,
+            cheat_amounts: Default::default(),
             pad: crate::pad::PadView::default(),
             mods: crate::mods::ModsView::default(),
             pad_selected: None,
@@ -684,11 +687,17 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         ui.label(format!("No native cheats for {game}."));
     }
     for c in native {
-        cheat_row(ui, shared, c);
+        if c.action.once() {
+            once_row(ui, st, shared, c);
+        } else {
+            cheat_row(ui, shared, c);
+        }
     }
     ui.label(
         RichText::new(
-            "Shipped with the game's addresses; add your own in cheats/<game id>.toml of the data folder (same \
+            "Held cheats (checkbox) write their value while on, and turning one off puts back the value the game \
+             had when it was turned on. Add / set cheats (input and Apply) write once and never put anything back. \
+             Shipped with the game's addresses; add your own in cheats/<game id>.toml of the data folder (same \
              name replaces a shipped one).",
         )
         .small()
@@ -740,12 +749,48 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     ui.add_space(8.0);
     ui.label(
         RichText::new(
-            "Cheats hold their value every frame while on; turning one off puts the game's value back. Only plain \
-             writes to data run: conditionals, loops, pointers and code insertion are listed as not supported.",
+            "Gecko and Action Replay codes hold their value every frame while on; turning one off puts the game's \
+             value back. Only plain writes to data run: conditionals, loops, pointers and code insertion are listed as not supported.",
         )
         .small()
         .weak(),
     );
+}
+
+/// An add / set cheat: an input and an Apply button, no checkbox: nothing is held, nothing is reverted.
+fn once_row(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, c: &fepor_core::cheats::CheatView) {
+    use fepor_core::cheats::Action;
+    let text = st.cheat_amounts.entry(c.key.clone()).or_default();
+    let amount = text.trim().replace([',', '_'], "").parse::<i64>().ok();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(&c.name);
+        ui.label(RichText::new(format!("[{}]", c.action.label())).small().weak());
+        ui.add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text(match c.action {
+            Action::Add => "amount",
+            _ => "value",
+        }));
+        let go = ui.add_enabled(amount.is_some() && c.supported.is_ok(), egui::Button::new("Apply"));
+        if go.clicked() {
+            if let Some(a) = amount {
+                shared.cheats.request(&c.key, a);
+            }
+        }
+    });
+    if let Err(why) = &c.supported {
+        ui.label(RichText::new(format!("    not supported: {why}")).small().weak());
+    }
+    match &c.result {
+        Some(Ok(r)) => {
+            ui.label(RichText::new(format!("    last Apply: {r}")).small());
+        }
+        Some(Err(e)) => {
+            ui.colored_label(Color32::LIGHT_RED, format!("    not applied: {e}"));
+        }
+        None => {}
+    }
+    for n in &c.notes {
+        ui.label(RichText::new(format!("    {n}")).small().weak());
+    }
 }
 
 fn cheat_row(ui: &mut egui::Ui, shared: &Shared, c: &fepor_core::cheats::CheatView) {
@@ -759,7 +804,11 @@ fn cheat_row(ui: &mut egui::Ui, shared: &Shared, c: &fepor_core::cheats::CheatVi
         if ui.add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label)).changed() {
             shared.cheats.set_enabled(&c.key, on);
         }
-        ui.label(RichText::new(c.kind.label()).small().weak());
+        let kind = match c.kind {
+            fepor_core::cheats::Kind::Native => "hold, put back when turned off".to_string(),
+            k => k.label().to_string(),
+        };
+        ui.label(RichText::new(kind).small().weak());
     });
     if let Err(why) = &c.supported {
         ui.label(RichText::new(format!("    not supported: {why}")).small().weak());
