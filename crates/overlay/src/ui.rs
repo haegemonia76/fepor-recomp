@@ -18,6 +18,7 @@ pub enum Page {
     Language,
     Controls,
     Card,
+    Mods,
     /// The memory watcher: shown only with the developer option (ADR 0048).
     Memory,
     Cheats,
@@ -26,12 +27,13 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 9] = [
+    pub const ALL: [Page; 10] = [
         Page::Video,
         Page::Audio,
         Page::Language,
         Page::Controls,
         Page::Card,
+        Page::Mods,
         Page::Memory,
         Page::Cheats,
         Page::Help,
@@ -52,6 +54,7 @@ impl Page {
             Page::Audio => "Audio",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
+            Page::Mods => "Mods",
             Page::Memory => "Memory",
             Page::Cheats => "Cheats",
             Page::Language => "Language",
@@ -90,6 +93,7 @@ pub struct UiState {
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
+    mods: crate::mods::ModsView,
 }
 
 impl UiState {
@@ -115,6 +119,7 @@ impl UiState {
             cheat_picker: None,
             cheat_message: None,
             pad: crate::pad::PadView::default(),
+            mods: crate::mods::ModsView::default(),
             pad_selected: None,
         }
     }
@@ -356,6 +361,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
+            Page::Mods => crate::mods::page(ui, &mut st.mods, shared),
             Page::Memory => crate::memory::memory(ui, &mut st.memory, shared),
             Page::Cheats => cheats(ui, st, shared),
             Page::Help => help(ui, shared),

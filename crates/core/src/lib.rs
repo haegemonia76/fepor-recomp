@@ -8,6 +8,7 @@ pub mod dol;
 pub mod extract;
 pub mod image;
 pub mod memcard;
+pub mod mods;
 pub mod memwatch;
 pub mod paths;
 pub mod settings;
