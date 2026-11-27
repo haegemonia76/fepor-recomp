@@ -1,21 +1,13 @@
-//! Serial Interface (0xCC006400): up to four GameCube controllers, ports 1 to 4.
+//! Serial Interface (0xCC006400): one GameCube controller on port 1.
 //!
 //! The SDK probes the port with a transfer (command 0x00/0xFF returns the device ID, 0x40 the pad
 //! status), then enables automatic polling; the SI hardware then refreshes `SIC0INBUF` every few
 //! scanlines and raises the read-status interrupt. Here polling happens once per retrace.
 //!
-//! Port 1 always has a controller (the keyboard, at least); ports 2 to 4 answer only while the front end
-//! reports a pad there ([`set_port_connected`]). A port that stops answering while polled raises the
-//! no-response flag like an unplugged controller, so the SDK notices a pad being removed or added.
-//!
 //! Input comes from [`PadState`]. Until a front end feeds it, `FEPOR_PAD=<button>@<frame>+<frames>[,...]`
 //! scripts presses by retrace count (buttons: A B X Y START Z L R UP DOWN LEFT RIGHT), e.g.
 //! `FEPOR_PAD=A@300+6`.
 
-/// Controller ports of the console.
-pub const PORTS: usize = 4;
-/// Register distance between two channels' output/input buffers.
-const CHANNEL_STRIDE: u32 = 0x0C;
 const C0_IN_H: u32 = 0x04;
 const SIPOLL: u32 = 0x30;
 const SICOMCSR: u32 = 0x34;
@@ -88,15 +80,12 @@ impl PadState {
     }
 }
 
-/// The controller state set by the front end (window or gamepad thread) for each port, packed so it can be
-/// shared with the guest thread without locking: buttons, stick x/y, c-stick x/y, triggers L/R.
-static LIVE_PADS: [std::sync::atomic::AtomicU64; PORTS] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; PORTS];
-/// Bit `n`: a controller answers on port `n`. Port 1 always does.
-static CONNECTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+/// The controller state set by the front end (window or gamepad thread), packed so it can be shared
+/// with the guest thread without locking: buttons, stick x/y, c-stick x/y, triggers L/R.
+static LIVE_PAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Publish the controller state the guest sees on `port` (0-based) from the next retrace on.
-pub fn set_pad(port: usize, p: PadState) {
+/// Publish the controller state the guest sees from the next retrace on.
+pub fn set_pad(p: PadState) {
     let v = p.buttons as u64
         | (p.stick.0 as u64) << 16
         | (p.stick.1 as u64) << 24
@@ -104,25 +93,11 @@ pub fn set_pad(port: usize, p: PadState) {
         | (p.c_stick.1 as u64) << 40
         | (p.triggers.0 as u64) << 48
         | (p.triggers.1 as u64) << 56;
-    LIVE_PADS[port].store(v, std::sync::atomic::Ordering::Relaxed);
+    LIVE_PAD.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Plug or unplug the controller of `port` (0-based; port 1 cannot be unplugged).
-pub fn set_port_connected(port: usize, connected: bool) {
-    let bit = 1u8 << port;
-    if connected || port == 0 {
-        CONNECTED.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
-    } else {
-        CONNECTED.fetch_and(!bit, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-fn port_connected(port: usize) -> bool {
-    CONNECTED.load(std::sync::atomic::Ordering::Relaxed) & (1 << port) != 0
-}
-
-fn live_pad(port: usize) -> PadState {
-    let v = LIVE_PADS[port].load(std::sync::atomic::Ordering::Relaxed);
+fn live_pad() -> PadState {
+    let v = LIVE_PAD.load(std::sync::atomic::Ordering::Relaxed);
     if v == 0 {
         return PadState::default();
     }
@@ -146,7 +121,7 @@ pub struct Si {
     poll: u32,
     csr: u32,
     sr: u32,
-    pub pads: [PadState; PORTS],
+    pub pad: PadState,
     script: Vec<Press>,
 }
 
@@ -196,36 +171,26 @@ impl Si {
             poll: 0,
             csr: 0,
             sr: 0,
-            pads: [PadState::default(); PORTS],
+            pad: PadState::default(),
             script,
         }
     }
 
-    /// One retrace: apply scripted input and refresh every polled channel.
+    /// One retrace: apply scripted input and, when polling is on, refresh channel 0.
     pub fn retrace(&mut self, frame: u64) {
-        for (port, pad) in self.pads.iter_mut().enumerate() {
-            *pad = live_pad(port);
-        }
+        self.pad = live_pad();
         if !self.script.is_empty() {
-            self.pads[0].buttons |= self
+            self.pad.buttons |= self
                 .script
                 .iter()
                 .filter(|p| frame >= p.from && frame < p.from + p.frames)
                 .fold(0, |a, p| a | p.buttons);
         }
-        for port in 0..PORTS {
-            if self.poll & (POLL_EN0 >> port) == 0 {
-                continue;
-            }
-            if port_connected(port) {
-                let (hi, lo) = self.pads[port].words();
-                let at = (C0_IN_H + CHANNEL_STRIDE * port as u32) / 4;
-                self.regs[at as usize] = hi;
-                self.regs[at as usize + 1] = lo;
-                self.sr |= SR_RDST0 >> (8 * port);
-            } else {
-                self.sr |= SR_NOREP0 >> (8 * port);
-            }
+        if self.poll & POLL_EN0 != 0 {
+            let (hi, lo) = self.pad.words();
+            self.regs[(C0_IN_H / 4) as usize] = hi;
+            self.regs[(C0_IN_H / 4) as usize + 1] = lo;
+            self.sr |= SR_RDST0;
         }
     }
 
@@ -252,9 +217,9 @@ impl Si {
             }
             o => self.regs[(o / 4) as usize & 0x1F],
         };
-        if let Some(port) = (0..PORTS).find(|p| off & !3 == C0_IN_H + CHANNEL_STRIDE * *p as u32) {
+        if off & !3 == C0_IN_H {
             // reading the status word acknowledges the poll
-            self.sr &= !(SR_RDST0 >> (8 * port));
+            self.sr &= !SR_RDST0;
             self.refresh_csr();
         }
         match size {
@@ -299,7 +264,7 @@ impl Si {
             0 => 128,
             n => n as usize,
         };
-        if !port_connected(channel as usize) {
+        if channel != 0 {
             self.sr |= SR_NOREP0 >> (8 * channel);
             self.csr |= CSR_COMERR;
         } else {
@@ -311,7 +276,7 @@ impl Si {
                     4
                 }
                 0x40 | 0x42 => {
-                    let (hi, lo) = self.pads[channel as usize].words();
+                    let (hi, lo) = self.pad.words();
                     reply[..4].copy_from_slice(&hi.to_be_bytes());
                     reply[4..].copy_from_slice(&lo.to_be_bytes());
                     8
@@ -335,52 +300,5 @@ impl Si {
 impl Default for Si {
     fn default() -> Self {
         Si::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Port 2 answers only while the front end reports a pad there, and polling it shows its own state.
-    #[test]
-    fn extra_ports_answer_only_while_a_pad_is_plugged_in() {
-        let mut si = Si::new();
-        // the SDK's probe of channel 1 (command 0x00, 3 bytes out would be 1 byte in; length is irrelevant here)
-        let probe = |si: &mut Si| {
-            si.buf[0] = 0x00;
-            si.sr = 0;
-            si.transfer((1 << 1) | (4 << 8) | 1);
-            si.sr & (SR_NOREP0 >> 8) != 0
-        };
-        set_port_connected(1, false);
-        assert!(probe(&mut si), "no pad: no response");
-        set_port_connected(1, true);
-        assert!(!probe(&mut si));
-        assert_eq!(&si.buf[..4], &0x0900_0000u32.to_be_bytes());
-
-        // polled, the channel carries the pad published for the port, and nothing from port 1's
-        set_pad(
-            1,
-            PadState {
-                buttons: button::B,
-                ..PadState::default()
-            },
-        );
-        si.poll = POLL_EN0 >> 1;
-        si.sr = 0;
-        si.retrace(0);
-        let at = ((C0_IN_H + CHANNEL_STRIDE) / 4) as usize;
-        assert_eq!((si.regs[at] >> 16) & 0xFF, 0x80, "low button byte");
-        assert_eq!(si.regs[at] >> 24, (button::B >> 8) as u32);
-        assert_ne!(si.sr & (SR_RDST0 >> 8), 0);
-
-        // unplugged while polled: the no-response flag tells the SDK
-        set_port_connected(1, false);
-        si.sr = 0;
-        si.retrace(1);
-        assert_ne!(si.sr & (SR_NOREP0 >> 8), 0);
-        assert_eq!(si.sr & (SR_RDST0 >> 8), 0);
-        set_pad(1, PadState::default());
     }
 }

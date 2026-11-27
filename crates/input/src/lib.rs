@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 mod controls;
 pub mod gamepad;
 
-pub use controls::{Controls, DeviceInfo, Pad};
-pub use fepor_runtime::si::PORTS;
+pub use controls::{Controls, DeviceInfo};
 
 /// Everything a GameCube controller can do.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
@@ -429,7 +428,7 @@ impl InputState {
     }
 
     /// The controller state the GameCube sees: the keyboard and the gamepad bindings of `profile` (the
-    /// keyboard's keys are only ever set on port 1's state).
+    /// keyboard's keys and the active pad's inputs share one state).
     pub fn pad(&self, cfg: &InputConfig, profile: Option<&str>) -> PadState {
         let s = |a| self.strength(cfg, profile, a);
         let on = |a| s(a) > 0.5;

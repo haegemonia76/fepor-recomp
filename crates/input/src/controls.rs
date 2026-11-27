@@ -1,11 +1,11 @@
-//! Everything the front end needs at run time: configuration, live state of every port, the pads plugged in
-//! and the remapping dialog.
+//! Everything the front end needs at run time: configuration, live state of the virtual pad, the gamepads
+//! plugged in and the remapping dialog.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use fepor_runtime::si::{self, PORTS};
+use fepor_runtime::si;
 
 use crate::{Action, Bindings, GlyphSet, InputConfig, InputState, RemapStep, Remapper};
 
@@ -22,14 +22,6 @@ pub struct DeviceInfo {
     pub name: String,
 }
 
-/// A gamepad that is plugged in, and the GameCube port it drives.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pad {
-    pub info: DeviceInfo,
-    /// 0-based GameCube port; `None` when all four are taken by other pads.
-    pub port: Option<usize>,
-}
-
 /// Where an input event comes from.
 #[derive(Clone, Copy)]
 enum Origin {
@@ -37,11 +29,17 @@ enum Origin {
     Pad(u32),
 }
 
+/// Strength at which an input counts as a press (it makes its pad the active one).
+const PRESS: f32 = 0.6;
+
 pub struct Controls {
     pub(crate) cfg: InputConfig,
-    /// Live state of every GameCube port: the keyboard feeds port 1, each pad the port it is assigned.
-    pub(crate) ports: [InputState; PORTS],
-    pads: Vec<Pad>,
+    /// Live state of the virtual pad: the keyboard and the active gamepad feed it.
+    pub(crate) state: InputState,
+    pads: Vec<DeviceInfo>,
+    /// The gamepad that drives the game: the one plugged in last or pressed last (the first one when that
+    /// one is gone).
+    active: Option<u32>,
     /// The pad the player picked in the overlay to edit the profile of.
     selected: Option<u32>,
     remap: Option<Remapper>,
@@ -60,8 +58,9 @@ impl Controls {
     pub fn new(path: PathBuf) -> Controls {
         Controls {
             cfg: InputConfig::load_or_create(&path),
-            ports: Default::default(),
+            state: InputState::default(),
             pads: Vec::new(),
+            active: None,
             selected: None,
             remap: None,
             path,
@@ -77,7 +76,7 @@ impl Controls {
         &self.cfg
     }
 
-    /// Bumped whenever the bindings, the glyph family or the pad on port 1 change, so that whoever draws
+    /// Bumped whenever the bindings, the glyph family or the active pad changes, so that whoever draws
     /// button icons knows when to redraw them.
     pub fn generation(&self) -> u64 {
         self.generation
@@ -87,10 +86,10 @@ impl Controls {
         let _ = self.cfg.save(&self.path);
     }
 
-    // ---- pads and ports ----
+    // ---- pads ----
 
     /// The gamepads plugged in, in the order they were connected.
-    pub fn pads(&self) -> &[Pad] {
+    pub fn pads(&self) -> &[DeviceInfo] {
         &self.pads
     }
 
@@ -107,117 +106,86 @@ impl Controls {
         self.message = Some(text);
     }
 
-    fn pad_on(&self, port: usize) -> Option<&Pad> {
-        self.pads.iter().find(|p| p.port == Some(port))
+    /// The gamepad that drives the game.
+    pub fn active_pad(&self) -> Option<&DeviceInfo> {
+        self.active
+            .and_then(|id| self.pads.iter().find(|p| p.id == id))
+            .or_else(|| self.pads.first())
     }
 
-    /// The profile key (GUID) of the pad on `port`.
-    fn profile_on(&self, port: usize) -> Option<&str> {
-        self.pad_on(port).map(|p| p.info.guid.as_str())
+    fn active_key(&self) -> Option<&str> {
+        self.active_pad().map(|p| p.guid.as_str())
     }
 
-    fn free_port(&self) -> Option<usize> {
-        (0..PORTS).find(|p| self.pad_on(*p).is_none())
+    fn publish(&self) {
+        si::set_pad(self.state.pad(&self.cfg, self.active_key()));
     }
 
-    fn publish_port(&self, port: usize) {
-        si::set_pad(port, self.ports[port].pad(&self.cfg, self.profile_on(port)));
-    }
-
-    fn publish_all(&self) {
-        for port in 0..PORTS {
-            self.publish_port(port);
-            si::set_port_connected(port, port == 0 || self.pad_on(port).is_some());
+    /// Make `id` the pad that drives the game; what the previous one held is let go.
+    fn activate(&mut self, id: u32) {
+        if self.active == Some(id) {
+            return;
         }
+        self.active = Some(id);
+        self.state.release_all(false);
+        self.generation += 1;
+        self.publish();
     }
 
     /// A gamepad was plugged in (at start, or while the game runs): it gets the profile of its model
-    /// (created from the shared bindings the first time) and the lowest free port.
+    /// (created from the shared bindings the first time) and drives the game from now on.
     pub fn device_added(&mut self, info: DeviceInfo) {
-        if self.pads.iter().any(|p| p.info.id == info.id) {
+        if self.pads.iter().any(|p| p.id == info.id) {
             return;
         }
         let created = self.cfg.ensure_profile(&info.guid, &info.name);
         self.save();
-        let port = self.free_port();
-        let text = match port {
-            Some(p) => format!(
-                "Gamepad connected: {} (player {}{})",
-                info.name,
-                p + 1,
-                if created { ", new profile" } else { "" }
-            ),
-            None => format!(
-                "Gamepad connected: {} (all four ports are taken)",
-                info.name
-            ),
-        };
-        self.pads.push(Pad { info, port });
+        let text = format!(
+            "Gamepad connected: {}{}",
+            info.name,
+            if created { " (new profile)" } else { "" }
+        );
+        let id = info.id;
+        self.pads.push(info);
+        self.activate(id);
         self.generation += 1;
-        self.publish_all();
         self.say(text);
     }
 
-    /// A gamepad was unplugged: its port reads as no controller, and whatever it held is let go.
+    /// A gamepad was unplugged: whatever it held is let go.
     pub fn device_removed(&mut self, id: u32) {
-        let Some(i) = self.pads.iter().position(|p| p.info.id == id) else {
+        let Some(i) = self.pads.iter().position(|p| p.id == id) else {
             return;
         };
         let pad = self.pads.remove(i);
-        if let Some(port) = pad.port {
-            self.ports[port].release_all(false);
+        if self.active == Some(id) {
+            self.active = None;
+            self.state.release_all(false);
         }
         if self.selected == Some(id) {
             self.selected = None;
         }
-        // a pad that had no port takes the one just freed
-        for i in 0..self.pads.len() {
-            if self.pads[i].port.is_none() {
-                self.pads[i].port = self.free_port();
-            }
-        }
         self.generation += 1;
-        self.publish_all();
-        self.say(format!("Gamepad disconnected: {}", pad.info.name));
-    }
-
-    /// Move the pad `id` to `port`; a pad already there takes the port the first one leaves.
-    pub fn set_port(&mut self, id: u32, port: usize) {
-        let Some(i) = self.pads.iter().position(|p| p.info.id == id) else {
-            return;
-        };
-        if port >= PORTS || self.pads[i].port == Some(port) {
-            return;
-        }
-        let old = self.pads[i].port;
-        if let Some(other) = self.pads.iter_mut().find(|p| p.port == Some(port)) {
-            other.port = old;
-        }
-        self.pads[i].port = Some(port);
-        for p in 0..PORTS {
-            self.ports[p].release_all(false);
-        }
-        self.generation += 1;
-        self.publish_all();
+        self.publish();
+        self.say(format!("Gamepad disconnected: {}", pad.name));
     }
 
     /// Pick the pad whose profile the overlay edits.
     pub fn select_pad(&mut self, id: u32) {
-        if self.pads.iter().any(|p| p.info.id == id) {
+        if self.pads.iter().any(|p| p.id == id) {
             self.selected = Some(id);
         }
     }
 
-    /// The pad whose profile is being edited: the one picked, else the one on port 1, else the first.
-    pub fn edited_pad(&self) -> Option<&Pad> {
+    /// The pad whose profile is being edited: the one picked, else the active one.
+    pub fn edited_pad(&self) -> Option<&DeviceInfo> {
         self.selected
-            .and_then(|id| self.pads.iter().find(|p| p.info.id == id))
-            .or_else(|| self.pad_on(0))
-            .or_else(|| self.pads.first())
+            .and_then(|id| self.pads.iter().find(|p| p.id == id))
+            .or_else(|| self.active_pad())
     }
 
     fn edit_key(&self) -> Option<&str> {
-        self.edited_pad().map(|p| p.info.guid.as_str())
+        self.edited_pad().map(|p| p.guid.as_str())
     }
 
     /// The button-name family of the profile being edited (the shared one while no pad is plugged in).
@@ -235,10 +203,10 @@ impl Controls {
         self.cfg.sources_of(false, self.edit_key(), action)
     }
 
-    /// The button-name family and gamepad input the player of port 1 uses for `action`, for the icons the
+    /// The button-name family and gamepad input the active pad uses for `action`, for the icons the
     /// game draws.
     pub fn icon_source(&self, action: Action) -> Option<(GlyphSet, String)> {
-        let profile = self.profile_on(0);
+        let profile = self.active_key();
         let mut sources = self.cfg.sources_of(false, profile, action);
         sources.sort_unstable();
         Some((self.cfg.glyphs_of(profile), sources.first()?.to_string()))
@@ -273,25 +241,19 @@ impl Controls {
         self.begin_remap(Remapper::new(keyboard, profile));
     }
 
-    fn release_all(&mut self, keyboard: bool) {
-        for state in &mut self.ports {
-            state.release_all(keyboard);
-        }
-    }
-
     fn begin_remap(&mut self, remapper: Remapper) {
         let keyboard = remapper.keyboard();
         // inputs already held when remapping starts must be released before they can count
         let prefix = if keyboard { "kb:" } else { "pad:" };
         self.held = self
-            .ports
-            .iter()
-            .flat_map(|s| s.sources.keys())
+            .state
+            .sources
+            .keys()
             .filter_map(|k| k.strip_prefix(prefix).map(String::from))
             .collect();
-        self.release_all(true);
-        self.release_all(false);
-        self.publish_all();
+        self.state.release_all(true);
+        self.state.release_all(false);
+        self.publish();
         self.remap = Some(remapper);
         self.message = self.prompt();
     }
@@ -335,14 +297,14 @@ impl Controls {
         }
     }
 
-    /// While suspended (the overlay is open) inputs no longer reach the game: every pad reads neutral.
+    /// While suspended (the overlay is open) inputs no longer reach the game: the pad reads neutral.
     /// Remapping still receives them.
     pub fn set_suspended(&mut self, suspended: bool) {
         self.suspended = suspended;
         if suspended {
-            self.release_all(true);
-            self.release_all(false);
-            self.publish_all();
+            self.state.release_all(true);
+            self.state.release_all(false);
+            self.publish();
         }
     }
 
@@ -404,12 +366,21 @@ impl Controls {
     }
 
     fn input(&mut self, from: Origin, source: &str, value: f32) {
-        let (keyboard, port) = match from {
-            Origin::Keyboard => (true, Some(0)),
-            Origin::Pad(id) => match self.pads.iter().find(|p| p.info.id == id) {
-                Some(p) => (false, p.port),
-                None => return,
-            },
+        let keyboard = match from {
+            Origin::Keyboard => true,
+            Origin::Pad(id) => {
+                if !self.pads.iter().any(|p| p.id == id) {
+                    return;
+                }
+                // pressing a pad makes it the active one; the others are ignored until they are pressed
+                if self.remap.is_none() && !self.suspended && value >= PRESS {
+                    self.activate(id);
+                }
+                if self.remap.is_none() && self.active_pad().map(|p| p.id) != Some(id) {
+                    return;
+                }
+                false
+            }
         };
         if let Some(r) = &mut self.remap {
             // Only the device being remapped counts, and only on the press edge: an analog trigger keeps
@@ -440,15 +411,14 @@ impl Controls {
         if self.suspended {
             return;
         }
-        let Some(port) = port else { return };
-        self.ports[port].set(keyboard, source, value);
-        self.publish_port(port);
+        self.state.set(keyboard, source, value);
+        self.publish();
     }
 
     /// Release every key (the window lost focus).
     pub fn release_keyboard(&mut self) {
-        self.ports[0].release_all(true);
-        self.publish_port(0);
+        self.state.release_all(true);
+        self.publish();
     }
 }
 
@@ -471,9 +441,9 @@ mod tests {
         (c, dir)
     }
 
-    /// What the game sees on `port` right now.
-    fn game_pad(c: &Controls, port: usize) -> fepor_runtime::si::PadState {
-        c.ports[port].pad(&c.cfg, c.profile_on(port))
+    /// What the game sees right now.
+    fn game_pad(c: &Controls) -> fepor_runtime::si::PadState {
+        c.state.pad(&c.cfg, c.active_key())
     }
 
     #[test]
@@ -504,7 +474,7 @@ mod tests {
         assert_eq!(saved.bindings.keyboard.get("KeyZ"), Some(&Action::A));
         // after remapping the new binding presses A
         c.pad_input(7, "y", 1.0);
-        assert_eq!(game_pad(&c, 0).buttons & button::A, button::A);
+        assert_eq!(game_pad(&c).buttons & button::A, button::A);
     }
 
     #[test]
@@ -540,67 +510,54 @@ mod tests {
     }
 
     #[test]
-    fn pads_take_the_lowest_free_ports_and_hot_plug_frees_them() {
+    fn a_pad_plugged_in_drives_the_game_and_unplugging_lets_go() {
         let (mut c, _dir) = controls();
-        for (id, guid) in [(1, "a"), (2, "b"), (3, "a"), (4, "c")] {
-            c.device_added(info(id, guid));
-        }
-        let ports = |c: &Controls| c.pads().iter().map(|p| p.port).collect::<Vec<_>>();
-        assert_eq!(ports(&c), [Some(0), Some(1), Some(2), Some(3)]);
-        // a fifth pad has no port but is still known
-        c.device_added(info(5, "d"));
-        assert_eq!(c.pads()[4].port, None);
-        assert!(c.notice().unwrap().contains("all four ports are taken"));
-        c.pad_input(5, "a", 1.0);
-        for port in 0..PORTS {
-            assert_eq!(game_pad(&c, port).buttons, 0);
-        }
-        // unplug the pad on port 2: the pad that had no port takes it
-        c.device_removed(2);
-        assert_eq!(c.notice(), Some("Gamepad disconnected: Pad b"));
-        assert_eq!(ports(&c), [Some(0), Some(2), Some(3), Some(1)]);
-        c.device_added(info(6, "b"));
-        assert_eq!(c.pads().last().unwrap().port, None);
-        // an unplugged id is forgotten: late events from it do nothing
-        c.device_removed(6);
-        c.pad_input(6, "a", 1.0);
-        assert_eq!(game_pad(&c, 1).buttons, 0);
+        assert!(c.active_pad().is_none());
+        c.device_added(info(1, "a"));
+        assert_eq!(c.notice(), Some("Gamepad connected: Pad a (new profile)"));
+        c.pad_input(1, "a", 1.0);
+        assert_eq!(game_pad(&c).buttons, button::A);
+        c.device_removed(1);
+        assert_eq!(c.notice(), Some("Gamepad disconnected: Pad a"));
+        assert_eq!(game_pad(&c).buttons, 0, "a held button is let go");
+        // late events of an unplugged pad do nothing; plugging it in again (new id, same model) finds the
+        // profile it already has
+        c.pad_input(1, "a", 1.0);
+        assert_eq!(game_pad(&c).buttons, 0);
+        c.device_added(info(2, "a"));
+        assert_eq!(c.notice(), Some("Gamepad connected: Pad a"));
+        c.pad_input(2, "a", 1.0);
+        assert_eq!(game_pad(&c).buttons, button::A);
     }
 
     #[test]
-    fn each_pad_drives_only_its_port_through_its_own_profile() {
+    fn with_several_pads_the_one_plugged_in_or_pressed_last_drives_the_game() {
         let (mut c, _dir) = controls();
         c.device_added(info(1, "a"));
         c.device_added(info(2, "b"));
-        // model b has "a" doing GameCube B
+        assert_eq!(c.active_pad().unwrap().id, 2, "the newcomer is active");
+        // pad 1 is ignored until it is pressed; model b has "a" doing GameCube B
         c.select_pad(2);
         c.assign(false, "a", Action::B);
-        c.pad_input(1, "a", 1.0);
         c.pad_input(2, "a", 1.0);
-        assert_eq!(game_pad(&c, 0).buttons, button::A);
-        assert_eq!(game_pad(&c, 1).buttons, button::B);
-        // the keyboard is player 1's, whatever pads are plugged in
+        assert_eq!(game_pad(&c).buttons, button::B);
+        c.pad_input(2, "a", 0.0);
+        c.pad_input(1, "a", 0.3);
+        assert_eq!(c.active_pad().unwrap().id, 2);
+        // pressing pad 1 takes over, with its own profile, and what pad 2 held is let go
+        c.pad_input(2, "a", 1.0);
+        c.pad_input(1, "a", 1.0);
+        assert_eq!(c.active_pad().unwrap().id, 1);
+        assert_eq!(game_pad(&c).buttons, button::A);
+        c.pad_input(2, "a", 0.0);
+        assert_eq!(game_pad(&c).buttons, button::A);
+        // the keyboard always works
         c.keyboard_input("KeyX", 1.0);
-        assert_eq!(game_pad(&c, 0).buttons, button::A | button::B);
-        assert_eq!(game_pad(&c, 1).buttons, button::B);
-        // unplugging pad 1 lets go of what it held
+        assert_eq!(game_pad(&c).buttons, button::A | button::B);
+        // unplugging the active pad hands over to the one left
         c.device_removed(1);
-        assert_eq!(game_pad(&c, 0).buttons, button::B);
-    }
-
-    #[test]
-    fn set_port_swaps_pads_and_a_pad_keeps_its_profile() {
-        let (mut c, _dir) = controls();
-        c.device_added(info(1, "a"));
-        c.device_added(info(2, "b"));
-        c.set_port(2, 0);
-        assert_eq!(c.pads()[0].port, Some(1));
-        assert_eq!(c.pads()[1].port, Some(0));
-        c.set_port(2, 3);
-        assert_eq!(c.pads()[1].port, Some(3));
-        assert_eq!(c.pad_on(0), None);
-        // port 1 has no pad any more: icons fall back to the shared bindings
-        assert!(c.icon_source(Action::A).is_some());
+        assert_eq!(c.active_pad().unwrap().id, 2);
+        assert_eq!(game_pad(&c).buttons, button::B);
     }
 
     #[test]
@@ -608,16 +565,16 @@ mod tests {
         let (mut c, dir) = controls();
         c.device_added(info(1, "a"));
         c.device_added(info(2, "b"));
-        // without a pick, the pad on port 1
+        // without a pick, the active pad (the last plugged in)
         c.set_glyphs(GlyphSet::PlayStation);
-        c.select_pad(2);
+        c.select_pad(1);
         assert_eq!(c.glyphs(), GlyphSet::GameCube);
         c.set_glyphs(GlyphSet::Xbox);
         c.reset_bindings();
         let saved = InputConfig::load_or_create(&dir.path().join("input.toml"));
-        assert_eq!(saved.profiles["a"].glyphs, GlyphSet::PlayStation);
-        assert_eq!(saved.profiles["b"].glyphs, GlyphSet::Xbox);
-        // the icons the game draws follow player 1's pad
+        assert_eq!(saved.profiles["b"].glyphs, GlyphSet::PlayStation);
+        assert_eq!(saved.profiles["a"].glyphs, GlyphSet::Xbox);
+        // the icons the game draws follow the active pad
         assert_eq!(c.icon_source(Action::A).unwrap().0, GlyphSet::PlayStation);
     }
 
@@ -626,10 +583,10 @@ mod tests {
         let (mut c, _dir) = controls();
         c.device_added(info(1, "a"));
         c.pad_input(1, "a", 1.0);
-        assert_eq!(game_pad(&c, 0).buttons, button::A);
+        assert_eq!(game_pad(&c).buttons, button::A);
         c.set_suspended(true);
-        assert_eq!(game_pad(&c, 0).buttons, 0);
+        assert_eq!(game_pad(&c).buttons, 0);
         c.pad_input(1, "b", 1.0);
-        assert_eq!(game_pad(&c, 0).buttons, 0);
+        assert_eq!(game_pad(&c).buttons, 0);
     }
 }

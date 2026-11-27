@@ -681,7 +681,7 @@ fn language(ui: &mut egui::Ui, shared: &Shared) {
     ui.add(egui::Label::new("This disc has one set of voices and movie soundtracks: no other audio language to choose.").wrap());
 }
 
-/// The gamepads plugged in: which player port each one drives, and which one the sections below edit.
+/// The gamepads plugged in: which one drives the game, and which one the sections below edit.
 fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Controls) {
     ui.label(crate::theme::caption("Gamepads"));
     let pads = c.pads().to_vec();
@@ -689,7 +689,7 @@ fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Contro
         ui.label(
             RichText::new(
                 "No gamepad plugged in. Plug one in at any time: it gets the profile of its model \
-                 and the lowest free player port. The keyboard plays player 1.",
+                 and plays the game at once. The keyboard works too.",
             )
             .small()
             .color(crate::theme::DIM),
@@ -697,37 +697,26 @@ fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Contro
         ui.add_space(8.0);
         return;
     }
-    let edited = c.edited_pad().map(|p| p.info.id);
+    let edited = c.edited_pad().map(|p| p.id);
+    let active = c.active_pad().map(|p| p.id);
     egui::Grid::new("pads")
         .striped(true)
         .num_columns(3)
         .show(ui, |ui| {
             for pad in &pads {
-                let id = pad.info.id;
-                if ui.radio(edited == Some(id), &pad.info.name).clicked() {
-                    c.select_pad(id);
+                if ui.radio(edited == Some(pad.id), &pad.name).clicked() {
+                    c.select_pad(pad.id);
                     st.pad_selected = None;
                 }
-                egui::ComboBox::from_id_salt(("pad port", id))
-                    .width(110.0)
-                    .selected_text(
-                        pad.port
-                            .map_or("No port".to_string(), |p| format!("Player {}", p + 1)),
-                    )
-                    .show_ui(ui, |ui| {
-                        for p in 0..fepor_input::PORTS {
-                            if ui
-                                .selectable_label(pad.port == Some(p), format!("Player {}", p + 1))
-                                .clicked()
-                            {
-                                c.set_port(id, p);
-                            }
-                        }
-                    });
+                ui.label(if active == Some(pad.id) {
+                    "plays the game"
+                } else {
+                    ""
+                });
                 ui.label(
                     RichText::new(format!(
                         "profile {}",
-                        pad.info.guid.chars().take(8).collect::<String>()
+                        pad.guid.chars().take(8).collect::<String>()
                     ))
                     .small()
                     .color(crate::theme::DIM),
@@ -738,7 +727,7 @@ fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Contro
     ui.label(
         RichText::new(
             "Every controller model has its own profile (buttons and button names below), picked \
-             automatically when it is plugged in. The keyboard plays player 1.",
+             automatically when it is plugged in. The pad plugged in or pressed last plays the game.",
         )
         .small()
         .color(crate::theme::DIM),
