@@ -302,3 +302,23 @@ impl Default for Si {
         Si::new()
     }
 }
+
+impl Si {
+    pub fn save(&self, w: &mut fepor_core::snap::W) {
+        w.u32s(&self.regs);
+        w.buf.extend_from_slice(&self.buf);
+        w.u32(self.poll);
+        w.u32(self.csr);
+        w.u32(self.sr);
+    }
+
+    pub fn load(&mut self, r: &mut fepor_core::snap::R) {
+        r.u32s_into(&mut self.regs);
+        for b in self.buf.iter_mut() {
+            *b = r.u8();
+        }
+        self.poll = r.u32();
+        self.csr = r.u32();
+        self.sr = r.u32();
+    }
+}

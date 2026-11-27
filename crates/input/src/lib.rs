@@ -11,7 +11,10 @@ use std::path::Path;
 use fepor_runtime::si::{button, PadState};
 use serde::{Deserialize, Serialize};
 
+mod controls;
 pub mod gamepad;
+
+pub use controls::{Controls, DeviceInfo};
 
 /// Everything a GameCube controller can do.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
@@ -215,13 +218,30 @@ impl Default for Bindings {
     }
 }
 
+/// The gamepad bindings and button names of one controller model, picked automatically when a pad with the
+/// model's GUID is plugged in (`[profiles.<guid>]` in `input.toml`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Profile {
+    /// The name the pad reported when the profile was last used.
+    pub name: String,
+    pub glyphs: GlyphSet,
+    /// gamepad input name -> action
+    pub gamepad: BTreeMap<String, Action>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InputConfig {
+    /// The button-name family of new profiles, and of the gamepad while none is plugged in.
     pub glyphs: GlyphSet,
     /// Analog values below this (0..1) read as zero.
     pub deadzone: f32,
+    /// `bindings.keyboard` is the keyboard's; `bindings.gamepad` is what a controller model gets the first
+    /// time it is seen, and what applies while no pad is plugged in (the only gamepad bindings files from
+    /// before profiles have).
     pub bindings: Bindings,
+    /// One profile per controller model, keyed by its SDL GUID.
+    pub profiles: BTreeMap<String, Profile>,
 }
 
 impl Default for InputConfig {
@@ -230,6 +250,7 @@ impl Default for InputConfig {
             glyphs: GlyphSet::default(),
             deadzone: 0.15,
             bindings: Bindings::default(),
+            profiles: BTreeMap::new(),
         }
     }
 }
@@ -269,24 +290,84 @@ impl InputConfig {
         )
     }
 
-    /// Bind `source` (a keyboard key when `keyboard`, otherwise a gamepad input) to `action`, replacing any
-    /// earlier binding of that source and any other source the same device had for the action.
-    pub fn bind(&mut self, keyboard: bool, source: &str, action: Action) {
+    /// Make sure the controller model `guid` has a profile: a new one starts from the shared gamepad
+    /// bindings and button names, so a pad of a model never seen before behaves as the single pad of
+    /// earlier versions did. The profile remembers `name`. Returns whether the profile is new.
+    pub fn ensure_profile(&mut self, guid: &str, name: &str) -> bool {
+        if let Some(p) = self.profiles.get_mut(guid) {
+            if !name.is_empty() {
+                p.name = name.to_string();
+            }
+            return false;
+        }
+        self.profiles.insert(
+            guid.to_string(),
+            Profile {
+                name: name.to_string(),
+                glyphs: self.glyphs,
+                gamepad: self.bindings.gamepad.clone(),
+            },
+        );
+        true
+    }
+
+    /// The gamepad bindings of profile `profile`, or the shared ones when there is none.
+    pub fn gamepad_map(&self, profile: Option<&str>) -> &BTreeMap<String, Action> {
+        match profile.and_then(|g| self.profiles.get(g)) {
+            Some(p) => &p.gamepad,
+            None => &self.bindings.gamepad,
+        }
+    }
+
+    fn gamepad_map_mut(&mut self, profile: Option<&str>) -> &mut BTreeMap<String, Action> {
+        match profile.filter(|g| self.profiles.contains_key(*g)) {
+            Some(g) => &mut self.profiles.get_mut(g).unwrap().gamepad,
+            None => &mut self.bindings.gamepad,
+        }
+    }
+
+    /// The button-name family of profile `profile`, or the shared one when there is none.
+    pub fn glyphs_of(&self, profile: Option<&str>) -> GlyphSet {
+        profile
+            .and_then(|g| self.profiles.get(g))
+            .map_or(self.glyphs, |p| p.glyphs)
+    }
+
+    pub fn set_glyphs_of(&mut self, profile: Option<&str>, glyphs: GlyphSet) {
+        match profile.and_then(|g| self.profiles.get_mut(g)) {
+            Some(p) => p.glyphs = glyphs,
+            None => self.glyphs = glyphs,
+        }
+    }
+
+    /// Bind `source` (a keyboard key when `keyboard`, otherwise a gamepad input of `profile`) to `action`,
+    /// replacing any earlier binding of that source and any other source the same device had for the action.
+    pub fn bind(&mut self, keyboard: bool, profile: Option<&str>, source: &str, action: Action) {
         let map = if keyboard {
             &mut self.bindings.keyboard
         } else {
-            &mut self.bindings.gamepad
+            self.gamepad_map_mut(profile)
         };
         map.retain(|_, a| *a != action);
         map.insert(source.to_string(), action);
     }
 
-    /// Sources bound to `action` on the keyboard or the gamepad.
-    pub fn sources_of(&self, keyboard: bool, action: Action) -> Vec<&str> {
+    /// Leave `source` unbound. Returns whether it was bound.
+    pub fn unbind(&mut self, keyboard: bool, profile: Option<&str>, source: &str) -> bool {
+        let map = if keyboard {
+            &mut self.bindings.keyboard
+        } else {
+            self.gamepad_map_mut(profile)
+        };
+        map.remove(source).is_some()
+    }
+
+    /// Sources bound to `action` on the keyboard or on the gamepad of `profile`.
+    pub fn sources_of(&self, keyboard: bool, profile: Option<&str>, action: Action) -> Vec<&str> {
         let map = if keyboard {
             &self.bindings.keyboard
         } else {
-            &self.bindings.gamepad
+            self.gamepad_map(profile)
         };
         map.iter()
             .filter(|(_, a)| **a == action)
@@ -299,7 +380,7 @@ impl InputConfig {
 #[derive(Default)]
 pub struct InputState {
     /// source name (prefixed `kb:` or `pad:`) -> strength 0..1
-    sources: HashMap<String, f32>,
+    pub(crate) sources: HashMap<String, f32>,
 }
 
 const STICK_RANGE: f32 = 100.0;
@@ -320,11 +401,12 @@ impl InputState {
         self.sources.retain(|k, _| !k.starts_with(prefix));
     }
 
-    fn strength(&self, cfg: &InputConfig, action: Action) -> f32 {
+    /// The strength of `action` from the keyboard bindings and the gamepad bindings of `profile`.
+    fn strength(&self, cfg: &InputConfig, profile: Option<&str>, action: Action) -> f32 {
         let mut best: f32 = 0.0;
         for (keyboard, map) in [
             (true, &cfg.bindings.keyboard),
-            (false, &cfg.bindings.gamepad),
+            (false, cfg.gamepad_map(profile)),
         ] {
             for (src, a) in map {
                 if *a != action {
@@ -345,9 +427,10 @@ impl InputState {
         best
     }
 
-    /// The controller state the GameCube sees.
-    pub fn pad(&self, cfg: &InputConfig) -> PadState {
-        let s = |a| self.strength(cfg, a);
+    /// The controller state the GameCube sees: the keyboard and the gamepad bindings of `profile` (the
+    /// keyboard's keys and the active pad's inputs share one state).
+    pub fn pad(&self, cfg: &InputConfig, profile: Option<&str>) -> PadState {
+        let s = |a| self.strength(cfg, profile, a);
         let on = |a| s(a) > 0.5;
         let mut b = 0u16;
         for (a, bit) in [
@@ -397,6 +480,8 @@ impl InputState {
 /// Interactive remapping: asks for each action in turn and takes the next input as its binding.
 pub struct Remapper {
     keyboard: bool,
+    /// The gamepad profile the bindings go to (the shared bindings when `None`).
+    profile: Option<String>,
     queue: Vec<Action>,
     next: usize,
 }
@@ -409,18 +494,20 @@ pub enum RemapStep {
 }
 
 impl Remapper {
-    pub fn new(keyboard: bool) -> Remapper {
+    pub fn new(keyboard: bool, profile: Option<String>) -> Remapper {
         Remapper {
             keyboard,
+            profile,
             queue: Action::ALL.to_vec(),
             next: 0,
         }
     }
 
     /// Remap `action` only.
-    pub fn single(keyboard: bool, action: Action) -> Remapper {
+    pub fn single(keyboard: bool, profile: Option<String>, action: Action) -> Remapper {
         Remapper {
             keyboard,
+            profile,
             queue: vec![action],
             next: 0,
         }
@@ -440,7 +527,7 @@ impl Remapper {
     /// An input arrived; `source` is `None` to skip the action (keep its current binding).
     pub fn feed(&mut self, cfg: &mut InputConfig, source: Option<&str>) -> RemapStep {
         if let (Some(a), Some(src)) = (self.queue.get(self.next).copied(), source) {
-            cfg.bind(self.keyboard, src, a);
+            cfg.bind(self.keyboard, self.profile.as_deref(), src, a);
         }
         self.next += 1;
         self.current()
@@ -457,12 +544,12 @@ mod tests {
         let path = dir.path().join("input.toml");
         let mut c = InputConfig::load_or_create(&path);
         assert!(path.exists());
-        c.bind(true, "KeyF", Action::A);
+        c.bind(true, None, "KeyF", Action::A);
         c.glyphs = GlyphSet::PlayStation;
         c.save(&path).unwrap();
         let back = InputConfig::load_or_create(&path);
         assert_eq!(back, c);
-        assert_eq!(back.sources_of(true, Action::A), vec!["KeyF"]);
+        assert_eq!(back.sources_of(true, None, Action::A), vec!["KeyF"]);
     }
 
     #[test]
@@ -472,7 +559,7 @@ mod tests {
         st.set(true, "KeyZ", 1.0);
         st.set(true, "ArrowRight", 1.0);
         st.set(false, "lefttrigger", 0.6);
-        let p = st.pad(&cfg);
+        let p = st.pad(&cfg, None);
         assert_eq!(p.buttons & button::A, button::A);
         assert_eq!(p.stick.0, 228);
         assert_eq!(p.stick.1, 128);
@@ -480,7 +567,7 @@ mod tests {
         assert_eq!(p.buttons & button::L, 0);
         assert!(p.triggers.0 > 100 && p.triggers.0 < 160, "{}", p.triggers.0);
         st.set(false, "lefttrigger", 1.0);
-        assert_eq!(st.pad(&cfg).buttons & button::L, button::L);
+        assert_eq!(st.pad(&cfg, None).buttons & button::L, button::L);
     }
 
     #[test]
@@ -488,13 +575,13 @@ mod tests {
         let cfg = InputConfig::default();
         let mut st = InputState::default();
         st.set(false, "leftx+", 0.1);
-        assert_eq!(st.pad(&cfg).stick, (128, 128));
+        assert_eq!(st.pad(&cfg, None).stick, (128, 128));
     }
 
     #[test]
     fn remapping_replaces_bindings_and_a_skip_keeps_them() {
         let mut cfg = InputConfig::default();
-        let mut r = Remapper::new(false);
+        let mut r = Remapper::new(false, None);
         // A <- "y" pad button, B skipped
         assert!(matches!(r.current(), RemapStep::Ask(Action::A)));
         r.feed(&mut cfg, Some("y"));
@@ -512,286 +599,72 @@ mod tests {
         assert_eq!(GlyphSet::Xbox.source_label("rightshoulder"), "RB");
     }
 
+    /// A file written before profiles existed: no `[profiles]`, custom shared gamepad bindings, a glyph
+    /// family and a dead zone.
+    const LEGACY: &str = r#"
+glyphs = "PlayStation"
+deadzone = 0.3
+
+[bindings.keyboard]
+KeyZ = "A"
+
+[bindings.gamepad]
+a = "B"
+x = "A"
+"#;
+
     #[test]
-    fn interactive_remap_saves_and_the_new_binding_drives_the_pad() {
+    fn a_file_from_before_profiles_loads_and_seeds_the_profile_of_the_first_pad() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("input.toml");
+        std::fs::write(&path, LEGACY).unwrap();
+        let old = InputConfig::load_or_create(&path);
+        assert!(old.profiles.is_empty());
+        assert_eq!(old.glyphs, GlyphSet::PlayStation);
+        assert_eq!(old.deadzone, 0.3);
+
+        // the first pad of a model gets the old bindings and button names as its profile, and the file
+        // gains the profile while everything else stays
         let mut c = Controls::new(path.clone());
-        c.toggle_remap(false);
-        assert!(c
-            .message
-            .as_deref()
+        c.device_added(DeviceInfo {
+            id: 1,
+            guid: "03000000".into(),
+            name: "Pad".into(),
+        });
+        let new = InputConfig::load_or_create(&path);
+        let p = &new.profiles["03000000"];
+        assert_eq!(p.name, "Pad");
+        assert_eq!(p.glyphs, GlyphSet::PlayStation);
+        assert_eq!(p.gamepad, old.bindings.gamepad);
+        assert_eq!(new.bindings, old.bindings);
+        assert_eq!((new.glyphs, new.deadzone), (old.glyphs, old.deadzone));
+        assert!(std::fs::read_to_string(&path)
             .unwrap()
-            .contains("press the input for A"));
-        // action A takes the "y" button; a press needs its release before the next action is asked
-        c.input(false, "y", 1.0);
-        c.input(false, "y", 0.0);
-        // inputs from the other device are ignored while remapping
-        c.input(true, "KeyZ", 1.0);
-        for n in 1..Action::ALL.len() {
-            let source = format!("extra{n}");
-            c.input(false, &source, 1.0);
-            c.input(false, &source, 0.0);
-        }
-        assert_eq!(c.message.as_deref(), Some("Controls saved"));
-        let saved = InputConfig::load_or_create(&path);
-        assert_eq!(saved.bindings.gamepad.get("y"), Some(&Action::A));
-        assert_eq!(saved.bindings.keyboard.get("KeyZ"), Some(&Action::A));
-        // after remapping the new binding presses A
-        c.input(false, "y", 1.0);
-        assert_eq!(c.state.pad(&c.cfg).buttons & button::A, button::A);
+            .contains("[profiles.03000000"));
     }
 
     #[test]
-    fn a_held_analog_trigger_binds_one_action_until_it_is_released() {
+    fn a_model_gets_its_own_profile_and_finds_it_again() {
+        let mut cfg = InputConfig::default();
+        assert!(cfg.ensure_profile("xbox", "Xbox Controller"));
+        assert!(cfg.ensure_profile("ps5", "DualSense"));
+        cfg.set_glyphs_of(Some("ps5"), GlyphSet::PlayStation);
+        cfg.bind(false, Some("ps5"), "b", Action::A);
+        // known model: same profile, name refreshed, nothing reset
+        assert!(!cfg.ensure_profile("ps5", "DualSense Wireless Controller"));
+        assert_eq!(cfg.profiles["ps5"].name, "DualSense Wireless Controller");
+        assert_eq!(cfg.glyphs_of(Some("ps5")), GlyphSet::PlayStation);
+        assert_eq!(cfg.gamepad_map(Some("ps5")).get("b"), Some(&Action::A));
+        // the other model and the shared bindings are untouched
+        assert_eq!(cfg.glyphs_of(Some("xbox")), GlyphSet::GameCube);
+        assert_eq!(cfg.gamepad_map(Some("xbox")), &Bindings::default().gamepad);
+        assert_eq!(cfg.bindings, Bindings::default());
+        // an unknown model falls back to the shared bindings
+        assert_eq!(cfg.gamepad_map(Some("other")), &cfg.bindings.gamepad);
+        // and it all survives the file
         let dir = tempfile::tempdir().unwrap();
-        let mut c = Controls::new(dir.path().join("input.toml"));
-        c.toggle_remap(false);
-        // the trigger keeps reporting while held: A takes it, B and the rest must not
-        for v in [0.7, 0.9, 1.0, 1.0, 0.95] {
-            c.input(false, "lefttrigger", v);
-        }
-        assert_eq!(
-            c.config().bindings.gamepad.get("lefttrigger"),
-            Some(&Action::A)
-        );
-        assert!(
-            c.message
-                .as_deref()
-                .unwrap()
-                .contains("press the input for B"),
-            "{:?}",
-            c.message
-        );
-        // released, the next press goes to B
-        c.input(false, "lefttrigger", 0.0);
-        c.input(false, "righttrigger", 1.0);
-        assert_eq!(
-            c.config().bindings.gamepad.get("righttrigger"),
-            Some(&Action::B)
-        );
-        // axis jitter between 0.3 and 0.6 neither releases nor presses
-        c.input(false, "righttrigger", 0.5);
-        c.input(false, "righttrigger", 0.8);
-        assert!(c
-            .message
-            .as_deref()
-            .unwrap()
-            .contains("press the input for X"));
-    }
-}
-
-/// Everything the front end needs at run time: configuration, live state and the remapping dialog.
-pub struct Controls {
-    cfg: InputConfig,
-    state: InputState,
-    remap: Option<Remapper>,
-    path: std::path::PathBuf,
-    /// A message for the player (shown in the window title) after a hotkey or remapping step.
-    pub message: Option<String>,
-    /// Sources of the device being remapped that are currently held down.
-    held: std::collections::HashSet<String>,
-    suspended: bool,
-    generation: u64,
-}
-
-impl Controls {
-    pub fn new(path: std::path::PathBuf) -> Controls {
-        Controls {
-            cfg: InputConfig::load_or_create(&path),
-            state: InputState::default(),
-            remap: None,
-            path,
-            message: None,
-            held: Default::default(),
-            suspended: false,
-            generation: 1,
-        }
-    }
-
-    pub fn config(&self) -> &InputConfig {
-        &self.cfg
-    }
-
-    /// Bumped whenever the bindings or the glyph family change, so that whoever draws button icons knows
-    /// when to redraw them.
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    fn publish(&self) {
-        fepor_runtime::si::set_pad(self.state.pad(&self.cfg));
-    }
-
-    fn prompt(&self) -> Option<String> {
-        let r = self.remap.as_ref()?;
-        match r.current() {
-            RemapStep::Ask(a) => Some(format!(
-                "Remapping {}: press the input for {} (Esc: keep, F2/F3: cancel)",
-                if r.keyboard() { "keyboard" } else { "gamepad" },
-                a.label()
-            )),
-            RemapStep::Done => None,
-        }
-    }
-
-    /// Start (or cancel) interactive remapping of the keyboard or the gamepad.
-    pub fn toggle_remap(&mut self, keyboard: bool) {
-        if self
-            .remap
-            .as_ref()
-            .is_some_and(|r| r.keyboard() == keyboard)
-        {
-            self.remap = None;
-            self.message = Some("Remapping cancelled".into());
-            return;
-        }
-        self.begin_remap(Remapper::new(keyboard));
-    }
-
-    fn begin_remap(&mut self, remapper: Remapper) {
-        let keyboard = remapper.keyboard();
-        // inputs already held when remapping starts must be released before they can count
-        let prefix = if keyboard { "kb:" } else { "pad:" };
-        self.held = self
-            .state
-            .sources
-            .keys()
-            .filter_map(|k| k.strip_prefix(prefix).map(String::from))
-            .collect();
-        self.state.release_all(true);
-        self.state.release_all(false);
-        self.publish();
-        self.remap = Some(remapper);
-        self.message = self.prompt();
-    }
-
-    /// Switch to the next button-glyph family and save the choice.
-    pub fn cycle_glyphs(&mut self) {
-        self.cfg.glyphs = match self.cfg.glyphs {
-            GlyphSet::GameCube => GlyphSet::Xbox,
-            GlyphSet::Xbox => GlyphSet::Nintendo,
-            GlyphSet::Nintendo => GlyphSet::PlayStation,
-            GlyphSet::PlayStation => GlyphSet::GameCube,
-        };
-        let _ = self.cfg.save(&self.path);
-        self.message = Some(format!("Button glyphs: {:?}", self.cfg.glyphs));
-    }
-
-    /// Rebind one action of the keyboard or the gamepad: the next input becomes its binding (Esc on the
-    /// keyboard keeps the current one). Saved when done.
-    pub fn rebind(&mut self, keyboard: bool, action: Action) {
-        self.begin_remap(Remapper::single(keyboard, action));
-    }
-
-    /// Whether the next input is being captured as a binding.
-    pub fn is_remapping(&self) -> bool {
-        self.remap.is_some()
-    }
-
-    /// The device (`true` = keyboard) and action being captured, if any.
-    pub fn remap_target(&self) -> Option<(bool, Action)> {
-        let r = self.remap.as_ref()?;
-        match r.current() {
-            RemapStep::Ask(a) => Some((r.keyboard(), a)),
-            RemapStep::Done => None,
-        }
-    }
-
-    pub fn cancel_remap(&mut self) {
-        if self.remap.take().is_some() {
-            self.message = Some("Remapping cancelled".into());
-        }
-    }
-
-    /// While suspended (the overlay is open) inputs no longer reach the game: the pad reads neutral.
-    /// Remapping still receives them.
-    pub fn set_suspended(&mut self, suspended: bool) {
-        self.suspended = suspended;
-        if suspended {
-            self.state.release_all(true);
-            self.state.release_all(false);
-            self.publish();
-        }
-    }
-
-    pub fn set_glyphs(&mut self, glyphs: GlyphSet) {
-        self.cfg.glyphs = glyphs;
-        self.generation += 1;
-        let _ = self.cfg.save(&self.path);
-    }
-
-    pub fn set_deadzone(&mut self, deadzone: f32) {
-        self.cfg.deadzone = deadzone.clamp(0.0, 0.9);
-        let _ = self.cfg.save(&self.path);
-    }
-
-    /// Back to the default bindings (glyph family and dead zone kept).
-    pub fn reset_bindings(&mut self) {
-        self.cfg.bindings = Bindings::default();
-        self.generation += 1;
-        let _ = self.cfg.save(&self.path);
-    }
-
-    /// Bind the input `source` of the keyboard or the gamepad to `action` (the action's earlier source on that
-    /// device is released, as is the action the source had). Saved at once.
-    pub fn assign(&mut self, keyboard: bool, source: &str, action: Action) {
-        self.cfg.bind(keyboard, source, action);
-        self.generation += 1;
-        let _ = self.cfg.save(&self.path);
-    }
-
-    /// Leave `source` unbound.
-    pub fn unassign(&mut self, keyboard: bool, source: &str) {
-        let map = if keyboard {
-            &mut self.cfg.bindings.keyboard
-        } else {
-            &mut self.cfg.bindings.gamepad
-        };
-        if map.remove(source).is_some() {
-            self.generation += 1;
-            let _ = self.cfg.save(&self.path);
-        }
-    }
-
-    /// One input event. `keyboard` selects the device; `value` is 0 on release.
-    pub fn input(&mut self, keyboard: bool, source: &str, value: f32) {
-        if let Some(r) = &mut self.remap {
-            // Only the device being remapped counts, and only on the press edge: an analog trigger keeps
-            // reporting values while it is held, and must not bind every following action to itself.
-            // A source is "held" from 0.6 until it falls below 0.3 (hysteresis against axis jitter).
-            if r.keyboard() == keyboard {
-                if value < 0.3 {
-                    self.held.remove(source);
-                } else if value >= 0.6 && self.held.insert(source.to_string()) {
-                    let step = if keyboard && source == "Escape" {
-                        r.feed(&mut self.cfg, None)
-                    } else {
-                        r.feed(&mut self.cfg, Some(source))
-                    };
-                    self.generation += 1;
-                    match step {
-                        RemapStep::Done => {
-                            let _ = self.cfg.save(&self.path);
-                            self.remap = None;
-                            self.message = Some("Controls saved".into());
-                        }
-                        RemapStep::Ask(_) => self.message = self.prompt(),
-                    }
-                }
-            }
-            return;
-        }
-        if self.suspended {
-            return;
-        }
-        self.state.set(keyboard, source, value);
-        self.publish();
-    }
-
-    /// Release every key and button (the window lost focus).
-    pub fn release_keyboard(&mut self) {
-        self.state.release_all(true);
-        self.publish();
+        let path = dir.path().join("input.toml");
+        cfg.save(&path).unwrap();
+        assert_eq!(InputConfig::load_or_create(&path), cfg);
     }
 }

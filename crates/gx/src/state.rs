@@ -136,6 +136,18 @@ pub trait Sink {
     fn recycle(&mut self) -> Vec<Vertex> {
         Vec::new()
     }
+
+    /// A hash of what the framebuffer holds now (`FEPOR_TRACE=state` compares it before and after a load).
+    fn picture_hash(&mut self) -> Option<u64> {
+        None
+    }
+
+    /// Write what the backend keeps that main memory does not hold (save states, ADR 0035): the
+    /// framebuffer and the copies of it that textures are read from.
+    fn save_state(&mut self, _w: &mut fepor_core::snap::W) {}
+
+    /// Restore it. `ram` is the restored main memory.
+    fn load_state(&mut self, _r: &mut fepor_core::snap::R, _ram: &[u8]) {}
 }
 
 /// Palette memory: TLUT data by TMEM offset.
