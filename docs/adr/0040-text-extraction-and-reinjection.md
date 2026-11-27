@@ -40,8 +40,8 @@ Entries are in text-area order. The body is the text's lines; a blank line ends 
 
 ## Mod layout
 
-`text-build <dir> --mod <mod>` writes `<mod>/files/Mess/<file>.m`: the path inside `files/` is the disc path, which the mod manager will overlay on the disc's files. Files that rebuild identical to the disc are skipped (`--all` writes them anyway), so a mod holds only what changed.
+`text-build <dir> --mod <mod>` writes `<mod>/files/Mess/<file>.m`: the path inside `files/` is the disc path, which the mod manager (ADR 0034) overlays on the disc's files. If `<mod>/mod.toml` does not exist, `text-build` writes one (`name` = the folder name, `game_id` = the disc's, a description saying it is generated); an existing one is never touched, so authors can add `author`/`version`. Put the mod folder in `<data>/mods/` and enable it in the launcher or overlay. Files that rebuild identical to the disc are skipped (`--all` writes them anyway), so a mod holds only what changed.
 
 ## Verified, not verified
 
-Round trip on the EU disc: extract all, build all, 180 of 180 files byte-identical. Not verified: that the game accepts a replacement file of another size (the DVD layer serving mod files is the mod manager's), and rendering of translated text.
+Round trip on the EU disc: extract all, build all, 180 of 180 files byte-identical. Not verified: that the game accepts a replacement file of another size (a replaced file is served by the mod manager; see the PR for the headless check), and rendering of translated text.
