@@ -4,6 +4,7 @@
 //! [`Overlay`], runs the UI once per presented image and paints it with our own wgpu painter.
 
 pub mod glyphs;
+mod memory;
 mod outlines;
 mod pad;
 mod paint;
@@ -72,6 +73,7 @@ impl Overlay {
         let open = self.shared.is_open();
         let video = self.shared.settings.get().video;
         if !open && video.stats == StatsMode::Off {
+            self.shared.memory.set_active(false);
             return;
         }
         // 0 = auto: 1x at a 720-pixel-high window, growing with it, so the text stays readable on big screens

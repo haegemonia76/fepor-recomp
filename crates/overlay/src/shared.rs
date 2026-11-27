@@ -36,6 +36,8 @@ pub struct Shared {
     pub data_dir: PathBuf,
     /// The cheat list of the running game, applied by the guest thread (ADR 0026).
     pub cheats: Arc<fepor_core::cheats::CheatStore>,
+    /// The memory watcher's channel to the guest thread (ADR 0048).
+    pub memory: Arc<fepor_core::memwatch::Link>,
     /// The memory card in slot A, once the game opened it.
     pub card_path: Mutex<Option<PathBuf>>,
     display_millihz: AtomicU32,
@@ -87,6 +89,7 @@ impl Shared {
             controls,
             cheats: Arc::new(fepor_core::cheats::CheatStore::new(data_dir.clone())),
             data_dir,
+            memory: Arc::default(),
             card_path: Mutex::new(None),
             display_millihz: AtomicU32::new(0),
             guest_fps_x100: AtomicU32::new(0),
