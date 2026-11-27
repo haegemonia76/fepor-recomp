@@ -262,6 +262,13 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                     },
                     gpu,
                 );
+                if let Some(ms) = s.scaling_gpu_ms {
+                    line(
+                        ui,
+                        Color32::WHITE,
+                        format!("Scaling pass {ms:.2} ms on the GPU (FSR, filters)"),
+                    );
+                }
                 line(
                     ui,
                     Color32::GRAY,
@@ -360,10 +367,13 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     }
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Internal resolution"));
-    ui.add(
+    ui.add_enabled(
+        !s.video.fsr.is_on(),
         egui::Slider::new(&mut s.video.resolution, 1..=4)
             .custom_formatter(|v, _| format!("x{v:.0}  ({}x{})", 640 * v as u32, 528 * v as u32)),
     );
+    ui.add_space(8.0);
+    fsr(ui, &mut s.video.fsr);
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Picture shape"));
     for a in Aspect::ALL {
@@ -395,6 +405,27 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     );
     if s != before {
         shared.settings.update(|x| *x = s);
+    }
+}
+
+/// AMD FSR 1 upscaling: while on, it picks the internal resolution from the window's size.
+fn fsr(ui: &mut egui::Ui, f: &mut fepor_core::settings::Fsr) {
+    use fepor_core::settings::FsrQuality;
+    ui.label(crate::theme::caption("Upscaling (AMD FSR 1)"));
+    for q in FsrQuality::ALL {
+        ui.radio_value(&mut f.quality, q, q.label());
+    }
+    if f.is_on() {
+        ui.label(
+            RichText::new("Renders at a lower internal resolution (chosen from the window's size) and upscales to the window.")
+                .small()
+                .weak(),
+        );
+        ui.label(RichText::new("Sharpness").small());
+        ui.add(
+            egui::Slider::new(&mut f.sharpness, 0.0..=1.0)
+                .custom_formatter(|x, _| format!("{x:.2}")),
+        );
     }
 }
 

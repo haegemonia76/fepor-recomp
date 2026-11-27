@@ -12,12 +12,15 @@ use fepor_gx::state::{CopyEfb, DrawCall, Event, Primitive, RenderState, Sink, Te
 use fepor_gx::{tev, texture};
 use wgpu::util::DeviceExt;
 
+mod fsr;
 mod icons;
 mod present;
 mod sysstat;
 
 pub const EFB_WIDTH: u32 = 640;
 pub const EFB_HEIGHT: u32 = 528;
+/// Frame dumps through the render filters or FSR are at least this many times the GameCube's frame.
+const DUMP_OUTPUT_FACTOR: u32 = 3;
 
 /// A multiply-rotate hasher (the maps here are keyed by small plain values hashed several times per draw;
 /// SipHash was 4 % of the guest thread in a battle).
@@ -481,8 +484,13 @@ pub struct Renderer {
     read_alt: bool,
     /// The render filters (ADR 0039); the window's presenter has its own copy, this one filters dumps.
     filters: fepor_core::settings::Filters,
-    /// The filter pass for frame dumps, made when a dump first needs it.
-    dump_post: Option<present::Post>,
+    /// FSR (ADR 0042) and the internal resolution the player chose (FSR picks its own while on).
+    fsr: fepor_core::settings::Fsr,
+    resolution: u32,
+    /// GPU time of the last measured scaling pass, in microseconds (0 until one was).
+    post_us: Arc<std::sync::atomic::AtomicU32>,
+    /// The scaling pass and its timer for frame dumps, made when a dump first needs them.
+    dump_post: Option<(present::Post, Option<present::PassTimer>)>,
     alt_depth_view: wgpu::TextureView,
     /// The last real frame, kept so it can be shown after the interpolated ones.
     xfb: wgpu::Texture,
@@ -598,9 +606,13 @@ impl Renderer {
         .map_err(|e| format!("no GPU adapter: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("fepor"),
+            // GPU time of the scaling pass on the statistics overlay, where the GPU can tell
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             ..Default::default()
         }))
         .map_err(|e| format!("device: {e}"))?;
+        let timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let post_us = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let adapter_info = adapter.get_info();
         // Images shown per guest frame (interpolated between consecutive frames), windowed or dumped only.
         let interpolates = window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok();
@@ -616,11 +628,22 @@ impl Renderer {
                 s,
                 window.clone().expect("surface implies window"),
                 mult > 1,
-                settings.get().video.filters,
+                &settings.get().video,
+                present::PassTimer::new(&device, &queue, post_us.clone()),
             )
         });
 
-        let scale = settings.get().video.resolution;
+        let video = settings.get().video;
+        let scale = if video.fsr.is_on() {
+            video.fsr.internal_scale(
+                window
+                    .as_ref()
+                    .map_or(DUMP_OUTPUT_FACTOR * EFB_HEIGHT, |w| w.inner_size().height),
+                EFB_HEIGHT,
+            )
+        } else {
+            video.resolution
+        };
         let Targets {
             efb,
             efb_view,
@@ -736,7 +759,10 @@ impl Renderer {
             xfb,
             alt,
             read_alt: false,
-            filters: settings.get().video.filters,
+            filters: video.filters,
+            fsr: video.fsr,
+            resolution: video.resolution,
+            post_us,
             dump_post: None,
             xfb_view,
             rec: Vec::new(),
@@ -761,7 +787,7 @@ impl Renderer {
             vsync: true,
             fps_frames: 0,
             fps_since: Instant::now(),
-            stats: StatsState::new(&adapter_info),
+            stats: StatsState::new(&adapter_info, timestamps),
             show_stats: false,
             icon_gen: 0,
             tot_events: Duration::ZERO,
@@ -1728,12 +1754,18 @@ impl Renderer {
         )
     }
 
+    /// Whether the window would show the frame exactly as the game drew it (no filters, no FSR).
+    fn shows_plain(&self) -> bool {
+        self.filters.is_identity() && !self.fsr.is_on()
+    }
+
     /// The frame `c` of the EFB (or of the interpolation target with `alt`) as the window would show it:
-    /// through the render filters, at least 3x the GameCube's size so that scanlines and mask have room, and
-    /// with the overlay drawn on top, unfiltered, when there is no window to draw it on.
+    /// through FSR and the render filters, at least 3x the GameCube's size so that scanlines, mask and the
+    /// upscale have room, and with the overlay drawn on top, unfiltered, when there is no window to draw
+    /// it on.
     fn read_filtered(&mut self, c: &CopyEfb, alt: bool) -> (u32, u32, Vec<u8>) {
         self.flush();
-        let s = self.scale.max(3);
+        let s = self.scale.max(DUMP_OUTPUT_FACTOR);
         let (w, h) = (c.width.clamp(1, EFB_WIDTH), c.height.clamp(1, EFB_HEIGHT));
         let (tw, th) = (w * s, h * s);
         let out = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1751,29 +1783,25 @@ impl Renderer {
             view_formats: &[],
         });
         let view = out.create_view(&Default::default());
-        let post = self.dump_post.get_or_insert_with(|| {
-            present::Post::new(&self.device, wgpu::TextureFormat::Rgba8Unorm)
+        let (post, timer) = self.dump_post.get_or_insert_with(|| {
+            (
+                present::Post::new(&self.device, wgpu::TextureFormat::Rgba8Unorm),
+                present::PassTimer::new(&self.device, &self.queue, self.post_us.clone()),
+            )
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("filtered dump"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            let src = if alt { &self.alt_view } else { &self.efb_view };
-            post.draw(&self.device, &mut pass, src, c, &self.filters);
-        }
+        let src = if alt { &self.alt_view } else { &self.efb_view };
+        let timed = post.scale(
+            &self.device,
+            &mut enc,
+            &view,
+            (0.0, 0.0, tw as f32, th as f32),
+            src,
+            c,
+            &self.filters,
+            &self.fsr,
+            timer.as_ref(),
+        );
         if self.presenter.is_none() {
             if let Some(o) = &mut self.overlay {
                 o.paint(
@@ -1788,6 +1816,9 @@ impl Renderer {
             }
         }
         self.queue.submit([enc.finish()]);
+        if let (true, Some(t)) = (timed, timer.as_ref()) {
+            t.start_read();
+        }
         let rgba = read_texture(&self.device, &self.queue, &out, (0, 0), (tw, th));
         (tw, th, rgba)
     }
@@ -1803,6 +1834,7 @@ impl Renderer {
         if let Some(p) = &mut self.presenter {
             p.set_aspect(s.video.aspect);
             p.set_filters(s.video.filters.clone());
+            p.set_fsr(s.video.fsr.clone());
             p.set_fullscreen(s.video.fullscreen);
         }
         let mult = if self.interpolates {
@@ -1819,14 +1851,30 @@ impl Renderer {
             self.rec.clear();
         }
         self.filters = s.video.filters.clone();
+        self.fsr = s.video.fsr.clone();
+        self.resolution = s.video.resolution;
         self.vsync = s.video.vsync;
         self.show_stats = s.video.stats != fepor_core::settings::StatsMode::Off;
         if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
             p.set_present(&self.device, mult > 1, self.vsync);
         }
-        if s.video.resolution != self.scale {
+    }
+
+    /// The internal resolution: the player's choice, or while FSR is on the one that gives its quality's
+    /// ratio to the picture's size on the window (or on a dump). Reallocates the targets when it changes.
+    fn sync_scale(&mut self) {
+        let wanted = if self.fsr.is_on() {
+            let out = self
+                .presenter
+                .as_ref()
+                .map_or(DUMP_OUTPUT_FACTOR * EFB_HEIGHT, |p| p.out_height());
+            self.fsr.internal_scale(out, EFB_HEIGHT)
+        } else {
+            self.resolution
+        };
+        if wanted != self.scale {
             self.flush();
-            self.scale = s.video.resolution;
+            self.scale = wanted;
             let t = make_targets(&self.device, self.scale);
             self.efb = t.efb;
             self.efb_view = t.efb_view;
@@ -1909,7 +1957,7 @@ impl Renderer {
         }
         let path = d.dir.join(format!("frame_{:05}.png", self.frame));
         let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
-        let (pw, ph, rgba) = if self.filters.is_identity() {
+        let (pw, ph, rgba) = if self.shows_plain() {
             if self.presenter.is_none() {
                 self.paint_overlay_on_efb();
             }
@@ -1932,6 +1980,8 @@ impl Renderer {
     /// followed by the real one.
     fn show_frame(&mut self, c: &CopyEfb) {
         self.apply_settings();
+        // the window may have changed size
+        self.sync_scale();
         // the player changed the bindings or the button-name family: icons made before are stale
         let icon_gen = self
             .overlay
@@ -2083,7 +2133,7 @@ impl Renderer {
             .is_some_and(|d| self.frame % d.every == 0)
         {
             let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
-            let (pw, ph, rgba) = if self.filters.is_identity() {
+            let (pw, ph, rgba) = if self.shows_plain() {
                 self.read_alt = true;
                 let rgba = self.read_efb(c.x, c.y, w, h);
                 self.read_alt = false;
@@ -2296,6 +2346,8 @@ struct StatsState {
     backend: String,
     /// Submission-to-completion time of the last batch of GPU work, in microseconds.
     gpu_latency_us: Arc<std::sync::atomic::AtomicU32>,
+    /// Whether the device can time the scaling pass.
+    timestamps: bool,
     at: Instant,
     frames: u32,
     shown: u64,
@@ -2306,7 +2358,7 @@ struct StatsState {
 }
 
 impl StatsState {
-    fn new(info: &wgpu::AdapterInfo) -> StatsState {
+    fn new(info: &wgpu::AdapterInfo, timestamps: bool) -> StatsState {
         use std::sync::atomic::Ordering::Relaxed;
         StatsState {
             frame_ms: Default::default(),
@@ -2316,6 +2368,7 @@ impl StatsState {
             gpu_name: info.name.clone(),
             backend: format!("{:?}", info.backend),
             gpu_latency_us: Arc::new(Default::default()),
+            timestamps,
             at: Instant::now(),
             frames: 0,
             shown: 0,
@@ -2378,6 +2431,10 @@ impl Renderer {
             threads: cpu.threads,
             gpu_busy: st.gpu_busy_path.as_deref().and_then(sysstat::read_gpu_busy),
             gpu_latency_ms: st.gpu_latency_us.load(Relaxed) as f32 / 1000.0,
+            // 0 until a measurement came in (a plain frame dump has no scaling pass)
+            scaling_gpu_ms: Some(self.post_us.load(Relaxed))
+                .filter(|&us| st.timestamps && us > 0)
+                .map(|us| us as f32 / 1000.0),
             gpu_name: st.gpu_name.clone(),
             backend: st.backend.clone(),
             target: (EFB_WIDTH * self.scale, EFB_HEIGHT * self.scale),

@@ -18,4 +18,4 @@ Without the launcher: `fepor-recomp prepare --game <disc> --data <folder>`, then
 cargo build --release -p fepor-recomp -p fepor-game
 ```
 
-Design notes are in [`docs/adr`](docs/adr), the vocabulary in [`CONTEXT.md`](CONTEXT.md), the helper scripts in [`tools`](tools/README.md). Licence: GPL-2.0, see [`LICENSE`](LICENSE).
+Design notes are in [`docs/adr`](docs/adr), the vocabulary in [`CONTEXT.md`](CONTEXT.md), the helper scripts in [`tools`](tools/README.md). Licence: GPL-2.0, see [`LICENSE`](LICENSE). The FSR 1 upscaler (`crates/video/src/fsr.rs`) is a port of AMD's MIT-licensed FidelityFX FSR 1.0; its notice is in that file.
