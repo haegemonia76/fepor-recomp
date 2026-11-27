@@ -443,6 +443,10 @@ pub struct Renderer {
     period: Duration,
     frame: u64,
     dump: Option<Dump>,
+    /// Screenshots and recording (hotkeys, overlay page), shared with the overlay.
+    capture: Option<Arc<fepor_core::capture::Capture>>,
+    /// The image a capture with the overlay draws on, so that the game's own picture stays untouched.
+    capture_tex: Option<wgpu::Texture>,
     cull: bool,
     /// `FEPOR_DUMP_TEXTURES=dir`: write every newly decoded texture as PNG.
     dump_textures: Option<PathBuf>,
@@ -499,13 +503,30 @@ pub struct Renderer {
 }
 
 fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
-    let file = std::fs::File::create(path).expect("create png");
+    write_png_file(path, w, h, color, data).expect("write png");
+}
+
+fn write_png_file(
+    path: &std::path::Path,
+    w: u32,
+    h: u32,
+    color: png::ColorType,
+    data: &[u8],
+) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     enc.set_color(color);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()
         .and_then(|mut w| w.write_image_data(data))
-        .expect("write png");
+        .map_err(|e| e.to_string())
+}
+
+/// Drop the alpha channel: the EFB's alpha is whatever the draws left there.
+fn to_rgb(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect()
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -692,6 +713,8 @@ impl Renderer {
             pending_clear: Some(([0.0; 4], 1.0)),
             frame: 0,
             dump,
+            capture: overlay.as_ref().map(|o| o.shared().capture.clone()),
+            capture_tex: None,
             presenter,
             overlay,
             settings,
@@ -1653,6 +1676,11 @@ impl Renderer {
     /// times larger in each direction.
     pub fn read_efb(&mut self, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
         self.flush();
+        self.read_texture(if self.read_alt { &self.alt } else { &self.efb }, x, y, w, h)
+    }
+
+    /// Read a rectangle (in GameCube pixels) of an image the size of the EFB, as RGBA.
+    fn read_texture(&self, texture: &wgpu::Texture, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
         let s = self.scale;
         let (w, h) = (
             w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
@@ -1668,7 +1696,7 @@ impl Renderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: if self.read_alt { &self.alt } else { &self.efb },
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: x * s,
@@ -1812,6 +1840,12 @@ impl Renderer {
         }
         self.draws = 0;
         self.show_frame(c);
+        self.dump_frame(c);
+        self.capture_frame(c);
+    }
+
+    /// `FEPOR_DUMP_FRAMES`: every `FEPOR_DUMP_EVERY`-th presented frame as PNG.
+    fn dump_frame(&mut self, c: &CopyEfb) {
         let Some(d) = &self.dump else { return };
         if self.frame % d.every != 0 {
             return;
@@ -1822,17 +1856,83 @@ impl Renderer {
             self.paint_overlay_on_efb();
         }
         let rgba = self.read_efb(c.x, c.y, w, h);
-        let rgb: Vec<u8> = rgba
-            .chunks_exact(4)
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect();
         write_png(
             &path,
             w * self.scale,
             h * self.scale,
             png::ColorType::Rgb,
-            &rgb,
+            &to_rgb(&rgba),
         );
+    }
+
+    /// Screenshots and video frames (ADR 0025): the presented frame at internal resolution, with the overlay
+    /// when the settings say so.
+    fn capture_frame(&mut self, c: &CopyEfb) {
+        let Some(cap) = self.capture.clone() else {
+            return;
+        };
+        cap.on_frame(self.frame);
+        let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+        let shot = cap.take_screenshot();
+        let recording = cap.sync_recording(w * self.scale, h * self.scale);
+        if shot.is_none() && !recording {
+            return;
+        }
+        let rgba = if self.settings.get().capture.overlay {
+            self.read_efb_with_overlay(c.x, c.y, w, h)
+        } else {
+            self.read_efb(c.x, c.y, w, h)
+        };
+        let rgb = to_rgb(&rgba);
+        let (pw, ph) = (w * self.scale, h * self.scale);
+        if let Some(path) = shot {
+            let result = write_png_file(&path, pw, ph, png::ColorType::Rgb, &rgb);
+            cap.screenshot_done(&path, result);
+        }
+        if recording {
+            cap.frame(rgb, pw, ph);
+        }
+    }
+
+    /// The EFB with the overlay drawn over it, read from a copy: the game's own EFB is left as it is.
+    fn read_efb_with_overlay(&mut self, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+        self.flush();
+        let s = self.scale;
+        let size = wgpu::Extent3d {
+            width: EFB_WIDTH * s,
+            height: EFB_HEIGHT * s,
+            depth_or_array_layers: 1,
+        };
+        if self.capture_tex.as_ref().is_none_or(|t| t.size() != size) {
+            self.capture_tex = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capture"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }));
+        }
+        let tex = self.capture_tex.as_ref().expect("capture image");
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_texture(self.efb.as_image_copy(), tex.as_image_copy(), size);
+        if let Some(o) = &mut self.overlay {
+            o.paint_capture(
+                &self.device,
+                &self.queue,
+                &mut enc,
+                &tex.create_view(&Default::default()),
+                wgpu::TextureFormat::Rgba8Unorm,
+                [size.width, size.height],
+                s as f32,
+            );
+        }
+        self.queue.submit([enc.finish()]);
+        self.read_texture(tex, x, y, w, h)
     }
 
     /// Show a finished frame: right away, or (with `mult > 1`) as the plan of interpolated images
@@ -1993,10 +2093,6 @@ impl Renderer {
             let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
             let rgba = self.read_efb(c.x, c.y, w, h);
             self.read_alt = false;
-            let rgb: Vec<u8> = rgba
-                .chunks_exact(4)
-                .flat_map(|p| [p[0], p[1], p[2]])
-                .collect();
             let name = format!("frame_{:05}_t{:02}.png", self.frame, (t * 100.0) as u32);
             let path = self.dump.as_ref().expect("dump").dir.join(name);
             write_png(
@@ -2004,7 +2100,7 @@ impl Renderer {
                 w * self.scale,
                 h * self.scale,
                 png::ColorType::Rgb,
-                &rgb,
+                &to_rgb(&rgba),
             );
         }
     }

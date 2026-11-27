@@ -41,6 +41,8 @@ pub struct Shared {
     guest_fps_x100: AtomicU32,
     /// Names of the playback devices, kept up to date by the audio thread.
     pub audio_devices: Arc<Mutex<Vec<String>>>,
+    /// Screenshots and video recording (F12, F10, the Capture page).
+    pub capture: Arc<fepor_core::capture::Capture>,
     stats: Mutex<StatsSnapshot>,
 }
 
@@ -83,12 +85,13 @@ impl Shared {
             tab_step: AtomicI32::new(0),
             settings,
             controls,
-            data_dir,
+            data_dir: data_dir.clone(),
             card_path: Mutex::new(None),
             display_millihz: AtomicU32::new(0),
             guest_fps_x100: AtomicU32::new(0),
             ui_ppp_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
+            capture: Arc::new(fepor_core::capture::Capture::new(data_dir.clone())),
             stats: Mutex::default(),
         })
     }
@@ -249,6 +252,16 @@ impl Shared {
                     if pressed && !repeat {
                         self.settings
                             .update(|s| s.video.stats = s.video.stats.next());
+                    }
+                    return true;
+                }
+                if *code == KeyCode::F12 || *code == KeyCode::F10 {
+                    if pressed && !repeat {
+                        if *code == KeyCode::F12 {
+                            self.capture.request_screenshot();
+                        } else {
+                            self.capture.toggle_recording();
+                        }
                     }
                     return true;
                 }

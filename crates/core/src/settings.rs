@@ -199,6 +199,14 @@ impl Language {
     }
 }
 
+/// Screenshots and video recordings (ADR 0025).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Capture {
+    /// Draw the overlay (menu, statistics, messages) into screenshots and videos.
+    pub overlay: bool,
+}
+
 /// Options of the game itself, applied when it starts.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -212,6 +220,7 @@ pub struct Settings {
     pub video: Video,
     pub audio: Audio,
     pub game: Game,
+    pub capture: Capture,
 }
 
 impl Settings {
