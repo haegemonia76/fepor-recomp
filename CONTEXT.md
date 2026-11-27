@@ -9,6 +9,10 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **DOL**: `main.dol`, the single executable of the game. No `.rel` modules exist, so all guest code is at fixed addresses.
 - **FST**: the disc file system table.
 - **Lifter**: Rust component turning Gekko instructions into C++ (`crates/ppc-lift`).
+- **Patch set**: `(address, bytes)` writes over guest RAM owned by one source (cheat, mod), enabled/reverted as a unit by `PatchEngine`, which also runs the once-per-frame hook (ADR 0025). Data only: recompiled code cannot be patched.
+- **Mod**: folder `<data>/mods/<id>/` with `mod.toml`, replacement `files/` and `[[patch]]` memory patches; priority order and enabled state in `mods/mods.toml`; applied at the next start. File replacement is `ModdedDisc`: replaced files appended after the image end, FST rewritten (ADR 0034). Never contains Nintendo content.
+- **Memory watcher**: developer page of the overlay to read, write, watch and search guest RAM and export an address as a cheat entry or Gecko line (ADR 0048). The overlay never touches RAM: requests and copies pass through `memwatch::Link`, served in the per-frame hook.
+- **Cheat**: a Gecko or Action Replay code of a Dolphin game INI, run as a continuous patch set with source `cheat:<name>` by `CheatRunner`; only plain data writes are supported (ADR 0032). Enabled ones are saved in `<data>/cheats.toml`.
 - **Generated code**: C++ emitted by the lifter, grouped into configurable compilation units. Always regenerated locally, never committed.
 - **Runtime**: hand-written C++ in `runtime/` (os, dvd, gx, ax, input, ui) that the generated code links against.
 - **Context**: the guest CPU state struct (`runtime/include/fepor/ppc.h`). Generated functions copy registers into locals with `in()` and back with `out()` (ADR 0009).
@@ -24,6 +28,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **Prepare**: the setup step (`fepor-recomp prepare`) that builds the game from the player's copy; **profile**: `packaging/recomplauncher.json`, the RecompLauncher integration file.
 - **Config**: shared TOML file read by CLI and GUI (disc path, output dir, function/jump-table overrides, runtime options).
 - **Trace**: opt-in (`FEPOR_TRACE`) log of guest calls, hardware register writes and GX commands, comparable with Dolphin.
+- **Message file**: `Mess/*.m` on the disc, the game's text (names, dialogue, menus) per chapter and language. `text-extract` / `text-build` convert it to an editable form and to a mod file (ADR 0040).
 - **Version table**: per-region address tables; only GFEP01 at first.
 
 ## Layout (planned)

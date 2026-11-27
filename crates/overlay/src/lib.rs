@@ -4,6 +4,8 @@
 //! [`Overlay`], runs the UI once per presented image and paints it with our own wgpu painter.
 
 pub mod glyphs;
+mod mods;
+mod memory;
 mod outlines;
 mod pad;
 mod paint;
@@ -16,7 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fepor_core::settings::StatsMode;
-pub use shared::Shared;
+pub use shared::{ReportHook, Shared};
 pub use stats::{StatsSnapshot, ThreadLoad};
 
 pub struct Overlay {
@@ -70,8 +72,10 @@ impl Overlay {
         ppp: f32,
     ) {
         let open = self.shared.is_open();
+        self.ui.memory_tick(&self.shared);
         let video = self.shared.settings.get().video;
         if !open && video.stats == StatsMode::Off {
+            self.shared.memory.set_active(self.ui.memory_live());
             return;
         }
         // 0 = auto: 1x at a 720-pixel-high window, growing with it, so the text stays readable on big screens
