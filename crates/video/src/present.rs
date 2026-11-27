@@ -3,110 +3,98 @@
 
 use std::sync::Arc;
 
-use fepor_core::settings::Aspect;
+use fepor_core::settings::{Aspect, Filters, Mask};
 use fepor_gx::state::CopyEfb;
 use wgpu::util::DeviceExt;
 
 use crate::{EFB_HEIGHT, EFB_WIDTH};
 
 const SHADER: &str = r#"
-struct U { rect: vec4<f32> };
+struct U { rect: vec4<f32>, a: vec4<f32>, b: vec4<f32>, c: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var t: texture_2d<f32>;
 @group(0) @binding(2) var s: sampler;
-struct VO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32> };
+struct VO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) f: vec2<f32> };
 @vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
     var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
     let xy = corners[i];
     var o: VO;
     o.p = vec4<f32>(xy, 0.0, 1.0);
-    o.uv = mix(u.rect.xy, u.rect.zw, vec2<f32>(xy.x * 0.5 + 0.5, 0.5 - xy.y * 0.5));
+    o.f = vec2<f32>(xy.x * 0.5 + 0.5, 0.5 - xy.y * 0.5);
+    o.uv = mix(u.rect.xy, u.rect.zw, o.f);
     return o;
 }
+// u.a = (scanlines, 1 / gamma, saturation, contrast), u.b = (brightness, mask kind, mask strength,
+// source lines), u.c.x = filters on. Off returns the sampled pixel untouched.
 @fragment fn fs(i: VO) -> @location(0) vec4<f32> {
-    return vec4<f32>(textureSample(t, s, i.uv).rgb, 1.0);
+    var c = textureSample(t, s, i.uv).rgb;
+    if (u.c.x == 0.0) {
+        return vec4<f32>(c, 1.0);
+    }
+    c = (c + u.b.x - 0.5) * u.a.w + 0.5;
+    c = mix(vec3<f32>(dot(c, vec3<f32>(0.299, 0.587, 0.114))), c, u.a.z);
+    c = pow(max(c, vec3<f32>(0.0)), vec3<f32>(u.a.y));
+    // dark gaps between the game's lines, centred on the line borders
+    c = c * (1.0 - u.a.x * (0.5 + 0.5 * cos(6.2831853 * i.f.y * u.b.w)));
+    if (u.b.y > 0.5) {
+        let px = vec2<u32>(i.p.xy);
+        var k = px.x % 3u;
+        var m = vec3<f32>(1.0 - u.b.z);
+        if (u.b.y > 1.5) {
+            k = (px.x + 2u * ((px.y / 2u) % 2u)) % 3u;
+            if (px.y % 2u == 1u) {
+                m = m * (1.0 - 0.5 * u.b.z);
+            }
+        }
+        m[k] = m[k] / (1.0 - u.b.z);
+        // keep the average brightness
+        c = c * m * (3.0 / (3.0 - 2.0 * u.b.z));
+    }
+    return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#;
 
-pub struct Presenter {
-    surface: wgpu::Surface<'static>,
-    window: Arc<winit::window::Window>,
-    config: wgpu::SurfaceConfiguration,
+/// The scaling pass with the render filters: draws a region of a texture over the viewport.
+pub struct Post {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
-    aspect: Aspect,
-    adapter: wgpu::Adapter,
-    /// Images presented so far (read by the statistics overlay).
-    pub shown: u64,
 }
 
-impl Presenter {
-    pub fn new(
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        surface: wgpu::Surface<'static>,
-        window: Arc<winit::window::Window>,
-        low_latency: bool,
-    ) -> Presenter {
-        let caps = surface.get_capabilities(adapter);
-        // the EFB holds gamma-space values: write them as they are
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| !f.is_srgb())
-            .unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: if low_latency {
-                // images are paced by the renderer: the present call must not wait for the display
-                [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
-                    .into_iter()
-                    .find(|m| caps.present_modes.contains(m))
-                    .unwrap_or(wgpu::PresentMode::Fifo)
-            } else {
-                wgpu::PresentMode::Fifo
-            },
-            desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
+impl Post {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Post {
+        let entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty,
+            count: None,
         };
-        surface.configure(device, &config);
-
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("present"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
+                entry(
+                    0,
+                    wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
+                ),
+                entry(
+                    1,
+                    wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+                ),
+                entry(
+                    2,
+                    wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
             ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -148,13 +136,133 @@ impl Presenter {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        Post {
+            layout,
+            pipeline,
+            sampler,
+        }
+    }
+
+    /// Draw the copied region `c` of `src` into the pass's current viewport, through `filters`.
+    pub fn draw(
+        &self,
+        device: &wgpu::Device,
+        pass: &mut wgpu::RenderPass<'_>,
+        src: &wgpu::TextureView,
+        c: &CopyEfb,
+        filters: &Filters,
+    ) {
+        let (w, h) = (c.width.clamp(1, EFB_WIDTH), c.height.clamp(1, EFB_HEIGHT));
+        let (x, y) = (c.x.min(EFB_WIDTH - 1), c.y.min(EFB_HEIGHT - 1));
+        let on = !filters.is_identity();
+        let mask = match filters.mask {
+            Mask::Off => 0.0,
+            Mask::Grille => 1.0,
+            Mask::Dots => 2.0,
+        };
+        let u: [f32; 16] = [
+            x as f32 / EFB_WIDTH as f32,
+            y as f32 / EFB_HEIGHT as f32,
+            (x + w).min(EFB_WIDTH) as f32 / EFB_WIDTH as f32,
+            (y + h).min(EFB_HEIGHT) as f32 / EFB_HEIGHT as f32,
+            filters.scanlines,
+            1.0 / filters.gamma,
+            filters.saturation,
+            filters.contrast,
+            filters.brightness,
+            mask,
+            filters.mask_strength.min(0.99),
+            h as f32,
+            on as u32 as f32,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&u),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+pub struct Presenter {
+    surface: wgpu::Surface<'static>,
+    window: Arc<winit::window::Window>,
+    config: wgpu::SurfaceConfiguration,
+    post: Post,
+    filters: Filters,
+    aspect: Aspect,
+    adapter: wgpu::Adapter,
+    /// Images presented so far (read by the statistics overlay).
+    pub shown: u64,
+}
+
+impl Presenter {
+    pub fn new(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        surface: wgpu::Surface<'static>,
+        window: Arc<winit::window::Window>,
+        low_latency: bool,
+        filters: Filters,
+    ) -> Presenter {
+        let caps = surface.get_capabilities(adapter);
+        // the EFB holds gamma-space values: write them as they are
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| !f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        let size = window.inner_size();
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: if low_latency {
+                // images are paced by the renderer: the present call must not wait for the display
+                [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+                    .into_iter()
+                    .find(|m| caps.present_modes.contains(m))
+                    .unwrap_or(wgpu::PresentMode::Fifo)
+            } else {
+                wgpu::PresentMode::Fifo
+            },
+            desired_maximum_frame_latency: 2,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+        surface.configure(device, &config);
+
         Presenter {
             surface,
             window,
             config,
-            layout,
-            pipeline,
-            sampler,
+            post: Post::new(device, format),
+            filters,
             aspect: Aspect::Fit,
             adapter: adapter.clone(),
             shown: 0,
@@ -188,36 +296,6 @@ impl Presenter {
             Err(_) => return,
         };
         let (w, h) = (c.width.clamp(1, EFB_WIDTH), c.height.clamp(1, EFB_HEIGHT));
-        let (x, y) = (c.x.min(EFB_WIDTH - 1), c.y.min(EFB_HEIGHT - 1));
-        let rect = [
-            x as f32 / EFB_WIDTH as f32,
-            y as f32 / EFB_HEIGHT as f32,
-            (x + w).min(EFB_WIDTH) as f32 / EFB_WIDTH as f32,
-            (y + h).min(EFB_HEIGHT) as f32 / EFB_HEIGHT as f32,
-        ];
-        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&rect),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ubuf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(efb),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
         // letterbox to the chosen aspect ratio (default: the frame's own)
         let (sw, sh) = (size.width as f32, size.height as f32);
         let aspect = match self.aspect {
@@ -250,10 +328,9 @@ impl Presenter {
                 occlusion_query_set: None,
             });
             pass.set_viewport((sw - vw) / 2.0, (sh - vh) / 2.0, vw, vh, 0.0, 1.0);
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.draw(0..3, 0..1);
+            self.post.draw(device, &mut pass, efb, c, &self.filters);
         }
+        // the overlay goes on after the filters: it is never filtered
         if let Some(o) = overlay {
             o.paint(
                 device,
@@ -269,6 +346,10 @@ impl Presenter {
         self.window.pre_present_notify();
         frame.present();
         self.shown += 1;
+    }
+
+    pub fn set_filters(&mut self, filters: Filters) {
+        self.filters = filters;
     }
 
     pub fn set_aspect(&mut self, aspect: Aspect) {
