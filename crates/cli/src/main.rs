@@ -70,8 +70,30 @@ pub enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Zip the log, settings, input bindings, version info and a screenshot for a bug report (no saves, no game data,
+    /// no home folder in paths) into `<data>/bug-reports`.
+    BugReport {
+        /// The zip to write instead of `<data>/bug-reports/fepor-bug-report-<time>.zip`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// List the disc's files with their disc offsets (for matching DVD reads in a trace).
     Ls,
+    /// Write the game's message files (`Mess/*.m`) of one language as editable text into `<dir>/Mess/*.m.txt`.
+    TextExtract {
+        dir: PathBuf,
+        #[arg(long, value_enum, default_value = "en")]
+        lang: commands::text::Lang,
+    },
+    /// Rebuild edited `<dir>/Mess/*.m.txt` into a mod: `<mod>/files/Mess/*.m` (files identical to the disc's are skipped unless `--all`).
+    TextBuild {
+        dir: PathBuf,
+        /// The mod folder to write `files/` into.
+        #[arg(long = "mod", value_name = "MOD")]
+        mod_dir: PathBuf,
+        #[arg(long)]
+        all: bool,
+    },
     /// Disassemble guest code from main.dol.
     Disasm {
         /// Guest address, e.g. 0x80003154.
@@ -110,6 +132,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Command::Generate(args) => commands::generate::run(&opts, &args, false),
         Command::Prepare(args) => commands::generate::run(&opts, &args, true),
         Command::Run => commands::run::run(&opts),
+        Command::BugReport { out } => commands::bug_report::run(&opts, out),
         Command::Ls => commands::inspect::ls(&opts),
         Command::CardInfo { image } => commands::inspect::card_info(&image),
         Command::CardImport { image, gci } => commands::inspect::card_import(&image, &gci),
@@ -117,6 +140,10 @@ fn run(cli: Cli) -> Result<(), Fail> {
             commands::inspect::card_export(&image, &out, name.as_deref())
         }
         Command::Disasm { addr, count } => commands::inspect::disasm(&opts, addr, count),
+        Command::TextExtract { dir, lang } => commands::text::extract(&opts, &dir, lang),
+        Command::TextBuild { dir, mod_dir, all } => {
+            commands::text::build(&opts, &dir, &mod_dir, all)
+        }
         Command::Opcodes => commands::inspect::opcodes(&opts),
         Command::Find {
             op,

@@ -1,7 +1,9 @@
 use std::cell::UnsafeCell;
 use std::time::Instant;
 
+use crate::cheats::CheatRunner;
 use crate::hw::Hw;
+use crate::patch::PatchEngine;
 use crate::trace::Trace;
 
 /// 24 MiB main RAM (MEM1).
@@ -12,6 +14,10 @@ const RAM_SLACK: usize = 64;
 pub struct Machine {
     pub ram: Box<[u8]>,
     pub hw: Hw,
+    /// Memory patches (cheats, mods); run once per frame from `intr::poll` (ADR 0025).
+    pub patches: PatchEngine,
+    /// Turns the cheat list of the overlay into patch sets (ADR 0026).
+    pub cheats: CheatRunner,
     pub trace: Trace,
     pub started: Instant,
     /// Function entries seen (interrupt polling cadence).
@@ -27,6 +33,8 @@ impl Machine {
         Machine {
             ram: vec![0u8; RAM_SIZE + RAM_SLACK].into_boxed_slice(),
             hw: Hw::new(),
+            patches: PatchEngine::new(),
+            cheats: CheatRunner::default(),
             trace: Trace::from_env(),
             started: Instant::now(),
             enter_count: 0,

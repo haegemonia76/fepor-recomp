@@ -105,6 +105,79 @@ enum State {
     Finished(Result<(), String>),
 }
 
+/// The mods of the output folder (ADR 0034), read again when the folder changes or on Refresh.
+#[derive(Default)]
+struct ModsPanel {
+    data: Option<String>,
+    list: fepor_core::mods::ModList,
+    error: String,
+}
+
+fn mods_section(ui: &mut egui::Ui, st: &mut ModsPanel, output: &str) {
+    if output.is_empty() {
+        return;
+    }
+    ui.add_space(8.0);
+    egui::CollapsingHeader::new("Mods").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(format!("Folder: {}", fepor_core::mods::mods_dir(Path::new(output)).display()));
+            if ui.button("Refresh").clicked() {
+                st.data = None;
+            }
+        });
+        if st.data.as_deref() != Some(output) {
+            st.list = fepor_core::mods::ModList::load(Path::new(output));
+            st.data = Some(output.to_string());
+        }
+        ui.label("Changes apply the next time the game starts. The first mod has the highest priority.");
+        let list = &mut st.list;
+        let (mut changed, mut shift) = (false, None);
+        let last = list.entries.len().saturating_sub(1);
+        if list.entries.is_empty() && list.broken.is_empty() {
+            ui.label("No mods found: put a folder with a mod.toml there.");
+        }
+        for (i, e) in list.entries.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let m = &e.m.manifest;
+                changed |= ui.checkbox(&mut e.enabled, format!("{} {}", m.name, m.version)).changed();
+                if ui.add_enabled(i > 0, egui::Button::new("Up")).clicked() {
+                    shift = Some((i, true));
+                }
+                if ui.add_enabled(i < last, egui::Button::new("Down")).clicked() {
+                    shift = Some((i, false));
+                }
+            });
+            let m = &e.m;
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}{}{} file(s), {} patch(es), game {}",
+                    m.manifest.description,
+                    if m.manifest.description.is_empty() { "" } else { " - " },
+                    m.files.len(),
+                    m.manifest.patches.len(),
+                    m.manifest.game_id
+                ))
+                .small(),
+            );
+        }
+        if let Some((i, up)) = shift {
+            changed |= list.shift(i, up);
+        }
+        for (folder, reason) in &list.broken {
+            ui.colored_label(egui::Color32::from_rgb(200, 70, 60), format!("{folder}: cannot be read: {reason}"));
+        }
+        for c in list.conflicts(Some(GAME_ID)) {
+            ui.colored_label(egui::Color32::from_rgb(200, 150, 40), c.to_string());
+        }
+        if changed {
+            st.error = list.save().err().map(|e| format!("cannot save the mod list: {e}")).unwrap_or_default();
+        }
+        if !st.error.is_empty() {
+            ui.colored_label(egui::Color32::from_rgb(200, 70, 60), &st.error);
+        }
+    });
+}
+
 struct App {
     /// `FEPOR_GUI_AUTOSTART=1`: start the recompilation as soon as the window opens (for scripted checks).
     autostart: bool,
@@ -118,6 +191,9 @@ struct App {
     rx: Option<Receiver<Msg>>,
     child: Option<Arc<Mutex<Child>>>,
     cancelled: bool,
+    /// Where the last bug report went, or why it failed.
+    report: Option<Result<String, String>>,
+    mods: ModsPanel,
 }
 
 impl App {
@@ -140,6 +216,8 @@ impl App {
             rx: None,
             child: None,
             cancelled: false,
+            report: None,
+            mods: ModsPanel::default(),
         }
     }
 
@@ -376,7 +454,29 @@ impl eframe::App for App {
                 {
                     self.start(ctx);
                 }
+                if ui
+                    .add_enabled(
+                        !running && !self.output.trim().is_empty(),
+                        egui::Button::new("Bug report"),
+                    )
+                    .on_hover_text("Zip the log, settings and system information (no saves, no game data) to attach to a report")
+                    .clicked()
+                {
+                    self.report = Some(
+                        fepor_core::bugreport::create_default(Path::new(self.output.trim()), Default::default())
+                            .map(|p| p.display().to_string()),
+                    );
+                }
             });
+            match &self.report {
+                Some(Ok(p)) => {
+                    ui.label(format!("Saved {p}"));
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(egui::Color32::from_rgb(200, 70, 60), e);
+                }
+                None => {}
+            }
 
             if running || self.progress > 0.0 {
                 ui.add_space(8.0);
@@ -400,6 +500,18 @@ impl eframe::App for App {
                 }
                 _ => {}
             }
+            let played = match self.output.trim() {
+                "" => 0,
+                out => fepor_core::playtime::Playtime::load(&fepor_core::playtime::path_in(
+                    std::path::Path::new(out),
+                ))
+                .total(),
+            };
+            if played > 0 {
+                ui.add_space(8.0);
+                ui.label(format!("Playtime: {}", fepor_core::playtime::format(played)));
+            }
+            mods_section(ui, &mut self.mods, self.output.trim());
             if !self.log.is_empty() {
                 ui.add_space(8.0);
                 egui::CollapsingHeader::new("Log")

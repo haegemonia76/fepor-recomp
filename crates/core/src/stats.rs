@@ -2,6 +2,8 @@
 
 use std::sync::atomic::AtomicU64;
 
+/// Video retraces the guest machine counted (for bug reports).
+pub static RETRACES: AtomicU64 = AtomicU64::new(0);
 /// Audio frames (5 ms each) produced by the AX mixer.
 pub static AX_FRAMES: AtomicU64 = AtomicU64::new(0);
 /// Audio buffers (5 ms each) handed to the audio output.
