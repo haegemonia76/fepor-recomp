@@ -95,6 +95,48 @@ fn import_saves(card: &std::path::Path, imports: &std::path::Path) {
     }
 }
 
+/// Seconds between backups of a card the game modified.
+const BACKUP_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn backup_card(card: &std::path::Path, dir: &std::path::Path, overlay: &fepor_overlay::Shared) {
+    let keep = overlay.settings.get().game.card_backups as usize;
+    match fepor_core::memcard::backup(card, dir, keep, unix_now()) {
+        Ok(Some(p)) => eprintln!("memory card backup: {}", p.display()),
+        Ok(None) => {}
+        Err(e) => eprintln!("memory card backup of {}: {e}", card.display()),
+    }
+}
+
+/// Apply the restore the overlay queued, back the card up before the run, and keep backing it up while the
+/// game modifies it (a copy is made only when the image differs from the newest one).
+fn protect_card(card: &std::path::Path, base: &std::path::Path, overlay: &Arc<fepor_overlay::Shared>) {
+    let dir = fepor_core::memcard::backups_dir(base);
+    if let Some(from) = fepor_core::memcard::take_restore(&dir) {
+        // the card being replaced is itself kept as a backup first, and read before rotation can drop `from`
+        let image = std::fs::read(&from);
+        backup_card(card, &dir, overlay);
+        match image.and_then(|_| fepor_core::memcard::restore(card, &from)) {
+            Ok(()) => eprintln!("memory card restored from {}", from.display()),
+            Err(e) => eprintln!("cannot restore {}: {e}", from.display()),
+        }
+    }
+    backup_card(card, &dir, overlay);
+    let (card, overlay) = (card.to_path_buf(), overlay.clone());
+    let timer = move || loop {
+        std::thread::sleep(BACKUP_EVERY);
+        backup_card(&card, &dir, &overlay);
+    };
+    if let Err(e) = std::thread::Builder::new().name("card-backup".into()).spawn(timer) {
+        eprintln!("memory card backups while playing are off: {e}");
+    }
+}
+
 /// Memory cards: raw Dolphin-format images, `<data>/memcards/MemoryCard{A,B}.<region>.raw`, or the files named
 /// by `FEPOR_MEMCARD_A` / `FEPOR_MEMCARD_B` (`none` leaves the slot empty). New cards are 16 Mbit (251 blocks)
 /// and unformatted; the game offers to format them.
@@ -102,7 +144,7 @@ fn insert_cards(
     m: &mut fepor_runtime::Machine,
     game_id: &str,
     data: Option<&std::path::Path>,
-    overlay: &fepor_overlay::Shared,
+    overlay: &Arc<fepor_overlay::Shared>,
 ) {
     let region = match game_id.as_bytes().get(3) {
         Some(b'E') => "USA",
@@ -122,6 +164,7 @@ fn insert_cards(
             (None, _) => continue,
         };
         if slot == 0 {
+            protect_card(&path, &base, overlay);
             import_saves(&path, &base.join("imports"));
             *overlay.card_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
         }
