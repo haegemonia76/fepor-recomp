@@ -11,6 +11,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **Lifter**: Rust component turning Gekko instructions into C++ (`crates/ppc-lift`).
 - **Patch set**: `(address, bytes)` writes over guest RAM owned by one source (cheat, mod), enabled/reverted as a unit by `PatchEngine`, which also runs the once-per-frame hook (ADR 0025). Data only: recompiled code cannot be patched.
 - **Memory watcher**: developer page of the overlay to read, write, watch and search guest RAM and export an address as a cheat entry or Gecko line (ADR 0048). The overlay never touches RAM: requests and copies pass through `memwatch::Link`, served in the per-frame hook.
+- **Cheat**: a Gecko or Action Replay code of a Dolphin game INI, run as a continuous patch set with source `cheat:<name>` by `CheatRunner`; only plain data writes are supported (ADR 0032). Enabled ones are saved in `<data>/cheats.toml`.
 - **Generated code**: C++ emitted by the lifter, grouped into configurable compilation units. Always regenerated locally, never committed.
 - **Runtime**: hand-written C++ in `runtime/` (os, dvd, gx, ax, input, ui) that the generated code links against.
 - **Context**: the guest CPU state struct (`runtime/include/fepor/ppc.h`). Generated functions copy registers into locals with `in()` and back with `out()` (ADR 0009).

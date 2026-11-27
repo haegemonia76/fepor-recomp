@@ -6,6 +6,7 @@ pub mod ai;
 pub mod ax;
 pub mod boot;
 pub mod card;
+pub mod cheats;
 pub mod context;
 pub mod di;
 pub mod dsp;
