@@ -1,4 +1,4 @@
-//! `text-extract` / `text-build`: the game's message files as editable text and back as a mod (ADR 0025).
+//! `text-extract` / `text-build`: the game's message files as editable text and back as a mod (ADR 0040).
 
 use std::fs;
 use std::path::{Path, PathBuf};

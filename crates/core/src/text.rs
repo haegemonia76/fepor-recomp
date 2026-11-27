@@ -1,4 +1,4 @@
-//! The game's message files (`Mess/*.m`) and their editable text form (ADR 0025).
+//! The game's message files (`Mess/*.m`) and their editable text form (ADR 0040).
 //!
 //! A `.m` file is big-endian: a 0x20-byte header (file size, size of the text area, 0, entry count, rest zero),
 //! the text area (NUL-terminated strings, each padded to 4 bytes), a table of `count` pairs (text offset
@@ -159,7 +159,7 @@ impl MessageFile {
         Ok(out)
     }
 
-    /// The editable form (see ADR 0025).
+    /// The editable form (see ADR 0040).
     pub fn to_edit(&self, file_name: &str) -> String {
         let mut s = format!("# fepor-recomp text v1: {file_name}\n");
         for m in &self.messages {

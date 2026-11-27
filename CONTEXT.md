@@ -23,7 +23,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **Prepare**: the setup step (`fepor-recomp prepare`) that builds the game from the player's copy; **profile**: `packaging/recomplauncher.json`, the RecompLauncher integration file.
 - **Config**: shared TOML file read by CLI and GUI (disc path, output dir, function/jump-table overrides, runtime options).
 - **Trace**: opt-in (`FEPOR_TRACE`) log of guest calls, hardware register writes and GX commands, comparable with Dolphin.
-- **Message file**: `Mess/*.m` on the disc, the game's text (names, dialogue, menus) per chapter and language. `text-extract` / `text-build` convert it to an editable form and to a mod file (ADR 0025).
+- **Message file**: `Mess/*.m` on the disc, the game's text (names, dialogue, menus) per chapter and language. `text-extract` / `text-build` convert it to an editable form and to a mod file (ADR 0040).
 - **Version table**: per-region address tables; only GFEP01 at first.
 
 ## Layout (planned)
