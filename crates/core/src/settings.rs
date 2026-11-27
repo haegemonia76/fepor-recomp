@@ -111,7 +111,7 @@ impl Mask {
     }
 }
 
-/// Post-processing of the presented image (ADR 0025). The defaults leave the picture untouched.
+/// Post-processing of the presented image (ADR 0039). The defaults leave the picture untouched.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Filters {

@@ -479,7 +479,7 @@ pub struct Renderer {
     alt: wgpu::Texture,
     /// `read_efb` reads the interpolation target instead (frame dumps).
     read_alt: bool,
-    /// The render filters (ADR 0025); the window's presenter has its own copy, this one filters dumps.
+    /// The render filters (ADR 0039); the window's presenter has its own copy, this one filters dumps.
     filters: fepor_core::settings::Filters,
     /// The filter pass for frame dumps, made when a dump first needs it.
     dump_post: Option<present::Post>,
