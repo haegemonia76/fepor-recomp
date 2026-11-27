@@ -127,6 +127,21 @@ pub fn show(
     if open {
         settings_panel(root, st, shared);
     }
+    if let Some(text) = shared.notice() {
+        egui::Area::new(egui::Id::unique("pad notice"))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 10.0))
+            .interactable(false)
+            .show(root.ctx(), |ui| {
+                egui::Frame::new()
+                    .fill(crate::theme::BAR.gamma_multiply(0.92))
+                    .stroke(egui::Stroke::new(1.0, crate::theme::GOLD))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(text).color(Color32::WHITE));
+                    });
+            });
+    }
 }
 
 const GOOD: Color32 = Color32::from_rgb(110, 220, 120);
@@ -459,6 +474,71 @@ fn language(ui: &mut egui::Ui, shared: &Shared) {
     ui.add(egui::Label::new("This disc has one set of voices and movie soundtracks: no other audio language to choose.").wrap());
 }
 
+/// The gamepads plugged in: which player port each one drives, and which one the sections below edit.
+fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Controls) {
+    ui.label(crate::theme::caption("Gamepads"));
+    let pads = c.pads().to_vec();
+    if pads.is_empty() {
+        ui.label(
+            RichText::new(
+                "No gamepad plugged in. Plug one in at any time: it gets the profile of its model \
+                 and the lowest free player port. The keyboard plays player 1.",
+            )
+            .small()
+            .color(crate::theme::DIM),
+        );
+        ui.add_space(8.0);
+        return;
+    }
+    let edited = c.edited_pad().map(|p| p.info.id);
+    egui::Grid::new("pads")
+        .striped(true)
+        .num_columns(3)
+        .show(ui, |ui| {
+            for pad in &pads {
+                let id = pad.info.id;
+                if ui.radio(edited == Some(id), &pad.info.name).clicked() {
+                    c.select_pad(id);
+                    st.pad_selected = None;
+                }
+                egui::ComboBox::from_id_salt(("pad port", id))
+                    .width(110.0)
+                    .selected_text(
+                        pad.port
+                            .map_or("No port".to_string(), |p| format!("Player {}", p + 1)),
+                    )
+                    .show_ui(ui, |ui| {
+                        for p in 0..fepor_input::PORTS {
+                            if ui
+                                .selectable_label(pad.port == Some(p), format!("Player {}", p + 1))
+                                .clicked()
+                            {
+                                c.set_port(id, p);
+                            }
+                        }
+                    });
+                ui.label(
+                    RichText::new(format!(
+                        "profile {}",
+                        &pad.info.guid[..pad.info.guid.len().min(8)]
+                    ))
+                    .small()
+                    .color(crate::theme::DIM),
+                );
+                ui.end_row();
+            }
+        });
+    ui.label(
+        RichText::new(
+            "Every controller model has its own profile (buttons and button names below), picked \
+             automatically when it is plugged in. The keyboard plays player 1.",
+        )
+        .small()
+        .color(crate::theme::DIM),
+    );
+    ui.add_space(8.0);
+}
+
 fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     let Ok(mut c) = shared.controls.lock() else {
         return;
@@ -483,6 +563,9 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         ui.separator();
     }
     let cfg = c.config().clone();
+    let glyphs = c.glyphs();
+    let gamepad = c.gamepad_bindings().clone();
+    pads_section(ui, st, &mut c);
     ui.horizontal_wrapped(|ui| {
         ui.label(crate::theme::caption("Controller"));
         for (g, name) in [
@@ -491,7 +574,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             (GlyphSet::Nintendo, "Nintendo"),
             (GlyphSet::PlayStation, "PlayStation"),
         ] {
-            if ui.radio(cfg.glyphs == g, name).clicked() {
+            if ui.radio(glyphs == g, name).clicked() {
                 c.set_glyphs(g);
                 st.pad_selected = None;
             }
@@ -505,9 +588,9 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         Some(source) => {
             ui.label(crate::theme::caption(format!(
                 "{} does:",
-                cfg.glyphs.source_label(source)
+                glyphs.source_label(source)
             )));
-            let current = cfg.bindings.gamepad.get(source).copied();
+            let current = gamepad.get(source).copied();
             ui.horizontal_wrapped(|ui| {
                 for a in Action::ALL {
                     if ui.selectable_label(current == Some(a), a.label()).clicked() {
@@ -523,7 +606,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         }
         None => {
             ui.label(
-                RichText::new(if cfg.glyphs == GlyphSet::GameCube {
+                RichText::new(if glyphs == GlyphSet::GameCube {
                     "Click a GameCube button, then press the input of your gamepad that should do it."
                 } else {
                     "Click a button on the controller, then choose the GameCube button it stands for."
@@ -551,7 +634,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         .show(ui, |ui| {
             for a in Action::ALL {
                 ui.label(a.label());
-                let names: Vec<&str> = cfg.sources_of(true, a);
+                let names: Vec<&str> = cfg.sources_of(true, None, a);
                 ui.label(if names.is_empty() {
                     "-".to_string()
                 } else {

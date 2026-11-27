@@ -17,3 +17,4 @@ Status: accepted (amends ADR 0007)
 - Gamepads are read by SDL3 on a thread of their own (background events allowed). The state is published to the SI through an atomic (`si::set_pad`), as before.
 - Remapping: first through the F2/F3/F4 hotkeys, now (ADR 0020) in the settings overlay (F1 / Guide): per-action rebinding of the keyboard and the gamepad (Esc keeps the current keyboard binding, or abandons a gamepad capture), button-name family and dead zone. Everything is saved to `input.toml`.
 - Glyph families name the buttons in the overlay; the icons the game draws on the map are replaced at run time (ADR 0021).
+- Gamepad hot-plug, one profile per controller model in `input.toml` and four players: see ADR 0025.

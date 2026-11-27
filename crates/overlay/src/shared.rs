@@ -24,6 +24,8 @@ struct Queue {
     pointer: Option<egui::Pos2>,
     /// Gamepad inputs currently held as navigation keys, with the time of their next repeat.
     held: HashMap<&'static str, (egui::Key, Instant)>,
+    /// The keyboard's modifier keys (Shift+Tab walks the widgets backwards, Shift-click and so on).
+    mods: egui::Modifiers,
 }
 
 pub struct Shared {
@@ -185,11 +187,12 @@ impl Shared {
 
     /// The button-name family and the gamepad input `action` is bound to (the first by name).
     fn bound(&self, action: Action) -> Option<(fepor_input::GlyphSet, String)> {
-        let c = self.controls.lock().ok()?;
-        let cfg = c.config();
-        let mut sources = cfg.sources_of(false, action);
-        sources.sort_unstable();
-        Some((cfg.glyphs, sources.first()?.to_string()))
+        self.controls.lock().ok()?.icon_source(action)
+    }
+
+    /// The latest gamepad hot-plug notice, while it is fresh.
+    pub fn notice(&self) -> Option<String> {
+        self.controls.lock().ok()?.notice().map(String::from)
     }
 
     pub fn toggle(&self) {
@@ -212,12 +215,14 @@ impl Shared {
     }
 
     fn key(&self, key: egui::Key, pressed: bool, repeat: bool) {
-        self.push(egui::Event::Key {
+        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let modifiers = q.mods;
+        q.events.push(egui::Event::Key {
             key,
             physical_key: Some(key),
             pressed,
             repeat,
-            modifiers: Default::default(),
+            modifiers,
         });
     }
 
@@ -306,15 +311,24 @@ impl Shared {
                     MouseButton::Left => egui::PointerButton::Primary,
                     MouseButton::Right => egui::PointerButton::Secondary,
                     MouseButton::Middle => egui::PointerButton::Middle,
+                    // the side buttons of a mouse page through the tabs
+                    MouseButton::Back | MouseButton::Forward => {
+                        if *state == ElementState::Pressed {
+                            let step = if *button == MouseButton::Back { -1 } else { 1 };
+                            self.tab_step.fetch_add(step, Ordering::AcqRel);
+                        }
+                        return true;
+                    }
                     _ => return true,
                 };
                 let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let modifiers = q.mods;
                 if let Some(pos) = q.pointer {
                     q.events.push(egui::Event::PointerButton {
                         pos,
                         button: b,
                         pressed: *state == ElementState::Pressed,
-                        modifiers: Default::default(),
+                        modifiers,
                     });
                 }
                 true
@@ -337,6 +351,17 @@ impl Shared {
                     modifiers: Default::default(),
                 });
                 true
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                let m = m.state();
+                self.queue.lock().unwrap_or_else(|e| e.into_inner()).mods = egui::Modifiers {
+                    alt: m.alt_key(),
+                    ctrl: m.control_key(),
+                    shift: m.shift_key(),
+                    mac_cmd: false,
+                    command: m.control_key(),
+                };
+                false
             }
             _ => false,
         }
@@ -472,6 +497,23 @@ mod tests {
         );
         assert!(!s.gamepad_input("guide", 1.0));
         assert!(s.is_open());
+    }
+
+    #[test]
+    fn keyboard_events_carry_the_modifier_keys() {
+        let (s, _dir) = shared();
+        s.set_open(true);
+        s.queue.lock().unwrap().mods.shift = true;
+        s.key(egui::Key::Tab, true, false);
+        let events = s.take_events();
+        assert!(matches!(
+            events[..],
+            [egui::Event::Key {
+                key: egui::Key::Tab,
+                modifiers: egui::Modifiers { shift: true, .. },
+                ..
+            }]
+        ));
     }
 
     #[test]

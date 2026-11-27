@@ -262,12 +262,22 @@ impl ApplicationHandler<()> for App {
                     self.overlay.clone(),
                     self.proxy.clone(),
                 );
-                fepor_input::gamepad::spawn(move |source, value| {
-                    if overlay.gamepad_input(source, value) {
-                        return;
+                fepor_input::gamepad::spawn(move |event| {
+                    use fepor_input::gamepad::Event;
+                    match event {
+                        Event::Input { source, value, .. }
+                            if overlay.gamepad_input(source, value) =>
+                        {
+                            return;
+                        }
+                        _ => {}
                     }
                     if let Ok(mut c) = controls.lock() {
-                        c.input(false, source, value);
+                        match event {
+                            Event::Added(info) => c.device_added(info),
+                            Event::Removed(id) => c.device_removed(id),
+                            Event::Input { id, source, value } => c.pad_input(id, source, value),
+                        }
                         if c.message.is_some() {
                             let _ = proxy.send_event(());
                         }
@@ -309,7 +319,7 @@ impl ApplicationHandler<()> for App {
             } => {
                 let pressed = state == ElementState::Pressed;
                 if let Ok(mut c) = self.controls.lock() {
-                    c.input(true, &format!("{code:?}"), if pressed { 1.0 } else { 0.0 });
+                    c.keyboard_input(&format!("{code:?}"), if pressed { 1.0 } else { 0.0 });
                 }
                 self.refresh_title();
             }
@@ -322,6 +332,19 @@ fn main() {
     // FEPOR_HEADLESS=1 renders without a window (frame dumps); FEPOR_NO_VIDEO=1 does not render at all.
     let data = data_dir();
     let controls = Arc::new(Mutex::new(Controls::new(data.join("input.toml"))));
+    // FEPOR_FAKE_PADS=<name>[,<name>...] plugs in gamepads that do not exist (headless runs, screenshots of
+    // the controls page, ports and profiles without hardware)
+    if let Ok(names) = std::env::var("FEPOR_FAKE_PADS") {
+        if let Ok(mut c) = controls.lock() {
+            for (i, name) in names.split(',').filter(|n| !n.is_empty()).enumerate() {
+                c.device_added(fepor_input::DeviceInfo {
+                    id: 1000 + i as u32,
+                    guid: format!("fake-{}", name.to_lowercase().replace(' ', "-")),
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
     let overlay = fepor_overlay::Shared::new(SettingsHandle::load(&data), controls.clone(), data);
     if std::env::var_os("FEPOR_HEADLESS").is_some() || std::env::var_os("FEPOR_NO_VIDEO").is_some()
     {
