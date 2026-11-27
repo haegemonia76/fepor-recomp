@@ -1,4 +1,4 @@
-# 0025 Controllers: hot-plug, profiles per model, players 1 to 4
+# 0038 Controllers: hot-plug, profiles per model, players 1 to 4
 
 Status: accepted (amends ADR 0016 and ADR 0020, implements ticket #38)
 
