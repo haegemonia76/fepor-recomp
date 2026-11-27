@@ -1,4 +1,4 @@
-//! Screenshots and video recording (ADR 0025).
+//! Screenshots and video recording (ADR 0044).
 //!
 //! [`Capture`] is the meeting point of four threads: the window thread and the overlay ask (hotkeys, buttons),
 //! the render thread hands over the picture, the guest thread hands over the audio, and a writer thread feeds

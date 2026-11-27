@@ -1,4 +1,4 @@
-# 0025 Screenshots and video recording
+# 0044 Screenshots and video recording
 
 Status: accepted (implements ticket #44)
 

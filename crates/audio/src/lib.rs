@@ -181,7 +181,7 @@ fn sdl_thread(
     drop(sdl);
 }
 
-/// Feeds the video recorder (ADR 0025); does nothing while no recording runs.
+/// Feeds the video recorder (ADR 0044); does nothing while no recording runs.
 struct CaptureSink(Arc<fepor_core::capture::Capture>);
 
 impl AudioSink for CaptureSink {

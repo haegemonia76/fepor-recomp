@@ -199,7 +199,7 @@ impl Language {
     }
 }
 
-/// Screenshots and video recordings (ADR 0025).
+/// Screenshots and video recordings (ADR 0044).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Capture {

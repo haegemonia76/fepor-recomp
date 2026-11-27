@@ -1865,7 +1865,7 @@ impl Renderer {
         );
     }
 
-    /// Screenshots and video frames (ADR 0025): the presented frame at internal resolution, with the overlay
+    /// Screenshots and video frames (ADR 0044): the presented frame at internal resolution, with the overlay
     /// when the settings say so.
     fn capture_frame(&mut self, c: &CopyEfb) {
         let Some(cap) = self.capture.clone() else {
