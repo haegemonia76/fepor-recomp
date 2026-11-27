@@ -176,6 +176,13 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     #[cfg(feature = "jit")]
     install_jit(disc.game_id(), &dol);
 
+    // FEPOR_SPEED=0.25|0.5|2|4|max starts at that speed (headless measurements; the hotkeys return to 1)
+    if let Some(s) = std::env::var("FEPOR_SPEED")
+        .ok()
+        .and_then(|v| fepor_core::speed::Speed::parse(&v))
+    {
+        fepor_core::speed::set(s);
+    }
     let m = machine();
     if std::env::var_os("FEPOR_NO_VIDEO").is_none() {
         let ui = fepor_overlay::Overlay::new(overlay.clone());

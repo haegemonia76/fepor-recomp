@@ -62,7 +62,8 @@ pub struct Dsp {
     /// Audio DMA: playing, buffer length in bytes and when the current buffer finishes.
     ai_dma_on: bool,
     ai_dma_len: u32,
-    ai_next: Option<std::time::Instant>,
+    /// Guest nanoseconds (`clock`) at which the current AI DMA buffer ends.
+    ai_next: Option<u64>,
     /// The guest wrote the AI DMA start address since the last period: a buffer is ready to play.
     ai_start_written: bool,
     /// `FEPOR_TRACE=audio`: (since, ucode samples, ucode peak, AI buffers, AI peak) of the last second.
@@ -98,10 +99,8 @@ impl Dsp {
             return;
         }
         // 16-bit stereo: 4 bytes per sample
-        let period = std::time::Duration::from_micros(
-            self.ai_dma_len as u64 * 1_000_000 / (4 * rate as u64),
-        );
-        let now = std::time::Instant::now();
+        let period = self.ai_dma_len as u64 * 1_000_000_000 / (4 * rate as u64);
+        let now = crate::clock::now_ns();
         let mut next = *self.ai_next.get_or_insert(now + period);
         while now >= next {
             next += period;

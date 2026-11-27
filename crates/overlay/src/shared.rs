@@ -42,6 +42,7 @@ pub struct Shared {
     /// Names of the playback devices, kept up to date by the audio thread.
     pub audio_devices: Arc<Mutex<Vec<String>>>,
     stats: Mutex<StatsSnapshot>,
+    speed_keys: crate::speed::SpeedKeys,
 }
 
 fn key_of(code: KeyCode) -> Option<egui::Key> {
@@ -90,6 +91,7 @@ impl Shared {
             ui_ppp_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
             stats: Mutex::default(),
+            speed_keys: Default::default(),
         })
     }
 
@@ -108,6 +110,7 @@ impl Shared {
             q.held.clear();
         }
         self.tab_step.store(0, Ordering::Release);
+        self.speed_keys.release(&self.settings);
         if let Ok(mut c) = self.controls.lock() {
             if !open {
                 c.cancel_remap();
@@ -252,6 +255,15 @@ impl Shared {
                     }
                     return true;
                 }
+                // Tab (fast-forward) and ` (slow motion) are held; a release always counts, a press only
+                // while the menu is closed
+                if matches!(code, KeyCode::Tab | KeyCode::Backquote) && (!pressed || !open) {
+                    if !*repeat {
+                        self.speed_keys
+                            .hold(&self.settings, *code == KeyCode::Tab, pressed);
+                    }
+                    return !open;
+                }
                 // a key being captured as a binding goes to the controls, not to the menu; Escape also
                 // abandons a gamepad capture (the keyboard cannot be captured then)
                 if let Some((keyboard, _)) =
@@ -287,6 +299,10 @@ impl Shared {
                     }
                 }
                 true
+            }
+            WindowEvent::Focused(false) => {
+                self.speed_keys.release(&self.settings);
+                false
             }
             WindowEvent::CursorMoved { position, .. } if open => {
                 let p = egui::pos2((position.x / scale) as f32, (position.y / scale) as f32);
@@ -353,6 +369,13 @@ impl Shared {
             if pressed {
                 self.toggle();
             }
+            return true;
+        }
+        // right stick pressed: fast-forward, left stick pressed: slow motion (held; GameCube pads have no
+        // stick buttons, so the default bindings leave them free)
+        if matches!(source, "rightstick" | "leftstick") && (!pressed || !self.is_open()) {
+            self.speed_keys
+                .hold(&self.settings, source == "rightstick", pressed);
             return true;
         }
         if !self.is_open() {

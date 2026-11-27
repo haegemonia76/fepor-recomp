@@ -15,6 +15,7 @@ use crate::shared::Shared;
 pub enum Page {
     Video,
     Audio,
+    Speed,
     Language,
     Controls,
     Card,
@@ -23,9 +24,10 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [
+    pub const ALL: [Page; 8] = [
         Page::Video,
         Page::Audio,
+        Page::Speed,
         Page::Language,
         Page::Controls,
         Page::Card,
@@ -37,6 +39,7 @@ impl Page {
         match self {
             Page::Video => "Video",
             Page::Audio => "Audio",
+            Page::Speed => "Speed",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
             Page::Language => "Language",
@@ -133,6 +136,15 @@ const GOOD: Color32 = Color32::from_rgb(110, 220, 120);
 const WARN: Color32 = Color32::from_rgb(240, 200, 70);
 const BAD: Color32 = Color32::from_rgb(240, 90, 80);
 
+/// "x4", "x0.5", "uncapped".
+fn speed_text(factor: f32) -> String {
+    if fepor_core::speed::is_uncapped() {
+        format!("uncapped (x{factor:.1})")
+    } else {
+        format!("x{factor}")
+    }
+}
+
 fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
     use egui::RichText as T;
     let line = |ui: &mut egui::Ui, color: Color32, text: String| {
@@ -155,7 +167,16 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                     } else {
                         s.guest_fps
                     };
-                    line(ui, Color32::WHITE, format!("{fps:.0} fps"));
+                    let speed = fepor_core::speed::factor();
+                    if speed == 1.0 {
+                        line(ui, Color32::WHITE, format!("{fps:.0} fps"));
+                    } else {
+                        line(
+                            ui,
+                            Color32::WHITE,
+                            format!("{fps:.0} fps  {}", speed_text(speed)),
+                        );
+                    }
                     return;
                 }
                 line(
@@ -166,6 +187,10 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                         s.guest_fps, s.shown_fps, s.display_hz
                     ),
                 );
+                let speed = fepor_core::speed::factor();
+                if speed != 1.0 {
+                    line(ui, GOOD, format!("Speed {}", speed_text(speed)));
+                }
                 if let Some((avg, p99, worst)) = s.frame_summary() {
                     let color = if worst > avg * 2.0 { WARN } else { GOOD };
                     line(
@@ -316,6 +341,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| match st.page {
             Page::Video => video(ui, shared),
             Page::Audio => audio(ui, shared),
+            Page::Speed => speed(ui, shared),
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
@@ -428,6 +454,71 @@ fn audio(ui: &mut egui::Ui, shared: &Shared) {
     if device != before.audio.device {
         shared.settings.update(|x| x.audio.device = device);
     }
+}
+
+/// Fast-forward and slow motion (ADR 0025): the speeds of the two held keys and the sound while they are used.
+fn speed(ui: &mut egui::Ui, shared: &Shared) {
+    use fepor_core::settings::SpeedAudio;
+    use fepor_core::speed::Speed;
+    let before = shared.settings.get();
+    let (mut fast, mut slow, mut sound) = (
+        before.game.fast_forward,
+        before.game.slow_motion,
+        before.audio.speed,
+    );
+    ui.label(crate::theme::caption(
+        "Fast-forward (hold Tab, or press the right stick)",
+    ));
+    egui::ComboBox::from_id_salt("fast_forward")
+        .width(240.0)
+        .selected_text(fast.label())
+        .show_ui(ui, |ui| {
+            for s in Speed::FAST {
+                ui.selectable_value(&mut fast, s, s.label());
+            }
+        });
+    ui.add_space(8.0);
+    ui.label(crate::theme::caption(
+        "Slow motion (hold `, or press the left stick)",
+    ));
+    egui::ComboBox::from_id_salt("slow_motion")
+        .width(240.0)
+        .selected_text(slow.label())
+        .show_ui(ui, |ui| {
+            for s in Speed::SLOW {
+                ui.selectable_value(&mut slow, s, s.label());
+            }
+        });
+    ui.add_space(8.0);
+    ui.label(crate::theme::caption("Sound at other speeds"));
+    egui::ComboBox::from_id_salt("speed_audio")
+        .width(240.0)
+        .selected_text(sound.label())
+        .show_ui(ui, |ui| {
+            for s in SpeedAudio::ALL {
+                ui.selectable_value(&mut sound, s, s.label());
+            }
+        });
+    if (fast, slow, sound)
+        != (
+            before.game.fast_forward,
+            before.game.slow_motion,
+            before.audio.speed,
+        )
+    {
+        shared.settings.update(|x| {
+            x.game.fast_forward = fast;
+            x.game.slow_motion = slow;
+            x.audio.speed = sound;
+        });
+    }
+    ui.add_space(6.0);
+    ui.add(
+        egui::Label::new(
+            "The whole game runs at the chosen speed. Uncapped runs as fast as this computer keeps up with and is always silent.",
+        )
+        .wrap(),
+    );
 }
 
 /// The language of the game's text. The game reads it once, when it starts.
@@ -802,6 +893,9 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         "Navigation: arrows and Enter, D-pad / left stick and A, or the mouse. B or Esc closes.",
     );
     ui.label("PgUp / PgDn or LB / RB: previous / next page.");
+    ui.label(
+        "Hold Tab (right stick pressed): fast-forward. Hold ` (left stick pressed): slow motion.",
+    );
     ui.add_space(6.0);
     ui.label(format!("Data folder: {}", shared.data_dir.display()));
     ui.label(format!(

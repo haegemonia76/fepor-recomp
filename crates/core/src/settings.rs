@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::speed::{Speed, SpeedAudio};
+
 /// How the 4:3 frame is fitted into the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -126,6 +128,8 @@ pub struct Audio {
     pub volume: f32,
     /// Name of the playback device; `None` follows the system default.
     pub device: Option<String>,
+    /// The sound while fast-forwarding or in slow motion.
+    pub speed: SpeedAudio,
 }
 
 impl Default for Audio {
@@ -133,6 +137,7 @@ impl Default for Audio {
         Audio {
             volume: 1.0,
             device: None,
+            speed: SpeedAudio::Pitch,
         }
     }
 }
@@ -200,10 +205,24 @@ impl Language {
 }
 
 /// Options of the game itself, applied when it starts.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Game {
     pub language: Language,
+    /// The speed while the fast-forward key is held (ADR 0025).
+    pub fast_forward: Speed,
+    /// The speed while the slow-motion key is held.
+    pub slow_motion: Speed,
+}
+
+impl Default for Game {
+    fn default() -> Self {
+        Game {
+            language: Language::default(),
+            fast_forward: Speed::X4,
+            slow_motion: Speed::Half,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -221,6 +240,12 @@ impl Settings {
         self.video.resolution = self.video.resolution.clamp(1, 4);
         self.video.overlay_scale = self.video.overlay_scale.clamp(0.0, 4.0);
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
+        if !Speed::FAST.contains(&self.game.fast_forward) {
+            self.game.fast_forward = Game::default().fast_forward;
+        }
+        if !Speed::SLOW.contains(&self.game.slow_motion) {
+            self.game.slow_motion = Game::default().slow_motion;
+        }
     }
 
     /// Load `path`; the defaults when it does not exist or cannot be read.

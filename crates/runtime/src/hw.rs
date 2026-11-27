@@ -3,7 +3,7 @@
 //! Registers start as plain storage (what the SDK writes it can read back) and get dedicated
 //! behaviour as boot needs it (EXI so far). Every access can be traced with `FEPOR_TRACE=hw`.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::ai::Ai;
 use crate::di::Di;
@@ -51,14 +51,22 @@ pub struct Hw {
     ai: Ai,
     pub si: Si,
     vi_di: [u32; 4],
-    vi_next: Instant,
-    vi_period: Duration,
+    /// Guest nanoseconds (`clock`) of the next retrace, and the time between retraces.
+    vi_next: u64,
+    vi_period: u64,
     /// Retraces so far (`FEPOR_TRACE=vi` prints them).
     pub retraces: u64,
     /// Locked cache, mapped at 0xE0000000 (16 KiB).
     locked: Vec<u8>,
     pub trace: bool,
     trace_vi: bool,
+    /// Retraces that came due more than a period ago since `vi_steer_at` (real time).
+    vi_late: u32,
+    vi_steer_at: Instant,
+    /// Retraces and game frames at `vi_steer_at`.
+    vi_steer_mark: (u64, u64),
+    /// (when, retraces, game frames) at the last `FEPOR_TRACE=vi` line.
+    trace_vi_last: (Instant, u64, u64),
     /// `FEPOR_HW_LIMIT=n`: stop with a crash report after n register accesses (finds polling loops).
     limit: Option<u64>,
     accesses: u64,
@@ -102,14 +110,18 @@ impl Hw {
             ai: Ai::new(),
             si: Si::new(),
             vi_di: [0; 4],
-            vi_next: Instant::now(),
-            vi_period: Duration::from_micros(16_683),
+            vi_next: crate::clock::now_ns(),
+            vi_period: 16_683_000,
             retraces: 0,
             locked: vec![0; LOCKED_SIZE],
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "hw" || x == "all")),
             trace_vi: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "vi" || x == "all")),
+            vi_late: 0,
+            vi_steer_at: Instant::now(),
+            vi_steer_mark: (0, 0),
+            trace_vi_last: (Instant::now(), 0, 0),
             limit: std::env::var("FEPOR_HW_LIMIT")
                 .ok()
                 .and_then(|v| v.parse().ok()),
@@ -128,12 +140,17 @@ impl Hw {
 
     /// 50 Hz for PAL, 59.94 Hz otherwise.
     pub fn set_video_mode(&mut self, pal: bool) {
-        self.vi_period = Duration::from_micros(if pal { 20_000 } else { 16_683 });
+        self.vi_period = if pal { 20_000_000 } else { 16_683_000 };
     }
 
     /// Advance the video timing: raises the retrace interrupt flags.
     fn vi_tick(&mut self) {
-        let now = Instant::now();
+        let now = crate::clock::now_ns();
+        // more than one retrace due at once: the guest did not get to run in between (uncapped speed steers by this)
+        if now >= self.vi_next + self.vi_period {
+            self.vi_late += 1;
+        }
+        self.vi_steer();
         while now >= self.vi_next {
             self.vi_next += self.vi_period;
             self.retraces += 1;
@@ -143,14 +160,48 @@ impl Hw {
                     *di |= VI_INT_STATUS;
                 }
             }
-            if self.trace_vi && self.retraces % 60 == 0 {
-                eprintln!(
-                    "vi: {} retraces, {} thread switches",
-                    self.retraces,
-                    crate::sched::switches()
-                );
+            if self.trace_vi {
+                self.trace_vi_line();
             }
         }
+    }
+
+    /// Every quarter second of real time tell the uncapped speed whether the guest kept up: it fell behind
+    /// when retraces came due while it was busy, or when the game drew fewer than 0.4 frames per retrace
+    /// (a game that draws nothing, a loading screen, does not count).
+    fn vi_steer(&mut self) {
+        if self.vi_steer_at.elapsed() < std::time::Duration::from_millis(250) {
+            return;
+        }
+        let frames = fepor_core::stats::GAME_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+        let (dr, df) = (
+            self.retraces - self.vi_steer_mark.0,
+            frames - self.vi_steer_mark.1,
+        );
+        fepor_core::speed::adapt(self.vi_late > 2 || (df > 0 && df * 5 < dr * 2));
+        self.vi_late = 0;
+        self.vi_steer_at = Instant::now();
+        self.vi_steer_mark = (self.retraces, frames);
+    }
+
+    /// `FEPOR_TRACE=vi`: once per real second, the retraces and game frames of that second (the game's speed
+    /// as the machine sees it) and the speed factor.
+    fn trace_vi_line(&mut self) {
+        let (at, retraces, frames) = self.trace_vi_last;
+        let secs = at.elapsed().as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let game_frames = fepor_core::stats::GAME_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "vi: {:.1} retraces/s, {:.1} game frames/s (speed x{}); {} retraces, {} thread switches",
+            (self.retraces - retraces) as f64 / secs,
+            (game_frames - frames) as f64 / secs,
+            fepor_core::speed::factor(),
+            self.retraces,
+            crate::sched::switches()
+        );
+        self.trace_vi_last = (Instant::now(), self.retraces, game_frames);
     }
 
     /// Interrupt cause bits as the PI reports them.

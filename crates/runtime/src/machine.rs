@@ -1,8 +1,6 @@
-use std::cell::UnsafeCell;
-use std::time::Instant;
-
 use crate::hw::Hw;
 use crate::trace::Trace;
+use std::cell::UnsafeCell;
 
 /// 24 MiB main RAM (MEM1).
 pub const RAM_SIZE: usize = 0x0180_0000;
@@ -13,7 +11,6 @@ pub struct Machine {
     pub ram: Box<[u8]>,
     pub hw: Hw,
     pub trace: Trace,
-    pub started: Instant,
     /// Function entries seen (interrupt polling cadence).
     pub enter_count: u32,
     /// CPU-wide SPRs carried between guest threads (see `hle::CPU_SPRS`).
@@ -28,7 +25,6 @@ impl Machine {
             ram: vec![0u8; RAM_SIZE + RAM_SLACK].into_boxed_slice(),
             hw: Hw::new(),
             trace: Trace::from_env(),
-            started: Instant::now(),
             enter_count: 0,
             cpu_sprs: [0; 7],
             dec_deadline: None,
@@ -58,9 +54,9 @@ impl Machine {
         self.ram[p..p + data.len()].copy_from_slice(data);
     }
 
-    /// Time base ticks (the Gekko time base runs at bus clock / 4 = 40.5 MHz).
+    /// Time base ticks (the Gekko time base runs at bus clock / 4 = 40.5 MHz) of the guest clock.
     pub fn timebase(&self) -> u64 {
-        (self.started.elapsed().as_nanos() * 405 / 10_000) as u64
+        (crate::clock::now_ns() as u128 * 405 / 10_000) as u64
     }
 }
 
