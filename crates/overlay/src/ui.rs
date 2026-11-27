@@ -19,21 +19,36 @@ pub enum Page {
     Language,
     Controls,
     Card,
+    Mods,
+    /// The memory watcher: shown only with the developer option (ADR 0048).
+    Memory,
+    Cheats,
     Help,
     Quit,
 }
 
 impl Page {
-    pub const ALL: [Page; 8] = [
+    pub const ALL: [Page; 11] = [
         Page::Video,
         Page::Audio,
         Page::Capture,
         Page::Language,
         Page::Controls,
         Page::Card,
+        Page::Mods,
+        Page::Memory,
+        Page::Cheats,
         Page::Help,
         Page::Quit,
     ];
+
+    /// The pages in the tab row; the memory page needs the developer option (or being opened by `FEPOR_OVERLAY`).
+    fn visible(developer: bool, current: Page) -> Vec<Page> {
+        Page::ALL
+            .into_iter()
+            .filter(|p| *p != Page::Memory || developer || current == Page::Memory)
+            .collect()
+    }
 
     fn label(self) -> &'static str {
         match self {
@@ -42,6 +57,9 @@ impl Page {
             Page::Capture => "Capture",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
+            Page::Mods => "Mods",
+            Page::Memory => "Memory",
+            Page::Cheats => "Cheats",
             Page::Language => "Language",
             Page::Help => "Help",
             Page::Quit => "Quit",
@@ -59,34 +77,53 @@ impl Page {
 struct CardView {
     read_at: Instant,
     result: Result<(memcard::CardInfo, Vec<(String, usize)>), String>,
+    backups: Vec<memcard::Backup>,
 }
 
 pub struct UiState {
     pub page: Page,
     card: Option<CardView>,
     card_message: String,
+    memory: crate::memory::MemoryView,
     focus_tabs: bool,
     /// The file chooser, while the player has it open.
     picker: Option<Receiver<Vec<PathBuf>>>,
     /// Saves waiting in the imports folder, re-read every couple of seconds.
     pending: Vec<String>,
     pending_at: Option<Instant>,
+    /// The INI chooser of the cheats page, and what came of the last import.
+    cheat_picker: Option<Receiver<Option<PathBuf>>>,
+    cheat_message: Option<Result<String, String>>,
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
+    mods: crate::mods::ModsView,
 }
 
 impl UiState {
+    /// Scripted memory-page steps run whether or not the page (or the overlay) is shown.
+    pub fn memory_tick(&mut self, shared: &Shared) {
+        self.memory.tick(&shared.memory);
+    }
+
+    pub fn memory_live(&self) -> bool {
+        self.memory.live()
+    }
+
     pub fn new(page: Page) -> UiState {
         UiState {
             page,
             card: None,
             card_message: String::new(),
+            memory: crate::memory::MemoryView::new(),
             focus_tabs: true,
             picker: None,
             pending: Vec::new(),
             pending_at: None,
+            cheat_picker: None,
+            cheat_message: None,
             pad: crate::pad::PadView::default(),
+            mods: crate::mods::ModsView::default(),
             pad_selected: None,
         }
     }
@@ -124,6 +161,10 @@ pub fn show(
     stats: fepor_core::settings::StatsMode,
 ) {
     use fepor_core::settings::StatsMode;
+    // the guest thread publishes memory copies only while the page is shown
+    shared
+        .memory
+        .set_active((open && st.page == Page::Memory) || st.memory.live());
     // the statistics go first so that the settings panel, painted after, covers them
     if stats != StatsMode::Off {
         stats_hud(root, &shared.stats(), stats == StatsMode::Full);
@@ -306,6 +347,13 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                     },
                     gpu,
                 );
+                if let Some(ms) = s.scaling_gpu_ms {
+                    line(
+                        ui,
+                        Color32::WHITE,
+                        format!("Scaling pass {ms:.2} ms on the GPU (FSR, filters)"),
+                    );
+                }
                 line(
                     ui,
                     Color32::GRAY,
@@ -333,11 +381,13 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
 }
 
 fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+    let developer = shared.settings.get().developer;
     let step = shared.take_tab_step();
     if step != 0 {
-        let n = Page::ALL.len() as i32;
-        let i = Page::ALL.iter().position(|p| *p == st.page).unwrap_or(0) as i32;
-        st.page = Page::ALL[(i + step).rem_euclid(n) as usize];
+        let pages = Page::visible(developer, st.page);
+        let n = pages.len() as i32;
+        let i = pages.iter().position(|p| *p == st.page).unwrap_or(0) as i32;
+        st.page = pages[(i + step).rem_euclid(n) as usize];
         st.focus_tabs = true;
     }
     // the panel: green gradient, gold frame; its contents sit inside a margin
@@ -347,7 +397,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         ui.horizontal_wrapped(|ui| {
             ui.heading(RichText::new("Settings").color(crate::theme::GOLD));
             ui.add_space(14.0);
-            for p in Page::ALL {
+            for p in Page::visible(developer, st.page) {
                 let r = crate::theme::tab(ui, st.page == p, p.label());
                 if r.clicked() && st.page != p {
                     st.page = p;
@@ -364,6 +414,9 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
+            Page::Mods => crate::mods::page(ui, &mut st.mods, shared),
+            Page::Memory => crate::memory::memory(ui, &mut st.memory, shared),
+            Page::Cheats => cheats(ui, st, shared),
             Page::Help => help(ui, shared),
             Page::Quit => quit(ui, shared),
         });
@@ -405,15 +458,27 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     }
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Internal resolution"));
-    ui.add(
+    ui.add_enabled(
+        !s.video.fsr.is_on(),
         egui::Slider::new(&mut s.video.resolution, 1..=4)
             .custom_formatter(|v, _| format!("x{v:.0}  ({}x{})", 640 * v as u32, 528 * v as u32)),
     );
+    if s.video.fsr.is_on() {
+        ui.label(
+            RichText::new("Set by the FSR preset below, from the window's size.")
+                .small()
+                .weak(),
+        );
+    }
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Picture shape"));
     for a in Aspect::ALL {
         ui.radio_value(&mut s.video.aspect, a, a.label());
     }
+    ui.add_space(8.0);
+    fsr(ui, &mut s.video.fsr);
+    ui.add_space(8.0);
+    filters(ui, &mut s.video.filters);
     ui.add_space(8.0);
     ui.checkbox(&mut s.video.fullscreen, "Fullscreen");
     ui.checkbox(
@@ -438,6 +503,53 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     );
     if s != before {
         shared.settings.update(|x| *x = s);
+    }
+}
+
+/// AMD FSR 1 upscaling: while on, it picks the internal resolution from the window's size.
+fn fsr(ui: &mut egui::Ui, f: &mut fepor_core::settings::Fsr) {
+    use fepor_core::settings::FsrQuality;
+    ui.label(crate::theme::caption("Upscaling (AMD FSR 1)"));
+    for q in FsrQuality::ALL {
+        ui.radio_value(&mut f.quality, q, q.label());
+    }
+    if f.is_on() {
+        ui.label(
+            RichText::new("Renders smaller, upscales to the window.")
+                .small()
+                .weak(),
+        );
+        ui.label(RichText::new("Sharpness").small());
+        ui.add(
+            egui::Slider::new(&mut f.sharpness, 0.0..=1.0)
+                .custom_formatter(|x, _| format!("{x:.2}")),
+        );
+    }
+}
+
+/// The render filters: they change the picture only, never the overlay.
+fn filters(ui: &mut egui::Ui, f: &mut fepor_core::settings::Filters) {
+    use fepor_core::settings::{Filters, Mask};
+    ui.label(crate::theme::caption("Picture filters"));
+    let slider =
+        |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>| {
+            ui.label(RichText::new(label).small());
+            ui.add(egui::Slider::new(v, range).custom_formatter(|x, _| format!("{x:.2}")));
+        };
+    slider(ui, "Scanlines", &mut f.scanlines, 0.0..=1.0);
+    slider(ui, "Gamma", &mut f.gamma, 0.5..=2.0);
+    slider(ui, "Saturation", &mut f.saturation, 0.0..=2.0);
+    slider(ui, "Contrast", &mut f.contrast, 0.5..=1.5);
+    slider(ui, "Brightness", &mut f.brightness, -0.5..=0.5);
+    ui.label(RichText::new("Screen mask").small());
+    for m in Mask::ALL {
+        ui.radio_value(&mut f.mask, m, m.label());
+    }
+    if f.mask != Mask::Off {
+        slider(ui, "Mask strength", &mut f.mask_strength, 0.0..=1.0);
+    }
+    if ui.button("Reset filters").clicked() {
+        *f = Filters::default();
     }
 }
 
@@ -696,6 +808,107 @@ fn card(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     import_section(ui, st, &imports);
 }
 
+fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+    if let Some(rx) = &st.cheat_picker {
+        match rx.try_recv() {
+            Ok(file) => {
+                st.cheat_picker = None;
+                st.cheat_message = file.map(|f| {
+                    shared
+                        .cheats
+                        .import(&f)
+                        .map(|n| format!("{n} code(s) imported from {}.", f.display()))
+                });
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.cheat_picker = None,
+        }
+    }
+    let Some(game) = shared.cheats.game() else {
+        ui.label("Cheats are available once the game has started.");
+        return;
+    };
+    let choosing = st.cheat_picker.is_some();
+    if ui
+        .add_enabled(
+            !choosing,
+            egui::Button::new(if choosing {
+                "Choosing..."
+            } else {
+                "Import a Dolphin game INI..."
+            }),
+        )
+        .clicked()
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                rfd::FileDialog::new()
+                    .set_title("Choose a Dolphin game INI with Gecko or Action Replay codes")
+                    .add_filter("Dolphin game INI", &["ini"])
+                    .pick_file(),
+            );
+        });
+        st.cheat_picker = Some(rx);
+    }
+    match &st.cheat_message {
+        Some(Ok(m)) => {
+            ui.label(m);
+        }
+        Some(Err(e)) => {
+            ui.colored_label(Color32::LIGHT_RED, e);
+        }
+        None => {}
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    let list = shared.cheats.list();
+    if list.is_empty() {
+        ui.label(format!(
+            "No codes for {game} yet. Import the game's INI (for example GFEP01.ini from Dolphin)."
+        ));
+    }
+    for c in list {
+        let mut on = c.enabled;
+        ui.horizontal_wrapped(|ui| {
+            let label = if c.author.is_empty() {
+                c.name.clone()
+            } else {
+                format!("{}  [{}]", c.name, c.author)
+            };
+            if ui
+                .add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label))
+                .changed()
+            {
+                shared.cheats.set_enabled(&c.key, on);
+            }
+            ui.label(RichText::new(c.kind.label()).small().weak());
+        });
+        if let Err(why) = &c.supported {
+            ui.label(
+                RichText::new(format!("    not supported: {why}"))
+                    .small()
+                    .weak(),
+            );
+        }
+        if let Some(s) = &c.status {
+            ui.colored_label(Color32::LIGHT_RED, format!("    not applied: {s}"));
+        }
+        for n in &c.notes {
+            ui.label(RichText::new(format!("    {n}")).small().weak());
+        }
+    }
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new(
+            "Codes hold their value every frame while on; turning one off puts the game's value back. Only plain \
+             writes to data run: conditionals, loops, pointers and code insertion are listed as not supported.",
+        )
+        .small()
+        .weak(),
+    );
+}
+
 fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) {
     ui.label(format!("Slot A: {}", path.display()));
     if st
@@ -706,6 +919,7 @@ fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) 
         st.card = Some(CardView {
             read_at: Instant::now(),
             result: read_card(&path),
+            backups: memcard::list_backups(&memcard::backups_dir(&shared.data_dir), path),
         });
     }
     let Some(view) = &st.card else {
@@ -741,8 +955,55 @@ fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) 
             }
         }
     }
+    ui.add_space(6.0);
+    backups(ui, st, shared);
     if !st.card_message.is_empty() {
         ui.label(&st.card_message);
+    }
+}
+
+/// The copies of the card kept before each run and while playing, with the keep count and Restore buttons. A
+/// restore cannot touch the card the running game has open, so it is queued for the next start.
+fn backups(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+    let dir = memcard::backups_dir(&shared.data_dir);
+    let mut keep = shared.settings.get().game.card_backups;
+    ui.horizontal(|ui| {
+        ui.label(crate::theme::caption("Backups kept (0 = off)"));
+        if ui
+            .add(egui::DragValue::new(&mut keep).range(0..=50))
+            .changed()
+        {
+            shared.settings.update(|x| x.game.card_backups = keep);
+        }
+    });
+    let Some(view) = &st.card else {
+        return;
+    };
+    if view.backups.is_empty() {
+        ui.label("  (no backups yet)");
+    }
+    let mut queued = None;
+    for b in &view.backups {
+        ui.horizontal(|ui| {
+            ui.label(format!("  {}", memcard::format_stamp(b.stamp)));
+            if ui.button("Restore").clicked() {
+                queued = Some(b.clone());
+            }
+        });
+    }
+    if let Some(b) = queued {
+        let name = b
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        st.card_message = match memcard::queue_restore(&dir, &name) {
+            Ok(()) => format!(
+                "The card of {} replaces the current one the next time the game starts (which is backed up first).",
+                memcard::format_stamp(b.stamp)
+            ),
+            Err(e) => format!("cannot queue the restore: {e}"),
+        };
     }
 }
 
@@ -891,6 +1152,16 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
     ui.label("PgUp / PgDn or LB / RB: previous / next page.");
     ui.label("F12: screenshot. F10: start / stop recording a video (Capture page).");
     ui.add_space(6.0);
+    ui.label(format!(
+        "Playtime: {}",
+        fepor_core::playtime::format(shared.playtime_secs())
+    ));
+    ui.label(
+        RichText::new("Counted while the game runs with this menu closed.")
+            .small()
+            .weak(),
+    );
+    ui.add_space(6.0);
     ui.label(format!("Data folder: {}", shared.data_dir.display()));
     ui.label(format!(
         "Settings: {}",
@@ -900,6 +1171,46 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         "Bindings: {}",
         shared.data_dir.join("input.toml").display()
     ));
+    ui.add_space(6.0);
+    let before = shared.settings.get().presence;
+    let mut on = before.enabled;
+    ui.checkbox(&mut on, "Discord rich presence");
+    if on != before.enabled {
+        shared.settings.update(|x| x.presence.enabled = on);
+    }
+    ui.label(
+        RichText::new(if before.client_id.is_empty() {
+            "Off by default; nothing is sent. It also needs presence.client_id in settings.toml."
+        } else {
+            "Shows that you are playing and for how long, to a running Discord client. Nothing else is sent."
+        })
+        .small()
+        .weak(),
+    );
+    ui.add_space(6.0);
+    let mut developer = shared.settings.get().developer;
+    if ui
+        .checkbox(
+            &mut developer,
+            "Developer tools (adds the Memory page: read, write and search guest RAM)",
+        )
+        .changed()
+    {
+        shared.settings.update(|x| x.developer = developer);
+    }
+    ui.add_space(6.0);
+    if ui.button("Make bug report").clicked() {
+        shared.request_report();
+    }
+    ui.label(
+        RichText::new("A zip with the log, settings, bindings, system and game state and the picture on screen. No saves, no game data; names, paths and addresses are anonymised. Attach it to the report.")
+            .small()
+            .weak(),
+    );
+    let message = shared.report_message();
+    if !message.is_empty() {
+        ui.label(message);
+    }
     ui.add_space(6.0);
     ui.label(
         RichText::new("FEPOR_FPS_MULT, FEPOR_RES and FEPOR_ASPECT override the saved video settings for one run.")

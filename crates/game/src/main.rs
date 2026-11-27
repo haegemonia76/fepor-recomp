@@ -2,6 +2,8 @@
 //!
 //! `fepor-game [--data <dir>] [--game <iso|folder>]`: without `--game` the data `prepare` copied to `<data>/disc` is used.
 
+mod presence;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -50,6 +52,72 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(default_data_dir)
 }
 
+/// What a bug report says about the game: ID, version, region, and the kind and size of the copy (never
+/// its path: the folder is only recorded so that the report can remove it).
+fn note_game(data: &std::path::Path, game: &std::path::Path, v: &version::Version) {
+    let region = match v.game_id.as_bytes().get(3) {
+        Some(b'P') => "Europe",
+        Some(b'E') => "USA",
+        Some(b'J') => "Japan",
+        _ => "unknown",
+    };
+    let copy = match std::fs::metadata(game) {
+        Ok(m) if m.is_file() => format!(
+            "disc image .{}, {} bytes",
+            game.extension().and_then(|e| e.to_str()).unwrap_or("?"),
+            m.len()
+        ),
+        _ => "extracted folder".into(),
+    };
+    fepor_core::bugreport::update_session(data, |s| {
+        s.game_id = v.game_id.into();
+        s.disc_dir = if game.is_dir() { game } else { game.parent().unwrap_or(game) }
+            .to_string_lossy()
+            .into_owned();
+    });
+    fepor_core::bugreport::note(
+        "game",
+        format!("game ID: {}\nversion: {}\nregion: {region}\ncopy: {copy}", v.game_id, v.name),
+    );
+}
+
+/// What the game process records for `fepor-recomp bug-report` at start: build, engine, the `FEPOR_*` and
+/// `RECOMPLAUNCHER_*` variables and the command line (the report anonymises them).
+fn note_start(data: &std::path::Path) {
+    fepor_core::bugreport::update_session(data, |s| {
+        s.build = fepor_core::bugreport::build_string();
+        s.engine = if cfg!(feature = "jit") { "jit" } else { "cpp" }.into();
+        s.trace = std::env::var("FEPOR_TRACE").unwrap_or_default();
+    });
+    let mut vars: Vec<String> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("FEPOR_") || k.starts_with("RECOMPLAUNCHER_"))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    vars.sort();
+    fepor_core::bugreport::note(
+        "environment",
+        if vars.is_empty() { "no FEPOR_* or RECOMPLAUNCHER_* variables set".into() } else { vars.join("\n") },
+    );
+    let args: Vec<String> = std::env::args().collect();
+    fepor_core::bugreport::note("arguments", args.join(" "));
+}
+
+/// The state the Help page's bug report adds: the guest machine and the compiler.
+fn report_sections(started: std::time::Instant) -> Vec<(String, String)> {
+    let mut v = vec![
+        (
+            "session".to_string(),
+            format!("running for {} s (playtime this session)", started.elapsed().as_secs()),
+        ),
+        ("runtime".to_string(), fepor_runtime::report::state()),
+    ];
+    #[cfg(feature = "jit")]
+    if let Some(j) = fepor_jit::Jit::global() {
+        v.push(("jit".to_string(), j.summary()));
+    }
+    v
+}
+
 /// `.gci` saves dropped in `imports` are put on the card image at `card` (and renamed `.imported`). The card
 /// must already be formatted: format it in the game first.
 fn import_saves(card: &std::path::Path, imports: &std::path::Path) {
@@ -95,6 +163,48 @@ fn import_saves(card: &std::path::Path, imports: &std::path::Path) {
     }
 }
 
+/// Seconds between backups of a card the game modified.
+const BACKUP_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn backup_card(card: &std::path::Path, dir: &std::path::Path, overlay: &fepor_overlay::Shared) {
+    let keep = overlay.settings.get().game.card_backups as usize;
+    match fepor_core::memcard::backup(card, dir, keep, unix_now()) {
+        Ok(Some(p)) => eprintln!("memory card backup: {}", p.display()),
+        Ok(None) => {}
+        Err(e) => eprintln!("memory card backup of {}: {e}", card.display()),
+    }
+}
+
+/// Apply the restore the overlay queued, back the card up before the run, and keep backing it up while the
+/// game modifies it (a copy is made only when the image differs from the newest one).
+fn protect_card(card: &std::path::Path, base: &std::path::Path, overlay: &Arc<fepor_overlay::Shared>) {
+    let dir = fepor_core::memcard::backups_dir(base);
+    if let Some(from) = fepor_core::memcard::take_restore(&dir) {
+        // the card being replaced is itself kept as a backup first, and read before rotation can drop `from`
+        let image = std::fs::read(&from);
+        backup_card(card, &dir, overlay);
+        match image.and_then(|_| fepor_core::memcard::restore(card, &from)) {
+            Ok(()) => eprintln!("memory card restored from {}", from.display()),
+            Err(e) => eprintln!("cannot restore {}: {e}", from.display()),
+        }
+    }
+    backup_card(card, &dir, overlay);
+    let (card, overlay) = (card.to_path_buf(), overlay.clone());
+    let timer = move || loop {
+        std::thread::sleep(BACKUP_EVERY);
+        backup_card(&card, &dir, &overlay);
+    };
+    if let Err(e) = std::thread::Builder::new().name("card-backup".into()).spawn(timer) {
+        eprintln!("memory card backups while playing are off: {e}");
+    }
+}
+
 /// Memory cards: raw Dolphin-format images, `<data>/memcards/MemoryCard{A,B}.<region>.raw`, or the files named
 /// by `FEPOR_MEMCARD_A` / `FEPOR_MEMCARD_B` (`none` leaves the slot empty). New cards are 16 Mbit (251 blocks)
 /// and unformatted; the game offers to format them.
@@ -102,7 +212,7 @@ fn insert_cards(
     m: &mut fepor_runtime::Machine,
     game_id: &str,
     data: Option<&std::path::Path>,
-    overlay: &fepor_overlay::Shared,
+    overlay: &Arc<fepor_overlay::Shared>,
 ) {
     let region = match game_id.as_bytes().get(3) {
         Some(b'E') => "USA",
@@ -122,6 +232,7 @@ fn insert_cards(
             (None, _) => continue,
         };
         if slot == 0 {
+            protect_card(&path, &base, overlay);
             import_saves(&path, &base.join("imports"));
             *overlay.card_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
         }
@@ -156,6 +267,108 @@ fn install_jit(game_id: &str, dol: &Dol) {
     jit.precompile(symbols, workers);
 }
 
+/// Count the time the game runs with the overlay closed (ADR 0045) into `<data>/playtime.toml`, and publish
+/// the total for the overlay. Saved every 10 seconds and whenever counting stops (the overlay opening, which
+/// is also the way to the Quit page).
+fn track_playtime(game_id: String, data: PathBuf, overlay: Arc<fepor_overlay::Shared>) {
+    use fepor_core::playtime::{path_in, Counter, Playtime};
+    let path = path_in(&data);
+    let mut record = Playtime::load(&path);
+    overlay.set_playtime_secs(record.get(&game_id));
+    let spawned = std::thread::Builder::new()
+        .name("playtime".into())
+        .spawn(move || {
+            let mut counter = Counter::new();
+            let (mut dirty, mut was_running, mut saved) = (false, true, std::time::Instant::now());
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let running = !overlay.is_open();
+                let secs = counter.tick(running);
+                if secs > 0 {
+                    record.add(&game_id, secs);
+                    overlay.set_playtime_secs(record.get(&game_id));
+                    dirty = true;
+                }
+                if dirty && (!running && was_running || saved.elapsed().as_secs() >= 10) {
+                    match record.save(&path) {
+                        Ok(()) => dirty = false,
+                        Err(e) => eprintln!("playtime: cannot write {}: {e}", path.display()),
+                    }
+                    saved = std::time::Instant::now();
+                }
+                was_running = running;
+            }
+        });
+    if let Err(e) = spawned {
+        eprintln!("playtime: cannot start: {e}");
+    }
+}
+
+/// Serve the files of the enabled mods instead of the disc's (ADR 0034); the rest of the disc is untouched.
+fn replace_files(
+    disc: Box<dyn fepor_core::Disc>,
+    mods: &fepor_core::mods::ModList,
+    game_id: &str,
+) -> Result<Box<dyn fepor_core::Disc>, String> {
+    for c in mods.conflicts(Some(game_id)) {
+        eprintln!("mods: {c}");
+    }
+    let files = mods.replacements(game_id);
+    if files.is_empty() {
+        return Ok(disc);
+    }
+    let modded = fepor_core::disc::ModdedDisc::new(disc, &files).map_err(|e| e.to_string())?;
+    for path in &modded.unmatched {
+        eprintln!("mods: {path} is not a file of this disc: ignored");
+    }
+    eprintln!("mods: {} disc file(s) replaced", modded.replaced());
+    Ok(Box::new(modded))
+}
+
+/// Register and enable the memory patches of the enabled mods, highest priority first. A mod whose bytes
+/// another enabled mod already patches stays off (the engine refuses it). Patches over the DOL's code change
+/// nothing (ADR 0025), so they are reported.
+fn apply_patch_mods(
+    m: &mut fepor_runtime::Machine,
+    mods: &fepor_core::mods::ModList,
+    game_id: &str,
+    dol: &Dol,
+) {
+    use fepor_runtime::patch::{Patch, PatchSet};
+    for md in mods.patch_mods(game_id) {
+        let patches: Vec<Patch> = md
+            .manifest
+            .patches
+            .iter()
+            .map(|p| Patch::new(p.address, p.bytes.clone()))
+            .collect();
+        for p in &md.manifest.patches {
+            let r = p.range();
+            let over_code = |s: &fepor_core::dol::Section| {
+                let start = (s.addr & 0x3FFF_FFFF) as u64;
+                r.start < start + s.size as u64 && start < r.end
+            };
+            if dol.text_sections().any(over_code) {
+                eprintln!("mods: {}: patch at {:#010x} is over the game's code and changes nothing", md.id, p.address);
+            }
+        }
+        let set = PatchSet {
+            source: format!("mod:{}", md.id),
+            game_id: game_id.to_string(),
+            patches,
+            continuous: md.manifest.continuous,
+        };
+        let done = m
+            .patches
+            .register(set)
+            .and_then(|id| m.patches.enable(id, &mut m.ram));
+        match done {
+            Ok(()) => eprintln!("mods: {}: {} patch(es) applied", md.id, md.manifest.patches.len()),
+            Err(e) => eprintln!("mods: {}: patches not applied: {e}", md.id),
+        }
+    }
+}
+
 fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Result<(), String> {
     // Keep the exported runtime symbols linked for the generated library.
     std::hint::black_box(abi::exports());
@@ -170,11 +383,18 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         )
     })?;
     let mut disc = open_disc(&game).map_err(|e| e.to_string())?;
+    let game_id = disc.game_id().to_string();
+    let mods = fepor_core::mods::ModList::load(&data);
+    disc = replace_files(disc, &mods, &game_id)?;
     let bytes = disc.dol().map_err(|e| e.to_string())?;
-    version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
+    let version = version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
+    note_game(&data, &game, version);
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
     #[cfg(feature = "jit")]
     install_jit(disc.game_id(), &dol);
+
+    track_playtime(disc.game_id().to_string(), data.clone(), overlay.clone());
+    presence::spawn(overlay.clone());
 
     let m = machine();
     if std::env::var_os("FEPOR_NO_VIDEO").is_none() {
@@ -191,10 +411,20 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     ) {
         m.hw.set_audio_sink(sink);
     }
+    m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
+    m.patches.attach_watcher(overlay.memory.clone());
+    // physical ranges of the DOL's code: recompiled, so cheats writing there would do nothing
+    let code = dol
+        .text_sections()
+        .map(|s| (s.addr & 0x01FF_FFFF)..(s.addr & 0x01FF_FFFF) + s.size)
+        .collect();
+    overlay.cheats.set_game(disc.game_id(), code);
+    m.cheats.attach(overlay.cheats.clone());
     insert_cards(m, disc.game_id(), Some(&data), &overlay);
     m.hw.set_language(overlay.settings.get().game.language.sram_code());
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
+    apply_patch_mods(m, &mods, &game_id, &dol);
     abi::start_watchdog();
     let mut ctx = Context::new(m.ram_ptr());
     fepor_runtime::sched::init(&mut *ctx);
@@ -222,7 +452,7 @@ fn spawn_guest(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>)
                 Err(_) => 70,
             };
             capture.finish();
-            std::process::exit(code);
+            fepor_core::applog::exit(code);
         })
         .expect("spawn guest thread");
 }
@@ -282,7 +512,7 @@ impl ApplicationHandler<()> for App {
             }
             Err(e) => {
                 eprintln!("error: cannot create a window: {e}");
-                std::process::exit(1);
+                fepor_core::applog::exit(1);
             }
         }
     }
@@ -299,7 +529,7 @@ impl ApplicationHandler<()> for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.overlay.capture.finish();
-                std::process::exit(0)
+                fepor_core::applog::exit(0)
             }
             WindowEvent::Focused(false) => {
                 if let Ok(mut c) = self.controls.lock() {
@@ -330,8 +560,13 @@ impl ApplicationHandler<()> for App {
 fn main() {
     // FEPOR_HEADLESS=1 renders without a window (frame dumps); FEPOR_NO_VIDEO=1 does not render at all.
     let data = data_dir();
+    fepor_core::applog::install(&data);
+    fepor_core::bugreport::init(&data);
+    note_start(&data);
     let controls = Arc::new(Mutex::new(Controls::new(data.join("input.toml"))));
     let overlay = fepor_overlay::Shared::new(SettingsHandle::load(&data), controls.clone(), data);
+    let started = std::time::Instant::now();
+    overlay.set_report_hook(Box::new(move || report_sections(started)));
     if std::env::var_os("FEPOR_HEADLESS").is_some() || std::env::var_os("FEPOR_NO_VIDEO").is_some()
     {
         spawn_guest(None, overlay);
@@ -343,7 +578,7 @@ fn main() {
         .build()
         .unwrap_or_else(|e| {
             eprintln!("error: no display ({e}); set FEPOR_HEADLESS=1 to run without a window");
-            std::process::exit(1)
+            fepor_core::applog::exit(1)
         });
     el.set_control_flow(ControlFlow::Wait);
     let mut app = App {
@@ -355,6 +590,6 @@ fn main() {
     };
     if let Err(e) = el.run_app(&mut app) {
         eprintln!("error: {e}");
-        std::process::exit(1);
+        fepor_core::applog::exit(1);
     }
 }

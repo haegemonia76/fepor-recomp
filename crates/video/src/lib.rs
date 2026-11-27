@@ -12,12 +12,15 @@ use fepor_gx::state::{CopyEfb, DrawCall, Event, Primitive, RenderState, Sink, Te
 use fepor_gx::{tev, texture};
 use wgpu::util::DeviceExt;
 
+mod fsr;
 mod icons;
 mod present;
 mod sysstat;
 
 pub const EFB_WIDTH: u32 = 640;
 pub const EFB_HEIGHT: u32 = 528;
+/// Frame dumps through the render filters or FSR are at least this many times the GameCube's frame.
+const DUMP_OUTPUT_FACTOR: u32 = 3;
 
 /// A multiply-rotate hasher (the maps here are keyed by small plain values hashed several times per draw;
 /// SipHash was 4 % of the guest thread in a battle).
@@ -391,6 +394,60 @@ fn make_targets(device: &wgpu::Device, scale: u32) -> Targets {
     }
 }
 
+/// Read `size` pixels at `origin` of an RGBA8 texture back to the CPU.
+fn read_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    origin: (u32, u32),
+    size: (u32, u32),
+) -> Vec<u8> {
+    let (w, h) = size;
+    let row = (w * 4).div_ceil(256) * 256;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (row * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: origin.0,
+                y: origin.1,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([enc.finish()]);
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait);
+    let data = slice.get_mapped_range();
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for r in 0..h {
+        out.extend_from_slice(&data[(r * row) as usize..(r * row + w * 4) as usize]);
+    }
+    out
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -425,6 +482,15 @@ pub struct Renderer {
     alt: wgpu::Texture,
     /// `read_efb` reads the interpolation target instead (frame dumps).
     read_alt: bool,
+    /// The render filters (ADR 0039); the window's presenter has its own copy, this one filters dumps.
+    filters: fepor_core::settings::Filters,
+    /// FSR (ADR 0042) and the internal resolution the player chose (FSR picks its own while on).
+    fsr: fepor_core::settings::Fsr,
+    resolution: u32,
+    /// GPU time of the last measured scaling pass, in microseconds (0 until one was).
+    post_us: Arc<std::sync::atomic::AtomicU32>,
+    /// The scaling pass and its timer for frame dumps, made when a dump first needs them.
+    dump_post: Option<(present::Post, Option<present::PassTimer>)>,
     alt_depth_view: wgpu::TextureView,
     /// The last real frame, kept so it can be shown after the interpolated ones.
     xfb: wgpu::Texture,
@@ -445,7 +511,7 @@ pub struct Renderer {
     dump: Option<Dump>,
     /// Screenshots and recording (hotkeys, overlay page), shared with the overlay.
     capture: Option<Arc<fepor_core::capture::Capture>>,
-    /// The image a capture with the overlay draws on, so that the game's own picture stays untouched.
+    /// The image a capture with the overlay draws on, so that the game's picture stays untouched.
     capture_tex: Option<wgpu::Texture>,
     cull: bool,
     /// `FEPOR_DUMP_TEXTURES=dir`: write every newly decoded texture as PNG.
@@ -456,6 +522,8 @@ pub struct Renderer {
     trace_icons: bool,
     /// `FEPOR_TRACE=gxhash`: print a hash of every presented frame (how often the picture really changes).
     trace_hash: bool,
+    /// `FEPOR_BUG_REPORT=<frame>`: make the bug report when this guest frame is presented (headless checks).
+    report_at: Option<u64>,
     /// Draws since the last presented frame.
     pub draws: u64,
     presenter: Option<present::Presenter>,
@@ -502,24 +570,15 @@ pub struct Renderer {
     tot_interp: Duration,
 }
 
-fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
-    write_png_file(path, w, h, color, data).expect("write png");
-}
-
-fn write_png_file(
-    path: &std::path::Path,
-    w: u32,
-    h: u32,
-    color: png::ColorType,
-    data: &[u8],
-) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+fn png_bytes(w: u32, h: u32, color: png::ColorType, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, w, h);
     enc.set_color(color);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()
         .and_then(|mut w| w.write_image_data(data))
-        .map_err(|e| e.to_string())
+        .expect("encode png");
+    out
 }
 
 /// Drop the alpha channel: the EFB's alpha is whatever the draws left there.
@@ -527,6 +586,10 @@ fn to_rgb(rgba: &[u8]) -> Vec<u8> {
     rgba.chunks_exact(4)
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect()
+}
+
+fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
+    std::fs::write(path, png_bytes(w, h, color, data)).expect("write png");
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -561,10 +624,28 @@ impl Renderer {
         .map_err(|e| format!("no GPU adapter: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("fepor"),
+            // GPU time of the scaling pass on the statistics overlay, where the GPU can tell
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             ..Default::default()
         }))
         .map_err(|e| format!("device: {e}"))?;
+        let timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let post_us = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let adapter_info = adapter.get_info();
+        fepor_core::bugreport::note(
+            "gpu",
+            format!(
+                "adapter: {}\nbackend: {:?}\ntype: {:?}\ndriver: {}\ndriver info: {}\nvendor/device id: {:04x}:{:04x}\nlimits: {:?}",
+                adapter_info.name,
+                adapter_info.backend,
+                adapter_info.device_type,
+                adapter_info.driver,
+                adapter_info.driver_info,
+                adapter_info.vendor,
+                adapter_info.device,
+                adapter.limits()
+            ),
+        );
         // Images shown per guest frame (interpolated between consecutive frames), windowed or dumped only.
         let interpolates = window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok();
         let mult: u32 = if interpolates {
@@ -579,10 +660,22 @@ impl Renderer {
                 s,
                 window.clone().expect("surface implies window"),
                 mult > 1,
+                &settings.get().video,
+                present::PassTimer::new(&device, &queue, post_us.clone()),
             )
         });
 
-        let scale = settings.get().video.resolution;
+        let video = settings.get().video;
+        let scale = if video.fsr.is_on() {
+            video.fsr.internal_scale(
+                window
+                    .as_ref()
+                    .map_or(DUMP_OUTPUT_FACTOR * EFB_HEIGHT, |w| w.inner_size().height),
+                EFB_HEIGHT,
+            )
+        } else {
+            video.resolution
+        };
         let Targets {
             efb,
             efb_view,
@@ -698,6 +791,11 @@ impl Renderer {
             xfb,
             alt,
             read_alt: false,
+            filters: video.filters,
+            fsr: video.fsr,
+            resolution: video.resolution,
+            post_us,
+            dump_post: None,
             xfb_view,
             rec: Vec::new(),
             prev: None,
@@ -723,7 +821,7 @@ impl Renderer {
             vsync: true,
             fps_frames: 0,
             fps_since: Instant::now(),
-            stats: StatsState::new(&adapter_info),
+            stats: StatsState::new(&adapter_info, timestamps),
             show_stats: false,
             icon_gen: 0,
             tot_events: Duration::ZERO,
@@ -735,6 +833,7 @@ impl Renderer {
                 .inspect(|d| {
                     let _ = std::fs::create_dir_all(d);
                 }),
+            report_at: std::env::var("FEPOR_BUG_REPORT").ok().and_then(|v| v.parse().ok()),
             trace_hash: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gxhash")),
             trace_draws: std::env::var("FEPOR_TRACE")
@@ -1676,59 +1775,87 @@ impl Renderer {
     /// times larger in each direction.
     pub fn read_efb(&mut self, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
         self.flush();
-        self.read_texture(if self.read_alt { &self.alt } else { &self.efb }, x, y, w, h)
+        let s = self.scale;
+        let tex = if self.read_alt { &self.alt } else { &self.efb };
+        read_texture(
+            &self.device,
+            &self.queue,
+            tex,
+            (x.min(EFB_WIDTH) * s, y.min(EFB_HEIGHT) * s),
+            (
+                w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
+                h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)) * s,
+            ),
+        )
     }
 
-    /// Read a rectangle (in GameCube pixels) of an image the size of the EFB, as RGBA.
-    fn read_texture(&self, texture: &wgpu::Texture, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
-        let s = self.scale;
-        let (w, h) = (
-            w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
-            h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)) * s,
-        );
-        let row = (w * 4).div_ceil(256) * 256;
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (row * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: x * s,
-                    y: y * s,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
+    /// Whether the window would show the frame exactly as the game drew it (no filters, no FSR).
+    fn shows_plain(&self) -> bool {
+        self.filters.is_identity() && !self.fsr.is_on()
+    }
+
+    /// The frame `c` of the EFB (or of the interpolation target with `alt`) as the window would show it:
+    /// through FSR and the render filters, at least 3x the GameCube's size so that scanlines, mask and the
+    /// upscale have room, and with the overlay drawn on top, unfiltered, when there is no window to draw
+    /// it on.
+    fn read_filtered(&mut self, c: &CopyEfb, alt: bool) -> (u32, u32, Vec<u8>) {
+        self.flush();
+        let s = self.scale.max(DUMP_OUTPUT_FACTOR);
+        let (w, h) = (c.width.clamp(1, EFB_WIDTH), c.height.clamp(1, EFB_HEIGHT));
+        let (tw, th) = (w * s, h * s);
+        let out = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("filtered dump"),
+            size: wgpu::Extent3d {
+                width: tw,
+                height: th,
                 depth_or_array_layers: 1,
             },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = out.create_view(&Default::default());
+        let (post, timer) = self.dump_post.get_or_insert_with(|| {
+            (
+                present::Post::new(&self.device, wgpu::TextureFormat::Rgba8Unorm),
+                present::PassTimer::new(&self.device, &self.queue, self.post_us.clone()),
+            )
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let src = if alt { &self.alt_view } else { &self.efb_view };
+        let timed = post.scale(
+            &self.device,
+            &mut enc,
+            &view,
+            (0.0, 0.0, tw as f32, th as f32),
+            src,
+            c,
+            &self.filters,
+            &self.fsr,
+            timer.as_ref(),
         );
-        self.queue.submit([enc.finish()]);
-        let slice = buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.device.poll(wgpu::PollType::Wait);
-        let data = slice.get_mapped_range();
-        let mut out = Vec::with_capacity((w * h * 4) as usize);
-        for r in 0..h {
-            out.extend_from_slice(&data[(r * row) as usize..(r * row + w * 4) as usize]);
+        if self.presenter.is_none() {
+            if let Some(o) = &mut self.overlay {
+                o.paint(
+                    &self.device,
+                    &self.queue,
+                    &mut enc,
+                    &view,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    [tw, th],
+                    s as f32,
+                );
+            }
         }
-        out
+        self.queue.submit([enc.finish()]);
+        if let (true, Some(t)) = (timed, timer.as_ref()) {
+            t.start_read();
+        }
+        let rgba = read_texture(&self.device, &self.queue, &out, (0, 0), (tw, th));
+        (tw, th, rgba)
     }
 
     /// Apply what the player changed in the settings overlay since the last frame.
@@ -1741,6 +1868,8 @@ impl Renderer {
         let s = self.settings.get();
         if let Some(p) = &mut self.presenter {
             p.set_aspect(s.video.aspect);
+            p.set_filters(s.video.filters.clone());
+            p.set_fsr(s.video.fsr.clone());
             p.set_fullscreen(s.video.fullscreen);
         }
         let mult = if self.interpolates {
@@ -1756,14 +1885,31 @@ impl Renderer {
             self.plan = None;
             self.rec.clear();
         }
+        self.filters = s.video.filters.clone();
+        self.fsr = s.video.fsr.clone();
+        self.resolution = s.video.resolution;
         self.vsync = s.video.vsync;
         self.show_stats = s.video.stats != fepor_core::settings::StatsMode::Off;
         if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
             p.set_present(&self.device, mult > 1, self.vsync);
         }
-        if s.video.resolution != self.scale {
+    }
+
+    /// The internal resolution: the player's choice, or while FSR is on the one that gives its quality's
+    /// ratio to the picture's size on the window (or on a dump). Reallocates the targets when it changes.
+    fn sync_scale(&mut self) {
+        let wanted = if self.fsr.is_on() {
+            let out = self
+                .presenter
+                .as_ref()
+                .map_or(DUMP_OUTPUT_FACTOR * EFB_HEIGHT, |p| p.out_height());
+            self.fsr.internal_scale(out, EFB_HEIGHT)
+        } else {
+            self.resolution
+        };
+        if wanted != self.scale {
             self.flush();
-            self.scale = s.video.resolution;
+            self.scale = wanted;
             let t = make_targets(&self.device, self.scale);
             self.efb = t.efb;
             self.efb_view = t.efb_view;
@@ -1840,33 +1986,50 @@ impl Renderer {
         }
         self.draws = 0;
         self.show_frame(c);
-        self.dump_frame(c);
+        if self.report_at == Some(self.frame) {
+            if let Some(o) = &self.overlay {
+                o.shared().request_report();
+            }
+        }
+        if self.overlay.as_ref().is_some_and(|o| o.shared().take_report_request()) {
+            self.make_bug_report(c);
+        }
         self.capture_frame(c);
-    }
-
-    /// `FEPOR_DUMP_FRAMES`: every `FEPOR_DUMP_EVERY`-th presented frame as PNG.
-    fn dump_frame(&mut self, c: &CopyEfb) {
         let Some(d) = &self.dump else { return };
         if self.frame % d.every != 0 {
             return;
         }
         let path = d.dir.join(format!("frame_{:05}.png", self.frame));
         let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
-        if self.presenter.is_none() {
-            self.paint_overlay_on_efb();
-        }
-        let rgba = self.read_efb(c.x, c.y, w, h);
-        write_png(
-            &path,
-            w * self.scale,
-            h * self.scale,
-            png::ColorType::Rgb,
-            &to_rgb(&rgba),
-        );
+        let (pw, ph, rgba) = if self.shows_plain() {
+            if self.presenter.is_none() {
+                self.paint_overlay_on_efb();
+            }
+            (
+                w * self.scale,
+                h * self.scale,
+                self.read_efb(c.x, c.y, w, h),
+            )
+        } else {
+            self.read_filtered(c, false)
+        };
+        write_png(&path, pw, ph, png::ColorType::Rgb, &to_rgb(&rgba));
     }
 
-    /// Screenshots and video frames (ADR 0044): the presented frame at internal resolution, with the overlay
-    /// when the settings say so.
+    /// The presented frame at internal resolution (before the render filters and FSR) as packed RGB, with the
+    /// overlay drawn into it when `overlay`. Shared by screenshots, video frames and the bug report.
+    fn picture_rgb(&mut self, c: &CopyEfb, overlay: bool) -> (u32, u32, Vec<u8>) {
+        let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+        let rgba = if overlay {
+            self.read_efb_with_overlay(c.x, c.y, w, h)
+        } else {
+            self.read_efb(c.x, c.y, w, h)
+        };
+        (w * self.scale, h * self.scale, to_rgb(&rgba))
+    }
+
+    /// Screenshots and video frames (ADR 0044): what `picture_rgb` gives, with the overlay when the settings
+    /// say so.
     fn capture_frame(&mut self, c: &CopyEfb) {
         let Some(cap) = self.capture.clone() else {
             return;
@@ -1878,15 +2041,10 @@ impl Renderer {
         if shot.is_none() && !recording {
             return;
         }
-        let rgba = if self.settings.get().capture.overlay {
-            self.read_efb_with_overlay(c.x, c.y, w, h)
-        } else {
-            self.read_efb(c.x, c.y, w, h)
-        };
-        let rgb = to_rgb(&rgba);
-        let (pw, ph) = (w * self.scale, h * self.scale);
+        let (pw, ph, rgb) = self.picture_rgb(c, self.settings.get().capture.overlay);
         if let Some(path) = shot {
-            let result = write_png_file(&path, pw, ph, png::ColorType::Rgb, &rgb);
+            let result = std::fs::write(&path, png_bytes(pw, ph, png::ColorType::Rgb, &rgb))
+                .map_err(|e| e.to_string());
             cap.screenshot_done(&path, result);
         }
         if recording {
@@ -1932,13 +2090,86 @@ impl Renderer {
             );
         }
         self.queue.submit([enc.finish()]);
-        self.read_texture(tex, x, y, w, h)
+        read_texture(
+            &self.device,
+            &self.queue,
+            tex,
+            (x.min(EFB_WIDTH) * s, y.min(EFB_HEIGHT) * s),
+            (
+                w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
+                h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)) * s,
+            ),
+        )
+    }
+
+    /// The Help page's "Make bug report" (ADR 0047): the picture being shown now and the renderer's state go
+    /// into the zip together with what the game process adds.
+    fn make_bug_report(&mut self, c: &CopyEfb) {
+        let Some(shared) = self.overlay.as_ref().map(|o| o.shared().clone()) else {
+            return;
+        };
+        let (w, h, rgb) = self.picture_rgb(c, false);
+        let screenshot = png_bytes(w, h, png::ColorType::Rgb, &rgb);
+        let mut sections = vec![("video".to_string(), self.report_text(&shared))];
+        sections.extend(shared.report_sections());
+        let made = fepor_core::bugreport::create_default(
+            &shared.data_dir,
+            fepor_core::bugreport::Extra {
+                screenshot: Some(screenshot),
+                sections,
+            },
+        );
+        shared.set_report_message(match made {
+            Ok(p) => format!("Saved {}", p.display()),
+            Err(e) => format!("Bug report failed: {e}"),
+        });
+    }
+
+    /// What the renderer is doing now, for a bug report.
+    fn report_text(&self, shared: &fepor_overlay::Shared) -> String {
+        let mut t = format!(
+            "guest frames presented: {}\nguest frame rate: {:.1} /s\nimages per guest frame (frame multiplier in effect): {}\ninternal resolution factor in effect: {}\nrender target: {}x{}\ndraws in the last frame: {}\ntextures cached: {}\nvsync in effect: {}\n",
+            self.frame,
+            shared.guest_fps(),
+            self.mult,
+            self.scale,
+            EFB_WIDTH * self.scale,
+            EFB_HEIGHT * self.scale,
+            self.draws,
+            self.textures.len(),
+            self.vsync,
+        );
+        if let Some(p) = &self.presenter {
+            t.push_str(&p.describe());
+        } else {
+            t.push_str("window: none (headless)\n");
+        }
+        t.push_str(&format!("settings in effect: {:#?}\n", self.settings.get()));
+        let s = shared.stats();
+        if s.gpu_name.is_empty() {
+            t.push_str("statistics HUD: not shown in this run, no frame time history\n");
+        } else {
+            t.push_str(&format!(
+                "statistics HUD (last snapshot): guest {:.1} fps, shown {:.1} fps, display {:.1} Hz, draw {:.0} ms/s, interpolation {:.0} ms/s, process CPU {:?} %, memory {:?} MiB, GPU busy {:?} %, GPU latency {:.2} ms, audio {:.0} AX/s {:.0} AI/s\n",
+                s.guest_fps, s.shown_fps, s.display_hz, s.draw_ms_per_s, s.interp_ms_per_s,
+                s.cpu_process, s.rss_mib, s.gpu_busy, s.gpu_latency_ms, s.ax_per_s, s.ai_per_s
+            ));
+            if let Some((avg, p99, worst)) = s.frame_summary() {
+                t.push_str(&format!("frame interval: average {avg:.2} ms, 1% worst {p99:.2} ms, worst {worst:.2} ms over {} frames\n", s.frame_ms.len()));
+            }
+            for th in s.threads.iter().take(8) {
+                t.push_str(&format!("thread {}: {:.0} %\n", th.name, th.percent));
+            }
+        }
+        t
     }
 
     /// Show a finished frame: right away, or (with `mult > 1`) as the plan of interpolated images
     /// followed by the real one.
     fn show_frame(&mut self, c: &CopyEfb) {
         self.apply_settings();
+        // the window may have changed size
+        self.sync_scale();
         // the player changed the bindings or the button-name family: icons made before are stale
         let icon_gen = self
             .overlay
@@ -2089,19 +2320,22 @@ impl Renderer {
             .as_ref()
             .is_some_and(|d| self.frame % d.every == 0)
         {
-            self.read_alt = true;
             let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
-            let rgba = self.read_efb(c.x, c.y, w, h);
-            self.read_alt = false;
+            let (pw, ph, rgba) = if self.shows_plain() {
+                self.read_alt = true;
+                let rgba = self.read_efb(c.x, c.y, w, h);
+                self.read_alt = false;
+                (w * self.scale, h * self.scale, rgba)
+            } else {
+                self.read_filtered(c, true)
+            };
+            let rgb: Vec<u8> = rgba
+                .chunks_exact(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
             let name = format!("frame_{:05}_t{:02}.png", self.frame, (t * 100.0) as u32);
             let path = self.dump.as_ref().expect("dump").dir.join(name);
-            write_png(
-                &path,
-                w * self.scale,
-                h * self.scale,
-                png::ColorType::Rgb,
-                &to_rgb(&rgba),
-            );
+            write_png(&path, pw, ph, png::ColorType::Rgb, &rgb);
         }
     }
 
@@ -2300,6 +2534,8 @@ struct StatsState {
     backend: String,
     /// Submission-to-completion time of the last batch of GPU work, in microseconds.
     gpu_latency_us: Arc<std::sync::atomic::AtomicU32>,
+    /// Whether the device can time the scaling pass.
+    timestamps: bool,
     at: Instant,
     frames: u32,
     shown: u64,
@@ -2310,7 +2546,7 @@ struct StatsState {
 }
 
 impl StatsState {
-    fn new(info: &wgpu::AdapterInfo) -> StatsState {
+    fn new(info: &wgpu::AdapterInfo, timestamps: bool) -> StatsState {
         use std::sync::atomic::Ordering::Relaxed;
         StatsState {
             frame_ms: Default::default(),
@@ -2320,6 +2556,7 @@ impl StatsState {
             gpu_name: info.name.clone(),
             backend: format!("{:?}", info.backend),
             gpu_latency_us: Arc::new(Default::default()),
+            timestamps,
             at: Instant::now(),
             frames: 0,
             shown: 0,
@@ -2382,6 +2619,10 @@ impl Renderer {
             threads: cpu.threads,
             gpu_busy: st.gpu_busy_path.as_deref().and_then(sysstat::read_gpu_busy),
             gpu_latency_ms: st.gpu_latency_us.load(Relaxed) as f32 / 1000.0,
+            // 0 until a measurement came in (a plain frame dump has no scaling pass)
+            scaling_gpu_ms: Some(self.post_us.load(Relaxed))
+                .filter(|&us| st.timestamps && us > 0)
+                .map(|us| us as f32 / 1000.0),
             gpu_name: st.gpu_name.clone(),
             backend: st.backend.clone(),
             target: (EFB_WIDTH * self.scale, EFB_HEIGHT * self.scale),
