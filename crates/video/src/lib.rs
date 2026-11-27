@@ -391,6 +391,60 @@ fn make_targets(device: &wgpu::Device, scale: u32) -> Targets {
     }
 }
 
+/// Read `size` pixels at `origin` of an RGBA8 texture back to the CPU.
+fn read_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    origin: (u32, u32),
+    size: (u32, u32),
+) -> Vec<u8> {
+    let (w, h) = size;
+    let row = (w * 4).div_ceil(256) * 256;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (row * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: origin.0,
+                y: origin.1,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([enc.finish()]);
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait);
+    let data = slice.get_mapped_range();
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for r in 0..h {
+        out.extend_from_slice(&data[(r * row) as usize..(r * row + w * 4) as usize]);
+    }
+    out
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -425,6 +479,10 @@ pub struct Renderer {
     alt: wgpu::Texture,
     /// `read_efb` reads the interpolation target instead (frame dumps).
     read_alt: bool,
+    /// The render filters (ADR 0039); the window's presenter has its own copy, this one filters dumps.
+    filters: fepor_core::settings::Filters,
+    /// The filter pass for frame dumps, made when a dump first needs it.
+    dump_post: Option<present::Post>,
     alt_depth_view: wgpu::TextureView,
     /// The last real frame, kept so it can be shown after the interpolated ones.
     xfb: wgpu::Texture,
@@ -579,6 +637,7 @@ impl Renderer {
                 s,
                 window.clone().expect("surface implies window"),
                 mult > 1,
+                settings.get().video.filters,
             )
         });
 
@@ -698,6 +757,8 @@ impl Renderer {
             xfb,
             alt,
             read_alt: false,
+            filters: settings.get().video.filters,
+            dump_post: None,
             xfb_view,
             rec: Vec::new(),
             prev: None,
@@ -1676,53 +1737,81 @@ impl Renderer {
     pub fn read_efb(&mut self, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
         self.flush();
         let s = self.scale;
-        let (w, h) = (
-            w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
-            h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)) * s,
-        );
-        let row = (w * 4).div_ceil(256) * 256;
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (row * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: if self.read_alt { &self.alt } else { &self.efb },
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: x * s,
-                    y: y * s,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
+        let tex = if self.read_alt { &self.alt } else { &self.efb };
+        read_texture(
+            &self.device,
+            &self.queue,
+            tex,
+            (x.min(EFB_WIDTH) * s, y.min(EFB_HEIGHT) * s),
+            (
+                w.min(EFB_WIDTH - x.min(EFB_WIDTH)) * s,
+                h.min(EFB_HEIGHT - y.min(EFB_HEIGHT)) * s,
+            ),
+        )
+    }
+
+    /// The frame `c` of the EFB (or of the interpolation target with `alt`) as the window would show it:
+    /// through the render filters, at least 3x the GameCube's size so that scanlines and mask have room, and
+    /// with the overlay drawn on top, unfiltered, when there is no window to draw it on.
+    fn read_filtered(&mut self, c: &CopyEfb, alt: bool) -> (u32, u32, Vec<u8>) {
+        self.flush();
+        let s = self.scale.max(3);
+        let (w, h) = (c.width.clamp(1, EFB_WIDTH), c.height.clamp(1, EFB_HEIGHT));
+        let (tw, th) = (w * s, h * s);
+        let out = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("filtered dump"),
+            size: wgpu::Extent3d {
+                width: tw,
+                height: th,
                 depth_or_array_layers: 1,
             },
-        );
-        self.queue.submit([enc.finish()]);
-        let slice = buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.device.poll(wgpu::PollType::Wait);
-        let data = slice.get_mapped_range();
-        let mut out = Vec::with_capacity((w * h * 4) as usize);
-        for r in 0..h {
-            out.extend_from_slice(&data[(r * row) as usize..(r * row + w * 4) as usize]);
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = out.create_view(&Default::default());
+        let post = self.dump_post.get_or_insert_with(|| {
+            present::Post::new(&self.device, wgpu::TextureFormat::Rgba8Unorm)
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("filtered dump"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let src = if alt { &self.alt_view } else { &self.efb_view };
+            post.draw(&self.device, &mut pass, src, c, &self.filters);
         }
-        out
+        if self.presenter.is_none() {
+            if let Some(o) = &mut self.overlay {
+                o.paint(
+                    &self.device,
+                    &self.queue,
+                    &mut enc,
+                    &view,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    [tw, th],
+                    s as f32,
+                );
+            }
+        }
+        self.queue.submit([enc.finish()]);
+        let rgba = read_texture(&self.device, &self.queue, &out, (0, 0), (tw, th));
+        (tw, th, rgba)
     }
 
     /// Apply what the player changed in the settings overlay since the last frame.
@@ -1735,6 +1824,7 @@ impl Renderer {
         let s = self.settings.get();
         if let Some(p) = &mut self.presenter {
             p.set_aspect(s.video.aspect);
+            p.set_filters(s.video.filters.clone());
             p.set_fullscreen(s.video.fullscreen);
         }
         let mult = if self.interpolates {
@@ -1750,6 +1840,7 @@ impl Renderer {
             self.plan = None;
             self.rec.clear();
         }
+        self.filters = s.video.filters.clone();
         self.vsync = s.video.vsync;
         self.show_stats = s.video.stats != fepor_core::settings::StatsMode::Off;
         if let (true, Some(p)) = (paced_changed, &mut self.presenter) {
@@ -1848,21 +1939,23 @@ impl Renderer {
         }
         let path = d.dir.join(format!("frame_{:05}.png", self.frame));
         let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
-        if self.presenter.is_none() {
-            self.paint_overlay_on_efb();
-        }
-        let rgba = self.read_efb(c.x, c.y, w, h);
+        let (pw, ph, rgba) = if self.filters.is_identity() {
+            if self.presenter.is_none() {
+                self.paint_overlay_on_efb();
+            }
+            (
+                w * self.scale,
+                h * self.scale,
+                self.read_efb(c.x, c.y, w, h),
+            )
+        } else {
+            self.read_filtered(c, false)
+        };
         let rgb: Vec<u8> = rgba
             .chunks_exact(4)
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
-        write_png(
-            &path,
-            w * self.scale,
-            h * self.scale,
-            png::ColorType::Rgb,
-            &rgb,
-        );
+        write_png(&path, pw, ph, png::ColorType::Rgb, &rgb);
     }
 
     /// The Help page's "Make bug report" (ADR 0047): the picture being shown now and the renderer's state go
@@ -2086,23 +2179,22 @@ impl Renderer {
             .as_ref()
             .is_some_and(|d| self.frame % d.every == 0)
         {
-            self.read_alt = true;
             let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
-            let rgba = self.read_efb(c.x, c.y, w, h);
-            self.read_alt = false;
+            let (pw, ph, rgba) = if self.filters.is_identity() {
+                self.read_alt = true;
+                let rgba = self.read_efb(c.x, c.y, w, h);
+                self.read_alt = false;
+                (w * self.scale, h * self.scale, rgba)
+            } else {
+                self.read_filtered(c, true)
+            };
             let rgb: Vec<u8> = rgba
                 .chunks_exact(4)
                 .flat_map(|p| [p[0], p[1], p[2]])
                 .collect();
             let name = format!("frame_{:05}_t{:02}.png", self.frame, (t * 100.0) as u32);
             let path = self.dump.as_ref().expect("dump").dir.join(name);
-            write_png(
-                &path,
-                w * self.scale,
-                h * self.scale,
-                png::ColorType::Rgb,
-                &rgb,
-            );
+            write_png(&path, pw, ph, png::ColorType::Rgb, &rgb);
         }
     }
 

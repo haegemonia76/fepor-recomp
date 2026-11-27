@@ -87,6 +87,91 @@ impl StatsMode {
     }
 }
 
+/// The phosphor mask of a CRT, drawn over the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mask {
+    #[default]
+    Off,
+    /// Vertical red, green and blue stripes (aperture grille).
+    Grille,
+    /// Red, green and blue dots in staggered rows (shadow mask).
+    Dots,
+}
+
+impl Mask {
+    pub const ALL: [Mask; 3] = [Mask::Off, Mask::Grille, Mask::Dots];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mask::Off => "Off",
+            Mask::Grille => "Stripes (aperture grille)",
+            Mask::Dots => "Dots (shadow mask)",
+        }
+    }
+}
+
+/// Post-processing of the presented image (ADR 0039). The defaults leave the picture untouched.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Filters {
+    /// Darkness of the gaps between the game's scanlines, 0.0 (none) ..= 1.0 (black).
+    pub scanlines: f32,
+    /// Display gamma: above 1.0 brightens the mid-tones, below darkens them. 0.5..=2.0.
+    pub gamma: f32,
+    /// 0.0 (grey) ..= 2.0; 1.0 is the original colours.
+    pub saturation: f32,
+    /// 0.5 ..= 1.5; 1.0 is the original contrast.
+    pub contrast: f32,
+    /// -0.5 ..= 0.5; 0.0 is the original brightness.
+    pub brightness: f32,
+    pub mask: Mask,
+    /// How strongly the mask darkens the two colours a sub-pixel does not show, 0.0 ..= 1.0.
+    pub mask_strength: f32,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Filters {
+            scanlines: 0.0,
+            gamma: 1.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 0.0,
+            mask: Mask::Off,
+            mask_strength: 0.5,
+        }
+    }
+}
+
+impl Filters {
+    /// Whether the picture is shown exactly as the game drew it.
+    pub fn is_identity(&self) -> bool {
+        self.scanlines <= 0.0
+            && self.gamma == 1.0
+            && self.saturation == 1.0
+            && self.contrast == 1.0
+            && self.brightness == 0.0
+            && (self.mask == Mask::Off || self.mask_strength <= 0.0)
+    }
+
+    pub fn clamp(&mut self) {
+        let fix = |v: &mut f32, lo: f32, hi: f32, default: f32| {
+            *v = if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                default
+            };
+        };
+        fix(&mut self.scanlines, 0.0, 1.0, 0.0);
+        fix(&mut self.gamma, 0.5, 2.0, 1.0);
+        fix(&mut self.saturation, 0.0, 2.0, 1.0);
+        fix(&mut self.contrast, 0.5, 1.5, 1.0);
+        fix(&mut self.brightness, -0.5, 0.5, 0.0);
+        fix(&mut self.mask_strength, 0.0, 1.0, 0.5);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Video {
@@ -103,6 +188,8 @@ pub struct Video {
     /// Size of the overlay's text and widgets: 0 follows the window height (1x at 720 pixels), otherwise a
     /// multiple of the display's scale factor.
     pub overlay_scale: f32,
+    /// Scanlines, colour correction and mask applied to the presented image (not to the overlay).
+    pub filters: Filters,
 }
 
 impl Default for Video {
@@ -115,6 +202,7 @@ impl Default for Video {
             vsync: true,
             stats: StatsMode::Off,
             overlay_scale: 0.0,
+            filters: Filters::default(),
         }
     }
 }
@@ -246,6 +334,7 @@ impl Settings {
         self.video.frame_multiplier = self.video.frame_multiplier.clamp(1, 8);
         self.video.resolution = self.video.resolution.clamp(1, 4);
         self.video.overlay_scale = self.video.overlay_scale.clamp(0.0, 4.0);
+        self.video.filters.clamp();
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
         self.game.card_backups = self.game.card_backups.min(50);
     }
@@ -425,6 +514,8 @@ mod tests {
         let mut s = Settings::default();
         s.video.frame_multiplier = 3;
         s.video.aspect = Aspect::Wide16x9;
+        s.video.filters.scanlines = 0.25;
+        s.video.filters.mask = Mask::Dots;
         s.audio.volume = 0.4;
         s.game.language = Language::Italian;
         s.save(&path).unwrap();
@@ -439,6 +530,10 @@ mod tests {
             (l.video.frame_multiplier, l.video.resolution, l.audio.volume),
             (8, 1, 1.0)
         );
+        assert!(Settings::default().video.filters.is_identity());
+        std::fs::write(&path, "[video.filters]\ngamma = 9.0\nscanlines = -1.0\n").unwrap();
+        let f = Settings::load(&path).video.filters;
+        assert_eq!((f.gamma, f.scanlines), (2.0, 0.0));
     }
 
     #[test]

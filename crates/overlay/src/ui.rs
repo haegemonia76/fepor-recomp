@@ -416,6 +416,8 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
         ui.radio_value(&mut s.video.aspect, a, a.label());
     }
     ui.add_space(8.0);
+    filters(ui, &mut s.video.filters);
+    ui.add_space(8.0);
     ui.checkbox(&mut s.video.fullscreen, "Fullscreen");
     ui.checkbox(
         &mut s.video.vsync,
@@ -439,6 +441,32 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     );
     if s != before {
         shared.settings.update(|x| *x = s);
+    }
+}
+
+/// The render filters: they change the picture only, never the overlay.
+fn filters(ui: &mut egui::Ui, f: &mut fepor_core::settings::Filters) {
+    use fepor_core::settings::{Filters, Mask};
+    ui.label(crate::theme::caption("Picture filters"));
+    let slider =
+        |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>| {
+            ui.label(RichText::new(label).small());
+            ui.add(egui::Slider::new(v, range).custom_formatter(|x, _| format!("{x:.2}")));
+        };
+    slider(ui, "Scanlines", &mut f.scanlines, 0.0..=1.0);
+    slider(ui, "Gamma", &mut f.gamma, 0.5..=2.0);
+    slider(ui, "Saturation", &mut f.saturation, 0.0..=2.0);
+    slider(ui, "Contrast", &mut f.contrast, 0.5..=1.5);
+    slider(ui, "Brightness", &mut f.brightness, -0.5..=0.5);
+    ui.label(RichText::new("Screen mask").small());
+    for m in Mask::ALL {
+        ui.radio_value(&mut f.mask, m, m.label());
+    }
+    if f.mask != Mask::Off {
+        slider(ui, "Mask strength", &mut f.mask_strength, 0.0..=1.0);
+    }
+    if ui.button("Reset filters").clicked() {
+        *f = Filters::default();
     }
 }
 
