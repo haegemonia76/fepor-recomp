@@ -71,6 +71,8 @@ pub struct UiState {
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
+    /// Result of the last "Make bug report" click.
+    report_message: String,
 }
 
 impl UiState {
@@ -85,6 +87,7 @@ impl UiState {
             pending_at: None,
             pad: crate::pad::PadView::default(),
             pad_selected: None,
+            report_message: String::new(),
         }
     }
 }
@@ -319,7 +322,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
-            Page::Help => help(ui, shared),
+            Page::Help => help(ui, st, shared),
             Page::Quit => quit(ui),
         });
         ui.separator();
@@ -794,7 +797,7 @@ fn export(card: &std::path::Path, dir: &std::path::Path) -> String {
     }
 }
 
-fn help(ui: &mut egui::Ui, shared: &Shared) {
+fn help(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     ui.label("F1 (keyboard) or Guide / Back (gamepad): open and close this menu.");
     ui.label("While it is open the game sees no input.");
     ui.add_space(6.0);
@@ -812,6 +815,21 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         "Bindings: {}",
         shared.data_dir.join("input.toml").display()
     ));
+    ui.add_space(6.0);
+    if ui.button("Make bug report").clicked() {
+        st.report_message = match fepor_core::bugreport::create_default(&shared.data_dir) {
+            Ok(p) => format!("Saved {}", p.display()),
+            Err(e) => format!("Bug report failed: {e}"),
+        };
+    }
+    ui.label(
+        RichText::new("A zip with the log, settings, bindings and system information: no saves, no game data, no home folder in paths. Attach it to the report.")
+            .small()
+            .weak(),
+    );
+    if !st.report_message.is_empty() {
+        ui.label(&st.report_message);
+    }
     ui.add_space(6.0);
     ui.label(
         RichText::new("FEPOR_FPS_MULT, FEPOR_RES and FEPOR_ASPECT override the saved video settings for one run.")

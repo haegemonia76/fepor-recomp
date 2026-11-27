@@ -544,6 +544,10 @@ impl Renderer {
         }))
         .map_err(|e| format!("device: {e}"))?;
         let adapter_info = adapter.get_info();
+        if let Some(o) = &overlay {
+            o.shared()
+                .record_gpu(&adapter_info.name, &format!("{:?}", adapter_info.backend));
+        }
         // Images shown per guest frame (interpolated between consecutive frames), windowed or dumped only.
         let interpolates = window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok();
         let mult: u32 = if interpolates {

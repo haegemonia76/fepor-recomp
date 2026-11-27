@@ -172,6 +172,16 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
     let mut disc = open_disc(&game).map_err(|e| e.to_string())?;
     let bytes = disc.dol().map_err(|e| e.to_string())?;
     version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
+    // for `fepor-recomp bug-report`; the renderer adds the GPU adapter
+    fepor_core::bugreport::update_session(&data, |s| {
+        *s = fepor_core::bugreport::Session {
+            build: fepor_core::bugreport::build_string(),
+            engine: if cfg!(feature = "jit") { "jit" } else { "cpp" }.into(),
+            game_id: disc.game_id().to_string(),
+            trace: std::env::var("FEPOR_TRACE").unwrap_or_default(),
+            ..Default::default()
+        }
+    });
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
     #[cfg(feature = "jit")]
     install_jit(disc.game_id(), &dol);

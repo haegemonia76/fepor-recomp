@@ -135,6 +135,14 @@ impl Shared {
         self.guest_fps_x100.load(Ordering::Relaxed) as f32 / 100.0
     }
 
+    /// The renderer names the GPU adapter once, for the bug report.
+    pub fn record_gpu(&self, name: &str, backend: &str) {
+        fepor_core::bugreport::update_session(&self.data_dir, |s| {
+            s.gpu = name.into();
+            s.gpu_backend = backend.into();
+        });
+    }
+
     /// The renderer publishes the statistics here a few times per second.
     pub fn set_stats(&self, stats: StatsSnapshot) {
         *self.stats.lock().unwrap_or_else(|e| e.into_inner()) = stats;

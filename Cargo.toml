@@ -30,3 +30,4 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 ruzstd = "0.8"
 ppc750cl = "0.3"
 tempfile = "3"
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

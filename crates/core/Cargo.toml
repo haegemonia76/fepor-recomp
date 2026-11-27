@@ -12,6 +12,7 @@ thiserror.workspace = true
 flate2.workspace = true
 ruzstd.workspace = true
 ppc750cl.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
