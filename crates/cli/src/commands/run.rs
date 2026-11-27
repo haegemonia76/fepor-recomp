@@ -58,7 +58,8 @@ pub fn run(opts: &Options) -> Result<(), Fail> {
 
     let program = game_program();
     let mut cmd = Command::new(&program);
-    cmd.arg("--data").arg(data);
+    // the log below is the game's log: the game must not keep a second one (ADR 0047)
+    cmd.env("FEPOR_LOGGED", "1").arg("--data").arg(data);
     if let Ok(game) = opts.disc() {
         cmd.arg("--game").arg(game);
     }

@@ -31,6 +31,9 @@ use crate::ax::{Ax, Mem};
 /// Receives the audio the game plays: interleaved left/right 16-bit samples at `rate` Hz.
 pub trait AudioSink: Send {
     fn push(&mut self, rate: u32, samples: &[i16]);
+
+    /// Drop what was queued but not played yet (a save state was loaded: that audio is from another moment).
+    fn discard(&mut self) {}
 }
 
 /// Mail the boot task sends once the SDK's ucode is running (DSP_INIT).
@@ -321,5 +324,43 @@ impl Dsp {
 impl Default for Dsp {
     fn default() -> Self {
         Dsp::new()
+    }
+}
+
+impl Dsp {
+    pub fn save(&self, w: &mut fepor_core::snap::W) {
+        w.bytes(&self.regs);
+        w.u16(self.control);
+        w.u32(self.to_dsp);
+        w.u32(self.from_dsp);
+        w.bytes(&self.aram);
+        w.bool(self.expect_start);
+        self.ax.save(w);
+        w.bool(self.ax_on);
+        w.bool(self.ai_dma_on);
+        w.u32(self.ai_dma_len);
+        // when the current buffer finishes, relative to now (may already be past)
+        w.bool(self.ai_next.is_some());
+        w.u64(self.ai_next.map_or(0, crate::state::until));
+        w.bool(self.ai_start_written);
+    }
+
+    pub fn load(&mut self, r: &mut fepor_core::snap::R) {
+        r.bytes_into(&mut self.regs);
+        self.control = r.u16();
+        self.to_dsp = r.u32();
+        self.from_dsp = r.u32();
+        r.bytes_into(&mut self.aram);
+        self.expect_start = r.bool();
+        self.ax.load(r);
+        self.ax_on = r.bool();
+        self.ai_dma_on = r.bool();
+        self.ai_dma_len = r.u32();
+        let has_next = r.bool();
+        let next = r.u64();
+        self.ai_next = has_next.then(|| crate::state::from_now(next));
+        self.ai_start_written = r.bool();
+        // buffers the old audio output had not played yet belong to a moment that no longer exists
+        self.pending_audio.clear();
     }
 }

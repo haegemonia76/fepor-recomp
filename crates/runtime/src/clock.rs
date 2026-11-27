@@ -37,3 +37,14 @@ pub fn now_ns() -> u64 {
     }
     seg.guest_ns + (real - seg.real_ns) * milli as u64 / 1000
 }
+
+/// Make the guest clock read `ns` now (loading a save state): time continues from there at the current speed.
+pub fn set_ns(ns: u64) {
+    let real = EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64;
+    let mut seg = SEGMENT.lock().unwrap_or_else(|e| e.into_inner());
+    *seg = Segment {
+        real_ns: real,
+        guest_ns: ns,
+        milli: fepor_core::speed::milli(),
+    };
+}

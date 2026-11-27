@@ -76,6 +76,11 @@ impl AudioSink for SdlSink {
         };
         let _ = self.tx.send((rate, out));
     }
+
+    fn discard(&mut self) {
+        // an empty buffer at rate 0 tells the audio thread to drop what is queued
+        let _ = self.tx.send((0, Vec::new()));
+    }
 }
 
 fn sdl_thread(
@@ -114,6 +119,15 @@ fn sdl_thread(
                 .unwrap_or_default();
             if let Ok(mut d) = devices.lock() {
                 if *d != names {
+                    fepor_core::bugreport::note(
+                        "audio",
+                        format!(
+                            "SDL {}\naudio driver: {}\nplayback devices:\n{}",
+                            sdl3::version::version(),
+                            audio.current_audio_driver(),
+                            names.iter().map(|n| format!("  {n}\n")).collect::<String>()
+                        ),
+                    );
                     *d = names;
                 }
             }
@@ -126,7 +140,7 @@ fn sdl_thread(
                 stream = None;
             }
         }
-        if r != rate || stream.is_none() {
+        if r != 0 && (r != rate || stream.is_none()) {
             rate = r;
             let spec = AudioSpec {
                 freq: Some(r as i32),
@@ -149,6 +163,13 @@ fn sdl_thread(
             if let Some(s) = &stream {
                 let _ = s.resume();
             }
+        }
+        if r == 0 {
+            // the guest loaded a save state: what is queued is from another moment
+            if let Some(s) = &stream {
+                let _ = s.clear();
+            }
+            continue;
         }
         if let Some(s) = &stream {
             let queued = s.queued_bytes().unwrap_or(0);
@@ -181,6 +202,15 @@ fn sdl_thread(
     drop(sdl);
 }
 
+/// Feeds the video recorder (ADR 0044); does nothing while no recording runs.
+struct CaptureSink(Arc<fepor_core::capture::Capture>);
+
+impl AudioSink for CaptureSink {
+    fn push(&mut self, rate: u32, samples: &[i16]) {
+        self.0.push_audio(rate, samples);
+    }
+}
+
 /// Duplicates audio to several sinks.
 struct Tee(Vec<Box<dyn AudioSink>>);
 
@@ -188,6 +218,12 @@ impl AudioSink for Tee {
     fn push(&mut self, rate: u32, samples: &[i16]) {
         for s in &mut self.0 {
             s.push(rate, samples);
+        }
+    }
+
+    fn discard(&mut self) {
+        for s in &mut self.0 {
+            s.discard();
         }
     }
 }
@@ -217,15 +253,17 @@ impl AudioSink for SpeedPolicy {
 }
 
 /// The audio output selected by the environment: SDL3 unless `FEPOR_NO_AUDIO` is set (played at the volume
-/// of `settings`), plus a WAV dump when `FEPOR_DUMP_AUDIO` names a file (always at full volume). `None` when
-/// nothing could be opened.
+/// of `settings`), plus a WAV dump when `FEPOR_DUMP_AUDIO` names a file (always at full volume) and the tap
+/// of the video recorder `capture`.
 pub fn open(
     settings: SettingsHandle,
     devices: Arc<Mutex<Vec<String>>>,
+    capture: Arc<fepor_core::capture::Capture>,
 ) -> Option<Box<dyn AudioSink>> {
     let thread_settings = settings.clone();
     let policy_settings = settings.clone();
-    let mut sinks: Vec<Box<dyn AudioSink>> = Vec::new();
+    // the recorder gets the audio at full volume, as the WAV dump does
+    let mut sinks: Vec<Box<dyn AudioSink>> = vec![Box::new(CaptureSink(capture))];
     if let Ok(path) = std::env::var("FEPOR_DUMP_AUDIO") {
         match WavSink::create(&path) {
             Ok(w) => sinks.push(Box::new(w)),
@@ -246,7 +284,6 @@ pub fn open(
         }
     }
     let inner: Box<dyn AudioSink> = match sinks.len() {
-        0 => return None,
         1 => sinks.pop()?,
         _ => Box::new(Tee(sinks)),
     };

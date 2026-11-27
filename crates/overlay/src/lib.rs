@@ -4,6 +4,8 @@
 //! [`Overlay`], runs the UI once per presented image and paints it with our own wgpu painter.
 
 pub mod glyphs;
+mod memory;
+mod mods;
 mod outlines;
 mod pad;
 mod paint;
@@ -17,7 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fepor_core::settings::StatsMode;
-pub use shared::Shared;
+pub use shared::{ReportHook, Shared};
 pub use stats::{StatsSnapshot, ThreadLoad};
 
 pub struct Overlay {
@@ -70,9 +72,46 @@ impl Overlay {
         size_px: [u32; 2],
         ppp: f32,
     ) {
+        self.draw(device, queue, enc, view, format, size_px, ppp, false);
+    }
+
+    /// Like [`Overlay::paint`] for a screenshot or video frame: the window keeps the input events and the
+    /// pointer scale of its own image.
+    pub fn paint_capture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        enc: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size_px: [u32; 2],
+        ppp: f32,
+    ) {
+        self.draw(device, queue, enc, view, format, size_px, ppp, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        enc: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size_px: [u32; 2],
+        ppp: f32,
+        capture: bool,
+    ) {
         let open = self.shared.is_open();
+        self.ui.memory_tick(&self.shared);
         let video = self.shared.settings.get().video;
-        if !open && video.stats == StatsMode::Off {
+        if !open
+            && video.stats == StatsMode::Off
+            && !ui::capture_hud_shown(&self.shared.capture)
+            && self.shared.notice().is_none()
+            && fepor_core::states::message().is_none()
+        {
+            self.shared.memory.set_active(self.ui.memory_live());
             return;
         }
         // 0 = auto: 1x at a 720-pixel-high window, growing with it, so the text stays readable on big screens
@@ -81,14 +120,20 @@ impl Overlay {
         } else {
             (size_px[1] as f32 / 720.0).clamp(1.0, 4.0)
         };
-        self.shared.set_ui_ppp(ppp);
+        if !capture {
+            self.shared.set_ui_ppp(ppp);
+        }
         let mut raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(size_px[0] as f32 / ppp, size_px[1] as f32 / ppp),
             )),
             time: Some(self.start.elapsed().as_secs_f64()),
-            events: self.shared.take_events(),
+            events: if capture {
+                Vec::new()
+            } else {
+                self.shared.take_events()
+            },
             focused: true,
             ..Default::default()
         };

@@ -42,6 +42,21 @@ leave the game's alarms, the decrementer and the sound mixer at real time and br
 - **Measurement.** `FEPOR_TRACE=vi` prints once a second the retraces and the game frames per real second and
   the factor; the statistics HUD shows the factor when it is not x1.
 
+## With save states, playtime, bug reports and capture
+
+- **Save states (ADR 0035).** A state stores the time base and the offsets of the retrace, the audio DMA and the
+  sample counter as guest-clock values, not real time. Loading calls `clock::set_ns` with the state's time base
+  (the guest clock continues from there at the speed in force) and `state::until`/`from_now`/`ago` work in
+  guest microseconds, so a state taken at x4 loads at x1 (and the reverse) without a jump in the decrementer,
+  the retrace schedule or the audio counter. The speed itself is not part of a state. The rewind buffer keeps a
+  state every *real* second and steps back every 120 real ms, so at x4 a buffer of N seconds covers 4 N of
+  game time; rewinding at any speed restores the clock the same way.
+- **Playtime (#53)** counts real seconds (its own one-second wall-clock thread), so x4 does not count four times.
+- **Bug report (#52):** `report.txt` has a "speed" section (mode and clock factor at the last change).
+- **Capture (#55):** screenshots work at any speed. A video has one frame rate and real-time sound, so it is
+  refused at any speed other than x1 ("cannot record: videos are made at normal game speed only") and a
+  running recording is stopped with a message when the speed changes.
+
 ## Battle animations
 
 The game has its own switch: the options menu (`Mess/common.m`, "Animation: Adjust combat animation", "Turn

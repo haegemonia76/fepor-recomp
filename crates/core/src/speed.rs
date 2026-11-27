@@ -109,6 +109,19 @@ pub fn set(speed: Speed) {
         (speed.factor() * 1000.0) as u32
     };
     MILLI.store(milli, Ordering::Release);
+    crate::bugreport::note(
+        "speed",
+        format!(
+            "mode: {}\nclock factor at the last change: x{}{}",
+            speed.label(),
+            milli as f32 / 1000.0,
+            if uncapped {
+                " (steered by the host's speed)"
+            } else {
+                ""
+            }
+        ),
+    );
 }
 
 /// Guest seconds per real second right now.

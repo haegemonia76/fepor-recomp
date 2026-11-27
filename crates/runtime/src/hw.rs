@@ -10,6 +10,7 @@ use crate::di::Di;
 use crate::dsp::{AudioSink, Dsp};
 use crate::exi::Exi;
 use crate::si::Si;
+use fepor_core::snap::W;
 use fepor_gx::{Event, Gx, Sink};
 
 pub const PHYS_BASE: u32 = 0x0C00_0000;
@@ -154,6 +155,7 @@ impl Hw {
         while now >= self.vi_next {
             self.vi_next += self.vi_period;
             self.retraces += 1;
+            fepor_core::stats::RETRACES.store(self.retraces, std::sync::atomic::Ordering::Relaxed);
             self.si.retrace(self.retraces);
             for di in &mut self.vi_di {
                 if *di & VI_INT_ENABLE != 0 {
@@ -520,4 +522,60 @@ struct NullSink;
 
 impl AudioSink for NullSink {
     fn push(&mut self, _rate: u32, _samples: &[i16]) {}
+}
+
+impl Hw {
+    /// A hash of the video backend's picture, for the state trace.
+    pub fn efb_hash(&mut self) -> Option<u64> {
+        self.sink.picture_hash()
+    }
+
+    /// Write the hardware state (save states, ADR 0035). Times are written relative to now.
+    pub fn save_state(&mut self, w: &mut fepor_core::snap::W) {
+        w.bytes(&self.mem);
+        w.bytes(&self.locked);
+        w.u32s(&self.vi_di);
+        w.u64(crate::state::until(self.vi_next));
+        w.u64(self.retraces);
+        self.exi.save(w);
+        self.dsp.save(w);
+        self.di.save(w);
+        self.ai.save(w);
+        self.si.save(w);
+        self.gx.save_state(w);
+        w.bytes(&self.fifo);
+        w.u16(self.pe_intsr);
+        w.u16(self.pe_token);
+        w.bool(self.pe_finish_pending);
+        let mut sink = W::new();
+        self.sink.save_state(&mut sink);
+        w.bytes(&sink.buf);
+    }
+
+    pub fn load_state(&mut self, r: &mut fepor_core::snap::R, ram: &[u8]) {
+        r.bytes_into(&mut self.mem);
+        r.bytes_into(&mut self.locked);
+        r.u32s_into(&mut self.vi_di);
+        self.vi_next = crate::state::from_now(r.u64());
+        self.retraces = r.u64();
+        self.exi.load(r);
+        self.dsp.load(r);
+        self.di.load(r);
+        self.ai.load(r);
+        self.si.load(r);
+        self.gx.load_state(r);
+        self.fifo = r.bytes().to_vec();
+        self.pe_intsr = r.u16();
+        self.pe_token = r.u16();
+        self.pe_finish_pending = r.bool();
+        let sink = r.bytes();
+        let mut sr = fepor_core::snap::R::new(sink);
+        self.sink.load_state(&mut sr, ram);
+        if sr.failed {
+            r.failed = true;
+        }
+        if let Some(a) = self.audio.as_mut() {
+            a.discard();
+        }
+    }
 }
