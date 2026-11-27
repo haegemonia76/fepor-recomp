@@ -39,7 +39,7 @@ fn info(subsystem: &GamepadSubsystem, id: u32) -> DeviceInfo {
     }
 }
 
-/// Tell the bug report which controllers are connected (name, GUID, player index).
+/// Tell the bug report which controllers are connected (name, GUID, SDL index).
 fn note_pads(subsystem: &sdl3::GamepadSubsystem, open: &HashMap<u32, Gamepad>) {
     let mut t = format!("SDL {}\n", sdl3::version::version());
     if open.is_empty() {
@@ -49,7 +49,7 @@ fn note_pads(subsystem: &sdl3::GamepadSubsystem, open: &HashMap<u32, Gamepad>) {
     ids.sort();
     for id in ids {
         t.push_str(&format!(
-            "controller: {} (GUID {}, player index {:?})\n",
+            "controller: {} (GUID {}, SDL index {:?})\n",
             open[id].name().unwrap_or_default(),
             subsystem.guid_for_id(*id).string(),
             subsystem.player_index_for_id(*id)

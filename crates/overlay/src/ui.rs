@@ -704,7 +704,10 @@ fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Contro
         .num_columns(3)
         .show(ui, |ui| {
             for pad in &pads {
-                if ui.radio(edited == Some(pad.id), &pad.name).clicked() {
+                if ui
+                    .radio(edited == Some(pad.id), pad.display_name())
+                    .clicked()
+                {
                     c.select_pad(pad.id);
                     st.pad_selected = None;
                 }
@@ -713,14 +716,10 @@ fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Contro
                 } else {
                     ""
                 });
-                ui.label(
-                    RichText::new(format!(
-                        "profile {}",
-                        pad.guid.chars().take(8).collect::<String>()
-                    ))
-                    .small()
-                    .color(crate::theme::DIM),
-                );
+                if let Some((text, hover)) = c.profile_label(pad.id) {
+                    ui.label(RichText::new(text).small().color(crate::theme::DIM))
+                        .on_hover_text(hover);
+                }
                 ui.end_row();
             }
         });

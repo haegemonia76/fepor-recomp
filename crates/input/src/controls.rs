@@ -22,6 +22,16 @@ pub struct DeviceInfo {
     pub name: String,
 }
 
+impl DeviceInfo {
+    /// The name to show: the pad's own, or a generic one when it reports none.
+    pub fn display_name(&self) -> &str {
+        match self.name.trim() {
+            "" => "Unknown gamepad",
+            n => n,
+        }
+    }
+}
+
 /// Where an input event comes from.
 #[derive(Clone, Copy)]
 enum Origin {
@@ -37,6 +47,9 @@ pub struct Controls {
     /// Live state of the virtual pad: the keyboard and the active gamepad feed it.
     pub(crate) state: InputState,
     pads: Vec<DeviceInfo>,
+    /// GUIDs of the models plugged in so far, in order of first plug (numbers the profiles of pads that
+    /// report no name).
+    models: Vec<String>,
     /// The gamepad that drives the game: the one plugged in last or pressed last (the first one when that
     /// one is gone).
     active: Option<u32>,
@@ -60,6 +73,7 @@ impl Controls {
             cfg: InputConfig::load_or_create(&path),
             state: InputState::default(),
             pads: Vec::new(),
+            models: Vec::new(),
             active: None,
             selected: None,
             remap: None,
@@ -106,6 +120,30 @@ impl Controls {
         self.message = Some(text);
     }
 
+    /// How to call the profile of pad `id` next to the pad's own name, and the hover text with the details:
+    /// a short wording when the pad's name already says which model it is, `Profile 1`, `Profile 2`... in
+    /// order of first plug when the pad reports no name.
+    pub fn profile_label(&self, id: u32) -> Option<(String, String)> {
+        let pad = self.pads.iter().find(|p| p.id == id)?;
+        let sharing = self.pads.iter().filter(|p| p.guid == pad.guid).count();
+        let number = self.models.iter().position(|g| *g == pad.guid)? + 1;
+        let (text, name) = if pad.name.trim().is_empty() {
+            let n = format!("Profile {number}");
+            (n.clone(), n)
+        } else if sharing > 1 {
+            (
+                format!("Profile shared by {sharing} pads"),
+                format!("Profile: {}", pad.name),
+            )
+        } else {
+            (
+                "Profile of this model".to_string(),
+                format!("Profile: {}", pad.name),
+            )
+        };
+        Some((text, format!("{name}\nGUID {}", pad.guid)))
+    }
+
     /// The gamepad that drives the game.
     pub fn active_pad(&self) -> Option<&DeviceInfo> {
         self.active
@@ -138,11 +176,14 @@ impl Controls {
         if self.pads.iter().any(|p| p.id == info.id) {
             return;
         }
+        if !self.models.contains(&info.guid) {
+            self.models.push(info.guid.clone());
+        }
         let created = self.cfg.ensure_profile(&info.guid, &info.name);
         self.save();
         let text = format!(
             "Gamepad connected: {}{}",
-            info.name,
+            info.display_name(),
             if created { " (new profile)" } else { "" }
         );
         let id = info.id;
@@ -167,7 +208,7 @@ impl Controls {
         }
         self.generation += 1;
         self.publish();
-        self.say(format!("Gamepad disconnected: {}", pad.name));
+        self.say(format!("Gamepad disconnected: {}", pad.display_name()));
     }
 
     /// Pick the pad whose profile the overlay edits.
@@ -576,6 +617,32 @@ mod tests {
         assert_eq!(saved.profiles["a"].glyphs, GlyphSet::Xbox);
         // the icons the game draws follow the active pad
         assert_eq!(c.icon_source(Action::A).unwrap().0, GlyphSet::PlayStation);
+    }
+
+    #[test]
+    fn profile_labels_are_short_and_numbered_for_unnamed_pads() {
+        let (mut c, _dir) = controls();
+        c.device_added(info(1, "a"));
+        assert_eq!(c.profile_label(1).unwrap().0, "Profile of this model");
+        assert_eq!(c.profile_label(1).unwrap().1, "Profile: Pad a\nGUID a");
+        c.device_added(info(2, "a"));
+        assert_eq!(c.profile_label(2).unwrap().0, "Profile shared by 2 pads");
+        // no name: the pad is called generically and its profile numbered in order of first plug
+        let unnamed = |id, guid: &str| DeviceInfo {
+            id,
+            guid: guid.into(),
+            name: "  ".into(),
+        };
+        c.device_added(unnamed(3, "x"));
+        c.device_added(unnamed(4, "y"));
+        assert_eq!(c.pads()[2].display_name(), "Unknown gamepad");
+        assert_eq!(
+            c.notice(),
+            Some("Gamepad connected: Unknown gamepad (new profile)")
+        );
+        assert_eq!(c.profile_label(3).unwrap().0, "Profile 2");
+        assert_eq!(c.profile_label(4).unwrap().0, "Profile 3");
+        assert!(c.profile_label(99).is_none());
     }
 
     #[test]
