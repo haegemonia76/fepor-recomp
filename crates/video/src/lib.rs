@@ -452,6 +452,8 @@ pub struct Renderer {
     trace_icons: bool,
     /// `FEPOR_TRACE=gxhash`: print a hash of every presented frame (how often the picture really changes).
     trace_hash: bool,
+    /// `FEPOR_BUG_REPORT=<frame>`: make the bug report when this guest frame is presented (headless checks).
+    report_at: Option<u64>,
     /// Draws since the last presented frame.
     pub draws: u64,
     presenter: Option<present::Presenter>,
@@ -498,14 +500,19 @@ pub struct Renderer {
     tot_interp: Duration,
 }
 
-fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
-    let file = std::fs::File::create(path).expect("create png");
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+fn png_bytes(w: u32, h: u32, color: png::ColorType, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, w, h);
     enc.set_color(color);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()
         .and_then(|mut w| w.write_image_data(data))
-        .expect("write png");
+        .expect("encode png");
+    out
+}
+
+fn write_png(path: &std::path::Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
+    std::fs::write(path, png_bytes(w, h, color, data)).expect("write png");
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -544,10 +551,20 @@ impl Renderer {
         }))
         .map_err(|e| format!("device: {e}"))?;
         let adapter_info = adapter.get_info();
-        if let Some(o) = &overlay {
-            o.shared()
-                .record_gpu(&adapter_info.name, &format!("{:?}", adapter_info.backend));
-        }
+        fepor_core::bugreport::note(
+            "gpu",
+            format!(
+                "adapter: {}\nbackend: {:?}\ntype: {:?}\ndriver: {}\ndriver info: {}\nvendor/device id: {:04x}:{:04x}\nlimits: {:?}",
+                adapter_info.name,
+                adapter_info.backend,
+                adapter_info.device_type,
+                adapter_info.driver,
+                adapter_info.driver_info,
+                adapter_info.vendor,
+                adapter_info.device,
+                adapter.limits()
+            ),
+        );
         // Images shown per guest frame (interpolated between consecutive frames), windowed or dumped only.
         let interpolates = window.is_some() || std::env::var("FEPOR_DUMP_FRAMES").is_ok();
         let mult: u32 = if interpolates {
@@ -716,6 +733,7 @@ impl Renderer {
                 .inspect(|d| {
                     let _ = std::fs::create_dir_all(d);
                 }),
+            report_at: std::env::var("FEPOR_BUG_REPORT").ok().and_then(|v| v.parse().ok()),
             trace_hash: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "gxhash")),
             trace_draws: std::env::var("FEPOR_TRACE")
@@ -1816,6 +1834,14 @@ impl Renderer {
         }
         self.draws = 0;
         self.show_frame(c);
+        if self.report_at == Some(self.frame) {
+            if let Some(o) = &self.overlay {
+                o.shared().request_report();
+            }
+        }
+        if self.overlay.as_ref().is_some_and(|o| o.shared().take_report_request()) {
+            self.make_bug_report(c);
+        }
         let Some(d) = &self.dump else { return };
         if self.frame % d.every != 0 {
             return;
@@ -1837,6 +1863,73 @@ impl Renderer {
             png::ColorType::Rgb,
             &rgb,
         );
+    }
+
+    /// The Help page's "Make bug report" (ADR 0047): the picture being shown now and the renderer's state go
+    /// into the zip together with what the game process adds.
+    fn make_bug_report(&mut self, c: &CopyEfb) {
+        let Some(shared) = self.overlay.as_ref().map(|o| o.shared().clone()) else {
+            return;
+        };
+        let (w, h) = (c.width.min(EFB_WIDTH), c.height.min(EFB_HEIGHT));
+        let rgb: Vec<u8> = self
+            .read_efb(c.x, c.y, w, h)
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        let screenshot = png_bytes(w * self.scale, h * self.scale, png::ColorType::Rgb, &rgb);
+        let mut sections = vec![("video".to_string(), self.report_text(&shared))];
+        sections.extend(shared.report_sections());
+        let made = fepor_core::bugreport::create_default(
+            &shared.data_dir,
+            fepor_core::bugreport::Extra {
+                screenshot: Some(screenshot),
+                sections,
+            },
+        );
+        shared.set_report_message(match made {
+            Ok(p) => format!("Saved {}", p.display()),
+            Err(e) => format!("Bug report failed: {e}"),
+        });
+    }
+
+    /// What the renderer is doing now, for a bug report.
+    fn report_text(&self, shared: &fepor_overlay::Shared) -> String {
+        let mut t = format!(
+            "guest frames presented: {}\nguest frame rate: {:.1} /s\nimages per guest frame (frame multiplier in effect): {}\ninternal resolution factor in effect: {}\nrender target: {}x{}\ndraws in the last frame: {}\ntextures cached: {}\nvsync in effect: {}\n",
+            self.frame,
+            shared.guest_fps(),
+            self.mult,
+            self.scale,
+            EFB_WIDTH * self.scale,
+            EFB_HEIGHT * self.scale,
+            self.draws,
+            self.textures.len(),
+            self.vsync,
+        );
+        if let Some(p) = &self.presenter {
+            t.push_str(&p.describe());
+        } else {
+            t.push_str("window: none (headless)\n");
+        }
+        t.push_str(&format!("settings in effect: {:#?}\n", self.settings.get()));
+        let s = shared.stats();
+        if s.gpu_name.is_empty() {
+            t.push_str("statistics HUD: not shown in this run, no frame time history\n");
+        } else {
+            t.push_str(&format!(
+                "statistics HUD (last snapshot): guest {:.1} fps, shown {:.1} fps, display {:.1} Hz, draw {:.0} ms/s, interpolation {:.0} ms/s, process CPU {:?} %, memory {:?} MiB, GPU busy {:?} %, GPU latency {:.2} ms, audio {:.0} AX/s {:.0} AI/s\n",
+                s.guest_fps, s.shown_fps, s.display_hz, s.draw_ms_per_s, s.interp_ms_per_s,
+                s.cpu_process, s.rss_mib, s.gpu_busy, s.gpu_latency_ms, s.ax_per_s, s.ai_per_s
+            ));
+            if let Some((avg, p99, worst)) = s.frame_summary() {
+                t.push_str(&format!("frame interval: average {avg:.2} ms, 1% worst {p99:.2} ms, worst {worst:.2} ms over {} frames\n", s.frame_ms.len()));
+            }
+            for th in s.threads.iter().take(8) {
+                t.push_str(&format!("thread {}: {:.0} %\n", th.name, th.percent));
+            }
+        }
+        t
     }
 
     /// Show a finished frame: right away, or (with `mult > 1`) as the plan of interpolated images

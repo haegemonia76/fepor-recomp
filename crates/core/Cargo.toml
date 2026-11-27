@@ -13,6 +13,10 @@ flate2.workspace = true
 ruzstd.workspace = true
 ppc750cl.workspace = true
 zip.workspace = true
+regex.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

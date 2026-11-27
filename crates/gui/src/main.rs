@@ -463,7 +463,7 @@ impl eframe::App for App {
                     .clicked()
                 {
                     self.report = Some(
-                        fepor_core::bugreport::create_default(Path::new(self.output.trim()))
+                        fepor_core::bugreport::create_default(Path::new(self.output.trim()), Default::default())
                             .map(|p| p.display().to_string()),
                     );
                 }

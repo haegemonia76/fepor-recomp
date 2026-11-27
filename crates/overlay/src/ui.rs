@@ -94,8 +94,6 @@ pub struct UiState {
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
-    /// Result of the last "Make bug report" click.
-    report_message: String,
     mods: crate::mods::ModsView,
 }
 
@@ -124,7 +122,6 @@ impl UiState {
             pad: crate::pad::PadView::default(),
             mods: crate::mods::ModsView::default(),
             pad_selected: None,
-            report_message: String::new(),
         }
     }
 }
@@ -368,7 +365,7 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Mods => crate::mods::page(ui, &mut st.mods, shared),
             Page::Memory => crate::memory::memory(ui, &mut st.memory, shared),
             Page::Cheats => cheats(ui, st, shared),
-            Page::Help => help(ui, st, shared),
+            Page::Help => help(ui, shared),
             Page::Quit => quit(ui),
         });
         ui.separator();
@@ -985,7 +982,7 @@ fn export(card: &std::path::Path, dir: &std::path::Path) -> String {
     }
 }
 
-fn help(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+fn help(ui: &mut egui::Ui, shared: &Shared) {
     ui.label("F1 (keyboard) or Guide / Back (gamepad): open and close this menu.");
     ui.label("While it is open the game sees no input.");
     ui.add_space(6.0);
@@ -1016,18 +1013,16 @@ fn help(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     }
     ui.add_space(6.0);
     if ui.button("Make bug report").clicked() {
-        st.report_message = match fepor_core::bugreport::create_default(&shared.data_dir) {
-            Ok(p) => format!("Saved {}", p.display()),
-            Err(e) => format!("Bug report failed: {e}"),
-        };
+        shared.request_report();
     }
     ui.label(
-        RichText::new("A zip with the log, settings, bindings and system information: no saves, no game data, no home folder in paths. Attach it to the report.")
+        RichText::new("A zip with the log, settings, bindings, system and game state and the picture on screen. No saves, no game data; names, paths and addresses are anonymised. Attach it to the report.")
             .small()
             .weak(),
     );
-    if !st.report_message.is_empty() {
-        ui.label(&st.report_message);
+    let message = shared.report_message();
+    if !message.is_empty() {
+        ui.label(message);
     }
     ui.add_space(6.0);
     ui.label(
