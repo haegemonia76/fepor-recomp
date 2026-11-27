@@ -74,6 +74,7 @@ impl Page {
 struct CardView {
     read_at: Instant,
     result: Result<(memcard::CardInfo, Vec<(String, usize)>), String>,
+    backups: Vec<memcard::Backup>,
 }
 
 pub struct UiState {
@@ -831,6 +832,7 @@ fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) 
         st.card = Some(CardView {
             read_at: Instant::now(),
             result: read_card(&path),
+            backups: memcard::list_backups(&memcard::backups_dir(&shared.data_dir), path),
         });
     }
     let Some(view) = &st.card else {
@@ -866,8 +868,48 @@ fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) 
             }
         }
     }
+    ui.add_space(6.0);
+    backups(ui, st, shared);
     if !st.card_message.is_empty() {
         ui.label(&st.card_message);
+    }
+}
+
+/// The copies of the card kept before each run and while playing, with the keep count and Restore buttons. A
+/// restore cannot touch the card the running game has open, so it is queued for the next start.
+fn backups(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
+    let dir = memcard::backups_dir(&shared.data_dir);
+    let mut keep = shared.settings.get().game.card_backups;
+    ui.horizontal(|ui| {
+        ui.label(crate::theme::caption("Backups kept (0 = off)"));
+        if ui.add(egui::DragValue::new(&mut keep).range(0..=50)).changed() {
+            shared.settings.update(|x| x.game.card_backups = keep);
+        }
+    });
+    let Some(view) = &st.card else {
+        return;
+    };
+    if view.backups.is_empty() {
+        ui.label("  (no backups yet)");
+    }
+    let mut queued = None;
+    for b in &view.backups {
+        ui.horizontal(|ui| {
+            ui.label(format!("  {}", memcard::format_stamp(b.stamp)));
+            if ui.button("Restore").clicked() {
+                queued = Some(b.clone());
+            }
+        });
+    }
+    if let Some(b) = queued {
+        let name = b.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        st.card_message = match memcard::queue_restore(&dir, &name) {
+            Ok(()) => format!(
+                "The card of {} replaces the current one the next time the game starts (which is backed up first).",
+                memcard::format_stamp(b.stamp)
+            ),
+            Err(e) => format!("cannot queue the restore: {e}"),
+        };
     }
 }
 
@@ -1034,6 +1076,19 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         .changed()
     {
         shared.settings.update(|x| x.developer = developer);
+    }
+    ui.add_space(6.0);
+    if ui.button("Make bug report").clicked() {
+        shared.request_report();
+    }
+    ui.label(
+        RichText::new("A zip with the log, settings, bindings, system and game state and the picture on screen. No saves, no game data; names, paths and addresses are anonymised. Attach it to the report.")
+            .small()
+            .weak(),
+    );
+    let message = shared.report_message();
+    if !message.is_empty() {
+        ui.label(message);
     }
     ui.add_space(6.0);
     ui.label(

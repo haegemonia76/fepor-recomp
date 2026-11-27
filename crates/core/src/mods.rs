@@ -33,6 +33,15 @@ pub struct Manifest {
     pub patches: Vec<PatchSpec>,
 }
 
+/// The text of a `mod.toml` with only the required and descriptive fields (tools that generate mods).
+pub fn manifest_text(name: &str, game_id: &str, description: &str) -> String {
+    let mut t = toml::Table::new();
+    t.insert("name".into(), name.into());
+    t.insert("game_id".into(), game_id.into());
+    t.insert("description".into(), description.into());
+    toml::to_string(&t).expect("strings serialise")
+}
+
 /// `[[patch]]`: `address = 0x80410000`, `bytes = "00 00 00 01"` (hex, spaces optional).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PatchSpec {

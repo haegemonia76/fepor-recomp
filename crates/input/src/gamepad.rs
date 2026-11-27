@@ -6,6 +6,25 @@ use std::time::Duration;
 use sdl3::event::Event;
 use sdl3::gamepad::{Axis, Gamepad};
 
+/// Tell the bug report which controllers are connected (name, GUID, player index).
+fn note_pads(subsystem: &sdl3::GamepadSubsystem, open: &HashMap<u32, Gamepad>) {
+    let mut t = format!("SDL {}\n", sdl3::version::version());
+    if open.is_empty() {
+        t.push_str("no controller detected\n");
+    }
+    let mut ids: Vec<&u32> = open.keys().collect();
+    ids.sort();
+    for id in ids {
+        t.push_str(&format!(
+            "controller: {} (GUID {}, player index {:?})\n",
+            open[id].name().unwrap_or_default(),
+            subsystem.guid_for_id(*id).string(),
+            subsystem.player_index_for_id(*id)
+        ));
+    }
+    fepor_core::bugreport::note("controllers", t);
+}
+
 /// Start the reader. `on_input` is called from the reader thread with SDL's input names (`a`, `dpup`,
 /// `leftx+`, `lefttrigger`, ...) and a strength between 0 and 1.
 pub fn spawn(mut on_input: impl FnMut(&str, f32) + Send + 'static) {
@@ -31,6 +50,7 @@ pub fn spawn(mut on_input: impl FnMut(&str, f32) + Send + 'static) {
                     }
                 }
             }
+            note_pads(&subsystem, &open);
             loop {
                 for event in pump.poll_iter() {
                     match event {
@@ -43,10 +63,12 @@ pub fn spawn(mut on_input: impl FnMut(&str, f32) + Send + 'static) {
                                     );
                                 }
                                 open.insert(which, g);
+                                note_pads(&subsystem, &open);
                             }
                         }
                         Event::ControllerDeviceRemoved { which, .. } => {
                             open.remove(&which);
+                            note_pads(&subsystem, &open);
                         }
                         Event::ControllerButtonDown { button, .. } => {
                             if trace {
