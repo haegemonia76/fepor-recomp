@@ -4,8 +4,8 @@
 //! [`Overlay`], runs the UI once per presented image and paints it with our own wgpu painter.
 
 pub mod glyphs;
-mod mods;
 mod memory;
+mod mods;
 mod outlines;
 mod pad;
 mod paint;

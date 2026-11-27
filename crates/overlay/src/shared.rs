@@ -166,7 +166,10 @@ impl Shared {
     /// The Help page asks for a bug report; the renderer makes it at its next frame, so that the picture
     /// on screen is in it.
     pub fn request_report(&self) {
-        *self.report_message.lock().unwrap_or_else(|e| e.into_inner()) = "Making the bug report...".into();
+        *self
+            .report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = "Making the bug report...".into();
         self.report_request.store(true, Ordering::Release);
     }
 
@@ -177,11 +180,17 @@ impl Shared {
 
     /// Where the report went or why it failed, for the Help page.
     pub fn set_report_message(&self, message: String) {
-        *self.report_message.lock().unwrap_or_else(|e| e.into_inner()) = message;
+        *self
+            .report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = message;
     }
 
     pub fn report_message(&self) -> String {
-        self.report_message.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The game process tells what the report should say about its state (threads, patches, ...).

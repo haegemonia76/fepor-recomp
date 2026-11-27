@@ -22,6 +22,7 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **GX backend**: renderer built on SDL_GPU consuming the parsed FIFO. Renders into a resizable virtual EFB.
 - **Virtual pad**: GameCube controller abstraction fed by the input layer (remapping, glyph sets Xbox/Nintendo/PlayStation).
 - **Render filters**: post-process of the presented image only (scanlines, gamma, saturation/contrast/brightness, screen mask); `[video.filters]` in `settings.toml`, Video page of the overlay, never applied to the EFB or the overlay (ADR 0039).
+- **FSR**: AMD FidelityFX Super Resolution 1 (EASU upscale, RCAS sharpening) in the presentation pass, before the render filters and never on the overlay; `[video.fsr]` in `settings.toml`, Video page of the overlay; while on it chooses the internal resolution from a quality preset (ADR 0042).
 - **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler.
 - **Start / Origin**: a function start found by analysis and why (`Entry`, `Config`, `Call`, `TailCall`, `DataPointer`, `AddressLoad`, `Gap`). Untrusted origins are rejected when preceding code runs straight into them (mid-function labels).
 - **Data folder**: the single directory (`--data`, `RECOMPLAUNCHER_DATA`) where generated code, the build, saves, config, cache and logs live (ADR 0010).

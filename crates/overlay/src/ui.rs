@@ -303,6 +303,13 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                     },
                     gpu,
                 );
+                if let Some(ms) = s.scaling_gpu_ms {
+                    line(
+                        ui,
+                        Color32::WHITE,
+                        format!("Scaling pass {ms:.2} ms on the GPU (FSR, filters)"),
+                    );
+                }
                 line(
                     ui,
                     Color32::GRAY,
@@ -406,15 +413,25 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     }
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Internal resolution"));
-    ui.add(
+    ui.add_enabled(
+        !s.video.fsr.is_on(),
         egui::Slider::new(&mut s.video.resolution, 1..=4)
             .custom_formatter(|v, _| format!("x{v:.0}  ({}x{})", 640 * v as u32, 528 * v as u32)),
     );
+    if s.video.fsr.is_on() {
+        ui.label(
+            RichText::new("Set by the FSR preset below, from the window's size.")
+                .small()
+                .weak(),
+        );
+    }
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Picture shape"));
     for a in Aspect::ALL {
         ui.radio_value(&mut s.video.aspect, a, a.label());
     }
+    ui.add_space(8.0);
+    fsr(ui, &mut s.video.fsr);
     ui.add_space(8.0);
     filters(ui, &mut s.video.filters);
     ui.add_space(8.0);
@@ -441,6 +458,27 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     );
     if s != before {
         shared.settings.update(|x| *x = s);
+    }
+}
+
+/// AMD FSR 1 upscaling: while on, it picks the internal resolution from the window's size.
+fn fsr(ui: &mut egui::Ui, f: &mut fepor_core::settings::Fsr) {
+    use fepor_core::settings::FsrQuality;
+    ui.label(crate::theme::caption("Upscaling (AMD FSR 1)"));
+    for q in FsrQuality::ALL {
+        ui.radio_value(&mut f.quality, q, q.label());
+    }
+    if f.is_on() {
+        ui.label(
+            RichText::new("Renders smaller, upscales to the window.")
+                .small()
+                .weak(),
+        );
+        ui.label(RichText::new("Sharpness").small());
+        ui.add(
+            egui::Slider::new(&mut f.sharpness, 0.0..=1.0)
+                .custom_formatter(|x, _| format!("{x:.2}")),
+        );
     }
 }
 
@@ -844,7 +882,10 @@ fn backups(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     let mut keep = shared.settings.get().game.card_backups;
     ui.horizontal(|ui| {
         ui.label(crate::theme::caption("Backups kept (0 = off)"));
-        if ui.add(egui::DragValue::new(&mut keep).range(0..=50)).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut keep).range(0..=50))
+            .changed()
+        {
             shared.settings.update(|x| x.game.card_backups = keep);
         }
     });
@@ -864,7 +905,11 @@ fn backups(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         });
     }
     if let Some(b) = queued {
-        let name = b.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = b
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         st.card_message = match memcard::queue_restore(&dir, &name) {
             Ok(()) => format!(
                 "The card of {} replaces the current one the next time the game starts (which is backed up first).",

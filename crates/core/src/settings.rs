@@ -172,6 +172,93 @@ impl Filters {
     }
 }
 
+/// How far AMD FSR 1 upscales: the ratio of the output size to the internal render size (ADR 0042).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FsrQuality {
+    /// No upscaling pass; the internal resolution setting applies.
+    #[default]
+    Off,
+    /// 1.5x.
+    Quality,
+    /// 1.7x.
+    Balanced,
+    /// 2x.
+    Performance,
+    /// 3x.
+    Ultra,
+}
+
+impl FsrQuality {
+    pub const ALL: [FsrQuality; 5] = [
+        FsrQuality::Off,
+        FsrQuality::Quality,
+        FsrQuality::Balanced,
+        FsrQuality::Performance,
+        FsrQuality::Ultra,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FsrQuality::Off => "Off",
+            FsrQuality::Quality => "Quality (1.5x)",
+            FsrQuality::Balanced => "Balanced (1.7x)",
+            FsrQuality::Performance => "Performance (2x)",
+            FsrQuality::Ultra => "Ultra performance (3x)",
+        }
+    }
+
+    /// Output size over internal size (1.0 when off).
+    pub fn ratio(self) -> f32 {
+        match self {
+            FsrQuality::Off => 1.0,
+            FsrQuality::Quality => 1.5,
+            FsrQuality::Balanced => 1.7,
+            FsrQuality::Performance => 2.0,
+            FsrQuality::Ultra => 3.0,
+        }
+    }
+}
+
+/// AMD FSR 1 spatial upscaling of the presented image (ADR 0042).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fsr {
+    pub quality: FsrQuality,
+    /// Strength of the sharpening that follows the upscale, 0.0 (weakest) ..= 1.0 (sharpest).
+    pub sharpness: f32,
+}
+
+impl Default for Fsr {
+    fn default() -> Self {
+        Fsr {
+            quality: FsrQuality::Off,
+            sharpness: 0.9,
+        }
+    }
+}
+
+impl Fsr {
+    pub fn is_on(&self) -> bool {
+        self.quality != FsrQuality::Off
+    }
+
+    /// The internal resolution factor (over the GameCube's EFB height) that gives the chosen quality's
+    /// ratio for an output `out_height` pixels tall, rounded to the whole factors the targets support.
+    pub fn internal_scale(&self, out_height: u32, efb_height: u32) -> u32 {
+        let wanted = out_height as f32 / self.quality.ratio() / efb_height as f32;
+        (wanted.round() as u32).clamp(1, 4)
+    }
+
+    pub fn clamp(&mut self) {
+        self.sharpness = if self.sharpness.is_finite() {
+            self.sharpness.clamp(0.0, 1.0)
+        } else {
+            0.9
+        };
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Video {
@@ -190,6 +277,8 @@ pub struct Video {
     pub overlay_scale: f32,
     /// Scanlines, colour correction and mask applied to the presented image (not to the overlay).
     pub filters: Filters,
+    /// FSR upscaling, applied before the filters; the overlay is never upscaled.
+    pub fsr: Fsr,
 }
 
 impl Default for Video {
@@ -203,6 +292,7 @@ impl Default for Video {
             stats: StatsMode::Off,
             overlay_scale: 0.0,
             filters: Filters::default(),
+            fsr: Fsr::default(),
         }
     }
 }
@@ -335,6 +425,7 @@ impl Settings {
         self.video.resolution = self.video.resolution.clamp(1, 4);
         self.video.overlay_scale = self.video.overlay_scale.clamp(0.0, 4.0);
         self.video.filters.clamp();
+        self.video.fsr.clamp();
         self.audio.volume = self.audio.volume.clamp(0.0, 1.0);
         self.game.card_backups = self.game.card_backups.min(50);
     }
@@ -534,6 +625,26 @@ mod tests {
         std::fs::write(&path, "[video.filters]\ngamma = 9.0\nscanlines = -1.0\n").unwrap();
         let f = Settings::load(&path).video.filters;
         assert_eq!((f.gamma, f.scanlines), (2.0, 0.0));
+        std::fs::write(
+            &path,
+            "[video.fsr]\nquality = \"balanced\"\nsharpness = 4.0\n",
+        )
+        .unwrap();
+        let f = Settings::load(&path).video.fsr;
+        assert_eq!((f.quality, f.sharpness), (FsrQuality::Balanced, 1.0));
+        assert!(!Settings::default().video.fsr.is_on());
+        let fsr = Fsr {
+            quality: FsrQuality::Performance,
+            ..Fsr::default()
+        };
+        assert_eq!(
+            (
+                fsr.internal_scale(1080, 528),
+                fsr.internal_scale(2160, 528),
+                fsr.internal_scale(100, 528)
+            ),
+            (1, 2, 1)
+        );
     }
 
     #[test]
