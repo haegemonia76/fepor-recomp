@@ -10,6 +10,7 @@ pub mod memcard;
 pub mod paths;
 pub mod settings;
 pub mod stats;
+pub mod text;
 pub mod version;
 
 pub use config::Config;
