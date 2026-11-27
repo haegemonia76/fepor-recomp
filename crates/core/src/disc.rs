@@ -47,6 +47,8 @@ pub trait Disc {
     fn read_file(&mut self, entry: &FileEntry, out: &mut dyn Write) -> Result<(), DiscError>;
     /// Raw read from the disc image at `offset`; bytes outside the image read as zero.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError>;
+    /// Length of the disc image in bytes: nothing of the game lives at or after it.
+    fn image_len(&self) -> u64;
 }
 
 /// Open an ISO/GCM file or an extracted folder.
@@ -72,6 +74,14 @@ fn game_id_of(boot: &[u8]) -> Result<String, DiscError> {
 
 /// Parse an FST blob into file entries (directories are flattened into paths).
 pub fn parse_fst(fst: &[u8]) -> Result<Vec<FileEntry>, DiscError> {
+    Ok(parse_fst_indexed(fst)?
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect())
+}
+
+/// Like [`parse_fst`], with each file's index in the FST table (what `rewrite_fst` patches).
+pub fn parse_fst_indexed(fst: &[u8]) -> Result<Vec<(usize, FileEntry)>, DiscError> {
     let bad = |m: &str| DiscError::BadImage(format!("FST: {m}"));
     if fst.len() < 12 || fst[0] != 1 {
         return Err(bad("missing root directory"));
@@ -119,11 +129,14 @@ pub fn parse_fst(fst: &[u8]) -> Result<Vec<FileEntry>, DiscError> {
                 path.push('/');
             }
             path.push_str(&name);
-            out.push(FileEntry {
-                path,
-                offset: be32(e, 4) as u64,
-                size: be32(e, 8) as u64,
-            });
+            out.push((
+                i,
+                FileEntry {
+                    path,
+                    offset: be32(e, 4) as u64,
+                    size: be32(e, 8) as u64,
+                },
+            ));
         }
     }
     Ok(out)
@@ -240,6 +253,10 @@ impl Disc for IsoDisc {
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError> {
         self.img.read_at(offset, buf).map_err(io_err(&self.path))
+    }
+
+    fn image_len(&self) -> u64 {
+        self.img.len()
     }
 }
 
@@ -398,5 +415,435 @@ impl Disc for FolderDisc {
             }
         }
         Ok(())
+    }
+
+    fn image_len(&self) -> u64 {
+        self.regions
+            .iter()
+            .map(|(start, len, _)| start + len)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Replacements start on this boundary (the DVD driver reads in 32-byte units).
+const REPLACEMENT_ALIGN: u64 = 0x20;
+
+/// Rewrite the FST so that each `(file path, offset, size)` in `moves` points at its new place. Names, the
+/// directory structure and the table's length stay as they are. Paths that are not in the FST are an error.
+pub fn rewrite_fst(fst: &[u8], moves: &[(String, u64, u64)]) -> Result<Vec<u8>, DiscError> {
+    let word = |v: u64| {
+        u32::try_from(v).map_err(|_| {
+            DiscError::BadImage(
+                "a replaced file lies beyond the 4 GiB a GameCube disc can address".into(),
+            )
+        })
+    };
+    let mut out = fst.to_vec();
+    let entries = parse_fst_indexed(fst)?;
+    for (path, offset, size) in moves {
+        let (index, _) = entries
+            .iter()
+            .find(|(_, e)| e.path == *path)
+            .ok_or_else(|| DiscError::BadImage(format!("{path} is not on the disc")))?;
+        out[index * 12 + 4..index * 12 + 8].copy_from_slice(&word(*offset)?.to_be_bytes());
+        out[index * 12 + 8..index * 12 + 12].copy_from_slice(&word(*size)?.to_be_bytes());
+    }
+    Ok(out)
+}
+
+/// A file served from the host instead of the disc: it lives at `start..start + len` of the virtual image,
+/// after the end of the real one.
+struct Replacement {
+    start: u64,
+    len: u64,
+    host: PathBuf,
+}
+
+/// A disc with files replaced by host files (mods, ADR 0034). The guest reads by raw offset and gets its FST
+/// from [`Disc::sys_files`], so the replaced files are appended after the end of the image, the FST entries
+/// point there, and reads of that range come from the host files. Every other read goes to the wrapped disc.
+pub struct ModdedDisc {
+    inner: Box<dyn Disc>,
+    files: Vec<FileEntry>,
+    fst: Vec<u8>,
+    replacements: Vec<Replacement>,
+    /// Requested replacements for files that are not on the disc (ignored).
+    pub unmatched: Vec<String>,
+    open: Option<(usize, File)>,
+}
+
+impl ModdedDisc {
+    /// `replacements`: `(path on the disc, host file)`. Only files already on the disc can be replaced:
+    /// adding files would change the FST's size, which the guest reads from its header.
+    pub fn new(
+        mut inner: Box<dyn Disc>,
+        replacements: &[(String, PathBuf)],
+    ) -> Result<ModdedDisc, DiscError> {
+        let fst = inner
+            .sys_files()?
+            .into_iter()
+            .find(|(n, _)| *n == "fst.bin")
+            .map(|(_, d)| d)
+            .ok_or_else(|| DiscError::BadImage("no FST".into()))?;
+        let mut next = inner.image_len().next_multiple_of(REPLACEMENT_ALIGN);
+        let (mut moves, mut placed, mut unmatched) = (Vec::new(), Vec::new(), Vec::new());
+        for (path, host) in replacements {
+            if !inner.files().iter().any(|f| f.path == *path) {
+                unmatched.push(path.clone());
+                continue;
+            }
+            let len = std::fs::metadata(host).map_err(io_err(host))?.len();
+            moves.push((path.clone(), next, len));
+            placed.push(Replacement {
+                start: next,
+                len,
+                host: host.clone(),
+            });
+            next = (next + len).next_multiple_of(REPLACEMENT_ALIGN);
+        }
+        let fst = rewrite_fst(&fst, &moves)?;
+        let mut files = parse_fst(&fst)?;
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(ModdedDisc {
+            inner,
+            files,
+            fst,
+            replacements: placed,
+            unmatched,
+            open: None,
+        })
+    }
+
+    /// How many files are served from the host.
+    pub fn replaced(&self) -> usize {
+        self.replacements.len()
+    }
+
+    /// Read from the replacement `i` at `at` (inside it) into `dst`; what the file lacks stays zero.
+    fn read_replacement(&mut self, i: usize, at: u64, dst: &mut [u8]) -> Result<(), DiscError> {
+        let host = &self.replacements[i].host;
+        if self.open.as_ref().is_none_or(|(n, _)| *n != i) {
+            self.open = Some((i, File::open(host).map_err(io_err(host))?));
+        }
+        let f = &mut self.open.as_mut().expect("opened above").1;
+        f.seek(SeekFrom::Start(at)).map_err(io_err(host))?;
+        let mut got = 0;
+        while got < dst.len() {
+            match f.read(&mut dst[got..]).map_err(io_err(host))? {
+                0 => break,
+                n => got += n,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Disc for ModdedDisc {
+    fn game_id(&self) -> &str {
+        self.inner.game_id()
+    }
+
+    fn sys_files(&mut self) -> Result<Vec<(&'static str, Vec<u8>)>, DiscError> {
+        let mut sys = self.inner.sys_files()?;
+        for (name, data) in &mut sys {
+            if *name == "fst.bin" {
+                *data = self.fst.clone();
+            }
+        }
+        Ok(sys)
+    }
+
+    fn dol(&mut self) -> Result<Vec<u8>, DiscError> {
+        self.inner.dol()
+    }
+
+    fn files(&self) -> &[FileEntry] {
+        &self.files
+    }
+
+    fn read_file(&mut self, entry: &FileEntry, out: &mut dyn Write) -> Result<(), DiscError> {
+        let Some(i) = self
+            .replacements
+            .iter()
+            .position(|r| r.start == entry.offset)
+        else {
+            return self.inner.read_file(entry, out);
+        };
+        let host = &self.replacements[i].host;
+        let mut f = File::open(host).map_err(io_err(host))?;
+        io::copy(&mut f, out).map_err(io_err(host))?;
+        Ok(())
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError> {
+        let end = offset + buf.len() as u64;
+        let real = self.inner.image_len();
+        // the part inside the real image is the wrapped disc's; the rest reads as zero unless a replacement is there
+        let inside = (real.saturating_sub(offset) as usize).min(buf.len());
+        self.inner.read_at(offset, &mut buf[..inside])?;
+        buf[inside..].fill(0);
+        let first = self
+            .replacements
+            .partition_point(|r| r.start + r.len <= offset);
+        for i in first..self.replacements.len() {
+            let (start, len) = (self.replacements[i].start, self.replacements[i].len);
+            if start >= end {
+                break;
+            }
+            let (lo, hi) = (offset.max(start), end.min(start + len));
+            if lo < hi {
+                let dst = &mut buf[(lo - offset) as usize..(hi - offset) as usize];
+                self.read_replacement(i, lo - start, dst)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn image_len(&self) -> u64 {
+        self.replacements
+            .last()
+            .map_or(self.inner.image_len(), |r| r.start + r.len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FST of `/a.bin`, `/dir/b.bin`, `/dir/c.bin`, `/d.bin` with the given (offset, size) per file in that order.
+    fn fst(files: [(u32, u32); 4]) -> Vec<u8> {
+        let names = b"a.bin\0dir\0b.bin\0c.bin\0d.bin\0";
+        let entry = |dir: bool, name: u32, a: u32, b: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&(name | ((dir as u32) << 24)).to_be_bytes());
+            e.extend_from_slice(&a.to_be_bytes());
+            e.extend_from_slice(&b.to_be_bytes());
+            e
+        };
+        let mut t = entry(true, 0, 0, 6);
+        t.extend(entry(false, 0, files[0].0, files[0].1)); // a.bin
+        t.extend(entry(true, 6, 0, 5)); // dir
+        t.extend(entry(false, 10, files[1].0, files[1].1)); // b.bin
+        t.extend(entry(false, 16, files[2].0, files[2].1)); // c.bin
+        t.extend(entry(false, 22, files[3].0, files[3].1)); // d.bin
+        t.extend_from_slice(names);
+        t
+    }
+
+    /// An image in memory: byte `i` is `i % 251`; `files()` from its FST.
+    struct MemDisc {
+        fst: Vec<u8>,
+        files: Vec<FileEntry>,
+        len: u64,
+        reads: Vec<(u64, usize)>,
+    }
+
+    impl MemDisc {
+        fn new() -> MemDisc {
+            let fst = fst([
+                (0x1000, 0x100),
+                (0x2000, 0x200),
+                (0x3000, 0x300),
+                (0x4000, 0x10),
+            ]);
+            MemDisc {
+                files: parse_fst(&fst).unwrap(),
+                fst,
+                len: 0x5000,
+                reads: Vec::new(),
+            }
+        }
+    }
+
+    impl Disc for MemDisc {
+        fn game_id(&self) -> &str {
+            "GFEP01"
+        }
+        fn sys_files(&mut self) -> Result<Vec<(&'static str, Vec<u8>)>, DiscError> {
+            Ok(vec![
+                ("boot.bin", vec![1; 4]),
+                ("fst.bin", self.fst.clone()),
+                ("main.dol", vec![2; 4]),
+            ])
+        }
+        fn dol(&mut self) -> Result<Vec<u8>, DiscError> {
+            Ok(vec![2; 4])
+        }
+        fn files(&self) -> &[FileEntry] {
+            &self.files
+        }
+        fn read_file(&mut self, entry: &FileEntry, out: &mut dyn Write) -> Result<(), DiscError> {
+            let mut b = vec![0; entry.size as usize];
+            self.read_at(entry.offset, &mut b)?;
+            out.write_all(&b).unwrap();
+            Ok(())
+        }
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DiscError> {
+            self.reads.push((offset, buf.len()));
+            for (i, b) in buf.iter_mut().enumerate() {
+                let at = offset + i as u64;
+                *b = if at < self.len { (at % 251) as u8 } else { 0 };
+            }
+            Ok(())
+        }
+        fn image_len(&self) -> u64 {
+            self.len
+        }
+    }
+
+    fn files_of(fst: &[u8]) -> Vec<(String, u64, u64)> {
+        parse_fst(fst)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.path, e.offset, e.size))
+            .collect()
+    }
+
+    #[test]
+    fn rewrite_fst_changes_only_the_named_entries() {
+        let original = fst([
+            (0x1000, 0x100),
+            (0x2000, 0x200),
+            (0x3000, 0x300),
+            (0x4000, 0x10),
+        ]);
+        let out = rewrite_fst(
+            &original,
+            &[
+                ("dir/c.bin".into(), 0x9000, 0x44),
+                ("d.bin".into(), 0xA000, 0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(out.len(), original.len());
+        assert_eq!(
+            files_of(&out),
+            [
+                ("a.bin".to_string(), 0x1000, 0x100),
+                ("dir/b.bin".to_string(), 0x2000, 0x200),
+                ("dir/c.bin".to_string(), 0x9000, 0x44),
+                ("d.bin".to_string(), 0xA000, 0),
+            ]
+        );
+        // names, directory entries and everything else are byte for byte the same
+        let diff: Vec<usize> = (0..out.len()).filter(|&i| out[i] != original[i]).collect();
+        assert!(diff.iter().all(|&i| (48..72).contains(&i)), "{diff:?}");
+        assert!(rewrite_fst(&original, &[("nope".into(), 0, 0)]).is_err());
+        assert!(rewrite_fst(&original, &[("a.bin".into(), 1 << 32, 0)]).is_err());
+    }
+
+    #[test]
+    fn modded_disc_serves_replacements_after_the_image_and_the_rest_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (big, small) = (dir.path().join("big"), dir.path().join("small"));
+        let big_data: Vec<u8> = (0..0x250u32).map(|i| (i % 7) as u8 + 100).collect();
+        std::fs::write(&big, &big_data).unwrap();
+        std::fs::write(&small, b"hello").unwrap();
+        let mut disc = ModdedDisc::new(
+            Box::new(MemDisc::new()),
+            &[
+                ("dir/b.bin".into(), big),
+                ("d.bin".into(), small),
+                ("missing.bin".into(), dir.path().join("x")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(disc.unmatched, ["missing.bin"]);
+        assert_eq!(disc.replaced(), 2);
+
+        // the guest's FST: replaced files point after the image, 32-byte aligned, others unchanged
+        let sys = disc.sys_files().unwrap();
+        let fst = &sys.iter().find(|(n, _)| *n == "fst.bin").unwrap().1;
+        assert_eq!(
+            files_of(fst),
+            [
+                ("a.bin".to_string(), 0x1000, 0x100),
+                ("dir/b.bin".to_string(), 0x5000, 0x250),
+                ("dir/c.bin".to_string(), 0x3000, 0x300),
+                ("d.bin".to_string(), 0x5260, 5),
+            ]
+        );
+        assert_eq!(
+            sys.iter().find(|(n, _)| *n == "boot.bin").unwrap().1,
+            [1; 4]
+        );
+        assert_eq!(
+            disc.files()
+                .iter()
+                .find(|f| f.path == "d.bin")
+                .unwrap()
+                .offset,
+            0x5260
+        );
+        assert_eq!(disc.image_len(), 0x5265);
+
+        // a read of the replaced offsets comes from the host file, also from the middle and across the end
+        let mut buf = vec![0u8; 0x250];
+        disc.read_at(0x5000, &mut buf).unwrap();
+        assert_eq!(buf, big_data);
+        let mut buf = [0u8; 8];
+        disc.read_at(0x5010, &mut buf).unwrap();
+        assert_eq!(buf, big_data[0x10..0x18]);
+        let mut buf = [0u8; 0x40];
+        disc.read_at(0x5240, &mut buf).unwrap();
+        assert_eq!(&buf[..0x10], &big_data[0x240..]);
+        assert_eq!(
+            &buf[0x10..0x20],
+            [0; 0x10],
+            "the gap between files reads as zero"
+        );
+        assert_eq!(&buf[0x20..0x25], b"hello");
+
+        // every other read is the wrapped disc's, byte for byte; one that starts inside the image and runs past
+        // its end gets the image's bytes and then the replacement
+        let mut buf = vec![0u8; 0x300];
+        disc.read_at(0x3000, &mut buf).unwrap();
+        assert!(buf
+            .iter()
+            .enumerate()
+            .all(|(i, &b)| b == ((0x3000 + i) % 251) as u8));
+        let mut buf = [0xFFu8; 0x20];
+        disc.read_at(0x4FF0, &mut buf).unwrap();
+        assert!(buf[..0x10]
+            .iter()
+            .enumerate()
+            .all(|(i, &b)| b == ((0x4FF0 + i) % 251) as u8));
+        assert_eq!(&buf[0x10..], &big_data[..0x10]);
+
+        // read_file follows the new entries
+        let mut out = Vec::new();
+        let b = disc
+            .files()
+            .iter()
+            .find(|f| f.path == "dir/b.bin")
+            .unwrap()
+            .clone();
+        disc.read_file(&b, &mut out).unwrap();
+        assert_eq!(out, big_data);
+        let mut out = Vec::new();
+        let a = disc
+            .files()
+            .iter()
+            .find(|f| f.path == "a.bin")
+            .unwrap()
+            .clone();
+        disc.read_file(&a, &mut out).unwrap();
+        assert_eq!(out.len(), 0x100);
+        assert_eq!(out[0], (0x1000 % 251) as u8);
+    }
+
+    #[test]
+    fn no_replacement_changes_nothing() {
+        let mut disc = ModdedDisc::new(Box::new(MemDisc::new()), &[]).unwrap();
+        let sys = disc.sys_files().unwrap();
+        assert_eq!(
+            sys.iter().find(|(n, _)| *n == "fst.bin").unwrap().1,
+            MemDisc::new().fst
+        );
+        assert_eq!(disc.image_len(), 0x5000);
+        let mut buf = [0u8; 4];
+        disc.read_at(0x5000, &mut buf).unwrap();
+        assert_eq!(buf, [0; 4]);
     }
 }

@@ -114,6 +114,15 @@ fn sdl_thread(
                 .unwrap_or_default();
             if let Ok(mut d) = devices.lock() {
                 if *d != names {
+                    fepor_core::bugreport::note(
+                        "audio",
+                        format!(
+                            "SDL {}\naudio driver: {}\nplayback devices:\n{}",
+                            sdl3::version::version(),
+                            audio.current_audio_driver(),
+                            names.iter().map(|n| format!("  {n}\n")).collect::<String>()
+                        ),
+                    );
                     *d = names;
                 }
             }

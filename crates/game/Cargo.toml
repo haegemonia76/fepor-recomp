@@ -24,3 +24,6 @@ fepor-overlay.workspace = true
 fepor-runtime.workspace = true
 fepor-jit = { workspace = true, optional = true }
 winit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
