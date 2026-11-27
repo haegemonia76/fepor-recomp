@@ -260,7 +260,11 @@ impl PatchEngine {
             p.apply(ram);
         }
         if self.trace {
-            eprintln!("patch: enabled {:?} ({} patches)", e.set.source, saved.len());
+            eprintln!(
+                "patch: enabled {:?} ({} patches)",
+                e.set.source,
+                saved.len()
+            );
         }
         e.saved = Some(saved);
         Ok(())
@@ -382,7 +386,10 @@ mod tests {
         let id = e
             .register(set(
                 "a",
-                vec![Patch::new(0x200, [1, 1, 1, 1]), Patch::new(0x802, [2, 2, 2, 2])],
+                vec![
+                    Patch::new(0x200, [1, 1, 1, 1]),
+                    Patch::new(0x802, [2, 2, 2, 2]),
+                ],
                 false,
             ))
             .unwrap();
@@ -395,9 +402,15 @@ mod tests {
     fn conflicts_between_sources() {
         let mut e = engine();
         let mut r = ram();
-        let a = e.register(set("a", vec![Patch::new(0x8000_0100, [1; 4])], false)).unwrap();
-        let b = e.register(set("b", vec![Patch::new(0x8000_0102, [2; 4])], false)).unwrap();
-        let c = e.register(set("b", vec![Patch::new(0x8000_0200, [3; 4])], false)).unwrap();
+        let a = e
+            .register(set("a", vec![Patch::new(0x8000_0100, [1; 4])], false))
+            .unwrap();
+        let b = e
+            .register(set("b", vec![Patch::new(0x8000_0102, [2; 4])], false))
+            .unwrap();
+        let c = e
+            .register(set("b", vec![Patch::new(0x8000_0200, [3; 4])], false))
+            .unwrap();
         e.enable(a, &mut r).unwrap();
         match e.enable(b, &mut r) {
             Err(PatchError::Conflict(v)) => {
@@ -413,17 +426,24 @@ mod tests {
         // disabled sets do not conflict; cached and uncached mirrors are the same bytes
         e.disable(a, &mut r).unwrap();
         e.enable(b, &mut r).unwrap();
-        let d = e.register(set("d", vec![Patch::new(0xC000_0102, [4; 1])], false)).unwrap();
+        let d = e
+            .register(set("d", vec![Patch::new(0xC000_0102, [4; 1])], false))
+            .unwrap();
         assert!(matches!(e.enable(d, &mut r), Err(PatchError::Conflict(_))));
         // a source may overlap itself
-        let b2 = e.register(set("b", vec![Patch::new(0x8000_0102, [9; 1])], false)).unwrap();
+        let b2 = e
+            .register(set("b", vec![Patch::new(0x8000_0102, [9; 1])], false))
+            .unwrap();
         e.enable(b2, &mut r).unwrap();
     }
 
     #[test]
     fn game_and_range_checks() {
         let mut e = PatchEngine::default();
-        assert_eq!(e.set_game("NOPE00"), Err(PatchError::UnknownGame("NOPE00".into())));
+        assert_eq!(
+            e.set_game("NOPE00"),
+            Err(PatchError::UnknownGame("NOPE00".into()))
+        );
         assert_eq!(
             e.register(set("a", vec![], false)).unwrap_err(),
             PatchError::NoGame
@@ -431,21 +451,30 @@ mod tests {
         e.set_game("GFEP01").unwrap();
         let mut other = set("a", vec![], false);
         other.game_id = "GFEJ01".into();
-        assert!(matches!(e.register(other), Err(PatchError::WrongGame { .. })));
+        assert!(matches!(
+            e.register(other),
+            Err(PatchError::WrongGame { .. })
+        ));
         let end = 0x8000_0000 + RAM_SIZE as u32;
         assert!(matches!(
             e.register(set("a", vec![Patch::new(end - 2, [0; 4])], false)),
             Err(PatchError::OutOfRange { .. })
         ));
-        assert!(e.register(set("a", vec![Patch::new(end - 4, [0; 4])], false)).is_ok());
+        assert!(e
+            .register(set("a", vec![Patch::new(end - 4, [0; 4])], false))
+            .is_ok());
     }
 
     #[test]
     fn frame_hook_runs_once_per_frame_and_rewrites_continuous_sets() {
         let mut e = engine();
         let mut r = ram();
-        let hold = e.register(set("a", vec![Patch::word(0x300, 7)], true)).unwrap();
-        let once = e.register(set("b", vec![Patch::word(0x400, 8)], false)).unwrap();
+        let hold = e
+            .register(set("a", vec![Patch::word(0x300, 7)], true))
+            .unwrap();
+        let once = e
+            .register(set("b", vec![Patch::word(0x400, 8)], false))
+            .unwrap();
         e.enable(hold, &mut r).unwrap();
         e.enable(once, &mut r).unwrap();
         r[0x303] = 0;

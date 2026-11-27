@@ -21,7 +21,11 @@ fn describe(e: &PatchError) -> String {
     match e {
         PatchError::Conflict(c) => {
             let c = &c[0];
-            format!("overlaps {} at {:#010x}: turn that off first", c.with_source, 0x8000_0000 | c.addr)
+            format!(
+                "overlaps {} at {:#010x}: turn that off first",
+                c.with_source,
+                0x8000_0000 | c.addr
+            )
         }
         other => other.to_string(),
     }
@@ -91,7 +95,15 @@ mod tests {
     use super::*;
     use crate::machine::RAM_SIZE;
 
-    fn setup(ini: &str) -> (tempfile::TempDir, Arc<CheatStore>, PatchEngine, Vec<u8>, CheatRunner) {
+    fn setup(
+        ini: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<CheatStore>,
+        PatchEngine,
+        Vec<u8>,
+        CheatRunner,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("c.ini");
         std::fs::write(&file, ini).unwrap();

@@ -18,22 +18,24 @@ pub enum Page {
     Language,
     Controls,
     Card,
-    Cheats,
+    Mods,
     /// The memory watcher: shown only with the developer option (ADR 0048).
     Memory,
+    Cheats,
     Help,
     Quit,
 }
 
 impl Page {
-    pub const ALL: [Page; 9] = [
+    pub const ALL: [Page; 10] = [
         Page::Video,
         Page::Audio,
         Page::Language,
         Page::Controls,
         Page::Card,
-        Page::Cheats,
+        Page::Mods,
         Page::Memory,
+        Page::Cheats,
         Page::Help,
         Page::Quit,
     ];
@@ -52,8 +54,9 @@ impl Page {
             Page::Audio => "Audio",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
-            Page::Cheats => "Cheats",
+            Page::Mods => "Mods",
             Page::Memory => "Memory",
+            Page::Cheats => "Cheats",
             Page::Language => "Language",
             Page::Help => "Help",
             Page::Quit => "Quit",
@@ -90,9 +93,19 @@ pub struct UiState {
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
+    mods: crate::mods::ModsView,
 }
 
 impl UiState {
+    /// Scripted memory-page steps run whether or not the page (or the overlay) is shown.
+    pub fn memory_tick(&mut self, shared: &Shared) {
+        self.memory.tick(&shared.memory);
+    }
+
+    pub fn memory_live(&self) -> bool {
+        self.memory.live()
+    }
+
     pub fn new(page: Page) -> UiState {
         UiState {
             page,
@@ -106,6 +119,7 @@ impl UiState {
             cheat_picker: None,
             cheat_message: None,
             pad: crate::pad::PadView::default(),
+            mods: crate::mods::ModsView::default(),
             pad_selected: None,
         }
     }
@@ -143,7 +157,9 @@ pub fn show(
 ) {
     use fepor_core::settings::StatsMode;
     // the guest thread publishes memory copies only while the page is shown
-    shared.memory.set_active(open && st.page == Page::Memory);
+    shared
+        .memory
+        .set_active((open && st.page == Page::Memory) || st.memory.live());
     // the statistics go first so that the settings panel, painted after, covers them
     if stats != StatsMode::Off {
         stats_hud(root, &shared.stats(), stats == StatsMode::Full);
@@ -345,8 +361,9 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
-            Page::Cheats => cheats(ui, st, shared),
+            Page::Mods => crate::mods::page(ui, &mut st.mods, shared),
             Page::Memory => crate::memory::memory(ui, &mut st.memory, shared),
+            Page::Cheats => cheats(ui, st, shared),
             Page::Help => help(ui, shared),
             Page::Quit => quit(ui),
         });
@@ -684,7 +701,11 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     if ui
         .add_enabled(
             !choosing,
-            egui::Button::new(if choosing { "Choosing..." } else { "Import a Dolphin game INI..." }),
+            egui::Button::new(if choosing {
+                "Choosing..."
+            } else {
+                "Import a Dolphin game INI..."
+            }),
         )
         .clicked()
     {

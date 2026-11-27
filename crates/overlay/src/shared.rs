@@ -34,10 +34,10 @@ pub struct Shared {
     pub settings: SettingsHandle,
     pub controls: Arc<Mutex<Controls>>,
     pub data_dir: PathBuf,
-    /// The cheat list of the running game, applied by the guest thread (ADR 0026).
-    pub cheats: Arc<fepor_core::cheats::CheatStore>,
     /// The memory watcher's channel to the guest thread (ADR 0048).
     pub memory: Arc<fepor_core::memwatch::Link>,
+    /// The cheat list of the running game, applied by the guest thread (ADR 0026).
+    pub cheats: Arc<fepor_core::cheats::CheatStore>,
     /// The memory card in slot A, once the game opened it.
     pub card_path: Mutex<Option<PathBuf>>,
     display_millihz: AtomicU32,
@@ -57,6 +57,8 @@ fn key_of(code: KeyCode) -> Option<egui::Key> {
         KeyCode::Enter | KeyCode::NumpadEnter => egui::Key::Enter,
         KeyCode::Space => egui::Key::Space,
         KeyCode::Tab => egui::Key::Tab,
+        KeyCode::Backspace => egui::Key::Backspace,
+        KeyCode::Delete => egui::Key::Delete,
         KeyCode::Home => egui::Key::Home,
         KeyCode::End => egui::Key::End,
         _ => return None,
@@ -238,6 +240,7 @@ impl Shared {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(code),
+                        text,
                         state,
                         repeat,
                         ..
@@ -289,6 +292,17 @@ impl Shared {
                     c => {
                         if let Some(k) = key_of(*c) {
                             self.key(k, pressed, *repeat);
+                        }
+                        // typed characters for the text fields (the keys above carry no text of their own)
+                        if pressed {
+                            if let Some(t) = text
+                                .as_deref()
+                                .filter(|t| t.chars().all(|c| !c.is_control()))
+                            {
+                                if !t.is_empty() {
+                                    self.push(egui::Event::Text(t.to_owned()));
+                                }
+                            }
                         }
                     }
                 }
@@ -478,6 +492,32 @@ mod tests {
         );
         assert!(!s.gamepad_input("guide", 1.0));
         assert!(s.is_open());
+    }
+
+    #[test]
+    fn typed_text_reaches_a_text_field() {
+        let (s, _dir) = shared();
+        s.set_open(true);
+        s.push(egui::Event::Text("0x80".into()));
+        let ctx = egui::Context::default();
+        let mut value = String::new();
+        let mut raw = egui::RawInput {
+            focused: true,
+            ..Default::default()
+        };
+        let frame = |ctx: &egui::Context, raw: egui::RawInput, value: &mut String| {
+            let mut out = ctx.run_ui(raw, |ui| {
+                let r = ui.add(egui::TextEdit::singleline(value));
+                if ui.ctx().memory(|m| m.focused()).is_none() {
+                    r.request_focus();
+                }
+            });
+            out.textures_delta.clear();
+        };
+        frame(&ctx, raw.clone(), &mut value);
+        raw.events = s.take_events();
+        frame(&ctx, raw, &mut value);
+        assert_eq!(value, "0x80");
     }
 
     #[test]

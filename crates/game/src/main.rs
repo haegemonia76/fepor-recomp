@@ -156,6 +156,71 @@ fn install_jit(game_id: &str, dol: &Dol) {
     jit.precompile(symbols, workers);
 }
 
+/// Serve the files of the enabled mods instead of the disc's (ADR 0034); the rest of the disc is untouched.
+fn replace_files(
+    disc: Box<dyn fepor_core::Disc>,
+    mods: &fepor_core::mods::ModList,
+    game_id: &str,
+) -> Result<Box<dyn fepor_core::Disc>, String> {
+    for c in mods.conflicts(Some(game_id)) {
+        eprintln!("mods: {c}");
+    }
+    let files = mods.replacements(game_id);
+    if files.is_empty() {
+        return Ok(disc);
+    }
+    let modded = fepor_core::disc::ModdedDisc::new(disc, &files).map_err(|e| e.to_string())?;
+    for path in &modded.unmatched {
+        eprintln!("mods: {path} is not a file of this disc: ignored");
+    }
+    eprintln!("mods: {} disc file(s) replaced", modded.replaced());
+    Ok(Box::new(modded))
+}
+
+/// Register and enable the memory patches of the enabled mods, highest priority first. A mod whose bytes
+/// another enabled mod already patches stays off (the engine refuses it). Patches over the DOL's code change
+/// nothing (ADR 0025), so they are reported.
+fn apply_patch_mods(
+    m: &mut fepor_runtime::Machine,
+    mods: &fepor_core::mods::ModList,
+    game_id: &str,
+    dol: &Dol,
+) {
+    use fepor_runtime::patch::{Patch, PatchSet};
+    for md in mods.patch_mods(game_id) {
+        let patches: Vec<Patch> = md
+            .manifest
+            .patches
+            .iter()
+            .map(|p| Patch::new(p.address, p.bytes.clone()))
+            .collect();
+        for p in &md.manifest.patches {
+            let r = p.range();
+            let over_code = |s: &fepor_core::dol::Section| {
+                let start = (s.addr & 0x3FFF_FFFF) as u64;
+                r.start < start + s.size as u64 && start < r.end
+            };
+            if dol.text_sections().any(over_code) {
+                eprintln!("mods: {}: patch at {:#010x} is over the game's code and changes nothing", md.id, p.address);
+            }
+        }
+        let set = PatchSet {
+            source: format!("mod:{}", md.id),
+            game_id: game_id.to_string(),
+            patches,
+            continuous: md.manifest.continuous,
+        };
+        let done = m
+            .patches
+            .register(set)
+            .and_then(|id| m.patches.enable(id, &mut m.ram));
+        match done {
+            Ok(()) => eprintln!("mods: {}: {} patch(es) applied", md.id, md.manifest.patches.len()),
+            Err(e) => eprintln!("mods: {}: patches not applied: {e}", md.id),
+        }
+    }
+}
+
 fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Result<(), String> {
     // Keep the exported runtime symbols linked for the generated library.
     std::hint::black_box(abi::exports());
@@ -170,6 +235,9 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         )
     })?;
     let mut disc = open_disc(&game).map_err(|e| e.to_string())?;
+    let game_id = disc.game_id().to_string();
+    let mods = fepor_core::mods::ModList::load(&data);
+    disc = replace_files(disc, &mods, &game_id)?;
     let bytes = disc.dol().map_err(|e| e.to_string())?;
     version::check(disc.game_id(), &bytes).map_err(|e| e.to_string())?;
     let dol = Dol::parse(bytes).map_err(|e| e.to_string())?;
@@ -188,6 +256,7 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         m.hw.set_audio_sink(sink);
     }
     m.patches.set_game(disc.game_id()).map_err(|e| e.to_string())?;
+    m.patches.attach_watcher(overlay.memory.clone());
     // physical ranges of the DOL's code: recompiled, so cheats writing there would do nothing
     let code = dol
         .text_sections()
@@ -195,11 +264,11 @@ fn run(window: Option<Arc<Window>>, overlay: Arc<fepor_overlay::Shared>) -> Resu
         .collect();
     overlay.cheats.set_game(disc.game_id(), code);
     m.cheats.attach(overlay.cheats.clone());
-    m.patches.attach_watcher(overlay.memory.clone());
     insert_cards(m, disc.game_id(), Some(&data), &overlay);
     m.hw.set_language(overlay.settings.get().game.language.sram_code());
     let entry = boot::setup(m, &mut *disc, &dol)?;
     boot::attach_disc(m, disc);
+    apply_patch_mods(m, &mods, &game_id, &dol);
     abi::start_watchdog();
     let mut ctx = Context::new(m.ram_ptr());
     fepor_runtime::sched::init(&mut *ctx);
