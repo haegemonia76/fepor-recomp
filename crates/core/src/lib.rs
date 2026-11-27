@@ -8,11 +8,12 @@ pub mod dol;
 pub mod extract;
 pub mod image;
 pub mod memcard;
-pub mod mods;
 pub mod memwatch;
+pub mod mods;
 pub mod paths;
 pub mod settings;
 pub mod stats;
+pub mod text;
 pub mod version;
 
 pub use config::Config;
