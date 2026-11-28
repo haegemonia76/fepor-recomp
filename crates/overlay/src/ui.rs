@@ -1189,10 +1189,10 @@ fn character(
     };
     ui.label(RichText::new(format!("Character: {} ({})", ch.name, ch.class)).strong());
     ui.label(
-        RichText::new("Type a new Base; the sheet shows Base + Class + Other, up to the class cap.").small().weak(),
+        RichText::new("Type a new Base; Final is the sheet total (Base + Class + Other, up to the class cap).").small().weak(),
     );
     egui::Grid::new("cheat_character").num_columns(8).spacing([10.0, 3.0]).show(ui, |ui| {
-        for h in ["", "Base", "Class", "Other", "Total", "New base", "", ""] {
+        for h in ["", "Base", "Class", "Other", "New base", "", "Min-max", "Final"] {
             ui.label(RichText::new(h).small().weak());
         }
         ui.end_row();
@@ -1206,11 +1206,14 @@ fn character(
             ui.label(dash(r.class));
             ui.label(dash(r.other));
             let color = if flash { crate::theme::GOLD } else { ui.visuals().text_color() };
-            let text = st.cheat_amounts.entry(key.clone()).or_default();
+            // FEPOR_CHEAT_TYPED="Str=10;HP now=5": text already typed in these fields (headless renders)
+            let seed = std::env::var("FEPOR_CHEAT_TYPED").ok().and_then(|v| {
+                v.split(';').find_map(|p| p.split_once('=').filter(|(l, _)| *l == r.label).map(|(_, v)| v.to_string()))
+            });
+            let text = st.cheat_amounts.entry(key.clone()).or_insert_with(|| seed.unwrap_or_default());
             let value = typed(text);
             let ok = value.is_some_and(|v| (r.min as i64..=r.max as i64).contains(&v));
             let new_total = value.filter(|_| ok).map(|v| (v as i32 + r.class.unwrap_or(0) + r.other.unwrap_or(0)).min(r.cap));
-            ui.label(RichText::new(r.total.to_string()).color(color).strong());
             let bad = !text.trim().is_empty() && !ok;
             ui.add(egui::TextEdit::singleline(text).desired_width(44.0).text_color(if bad {
                 Color32::LIGHT_RED
@@ -1222,12 +1225,10 @@ fn character(
                 shared.cheats.request_stat(&r.label, v);
                 st.cheat_flash.insert(key.clone(), Instant::now());
             }
-            let hint = match (bad, new_total) {
-                (true, _) => RichText::new(format!("{}-{} only", r.min, r.max)).small().color(Color32::LIGHT_RED),
-                (_, Some(t)) if r.class.is_some() => RichText::new(format!("-> {t}")).small(),
-                _ => RichText::new(format!("{}-{}", r.min, r.max)).small().weak(),
-            };
-            ui.label(hint);
+            ui.label(RichText::new(format!("{}-{}", r.min, r.max)).small().weak());
+            let final_total = new_total.filter(|_| value != Some(r.base as i64)).unwrap_or(r.total);
+            let final_color = if bad { Color32::LIGHT_RED } else { color };
+            ui.label(RichText::new(final_total.to_string()).color(final_color).strong());
             ui.end_row();
         }
     });
