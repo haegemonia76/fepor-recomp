@@ -245,4 +245,36 @@ mod tests {
         runner.sync(&mut engine, &mut ram);
         assert_eq!(ram[0x3000..0x3004], 7777u32.to_be_bytes());
     }
+
+    #[test]
+    fn add_and_set_are_never_reapplied_by_a_load_or_a_saved_enabled_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("cheats")).unwrap();
+        std::fs::write(
+            data.join("cheats/GFEP01.toml"),
+            "[[cheat]]\nname = \"Gold\"\nkind = \"add\"\n[[cheat.write]]\naddress = 0x80003000\n",
+        )
+        .unwrap();
+        // a hand-written (or old) enabled list naming the add cheat
+        std::fs::write(data.join("cheats.toml"), "[enabled]\nGFEP01 = [\"native:Gold\"]\n").unwrap();
+        let store = Arc::new(CheatStore::new(data));
+        store.set_game("GFEP01", vec![]);
+        assert!(store.wanted().is_empty());
+        assert!(!store.list()[0].enabled);
+        let mut engine = PatchEngine::default();
+        engine.set_game("GFEP01").unwrap();
+        let mut runner = CheatRunner::default();
+        runner.attach(store.clone());
+        let mut ram = vec![0; RAM_SIZE];
+        ram[0x3000..0x3004].copy_from_slice(&100u32.to_be_bytes());
+        runner.sync(&mut engine, &mut ram);
+        engine.reapply(&mut ram); // what a save-state load does
+        assert_eq!(ram[0x3000..0x3004], 100u32.to_be_bytes());
+        store.request("native:Gold", 5);
+        runner.sync(&mut engine, &mut ram);
+        engine.reapply(&mut ram);
+        engine.frame(1, &mut ram);
+        assert_eq!(ram[0x3000..0x3004], 105u32.to_be_bytes(), "added once, not again");
+    }
 }

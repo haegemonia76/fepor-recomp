@@ -25,7 +25,7 @@ address = 0x8033A720
 
 [[cheat]]
 name = "Add bonus EXP"
-description = "Adds the typed amount of bonus experience once (cap 99,999). Nothing is held or reverted."
+description = "UNCONFIRMED address (no screen in the prologue shows bonus EXP). Adds the typed amount of bonus experience once (cap 99,999). Nothing is held or reverted."
 game = "GFEP01"
 kind = "add"
 max = 99999
@@ -34,7 +34,7 @@ address = 0x8033A724
 
 [[cheat]]
 name = "Set bonus EXP"
-description = "Sets the bonus experience to the typed value once (0 to 99,999). Nothing is held or reverted."
+description = "UNCONFIRMED address (no screen in the prologue shows bonus EXP). Sets the bonus experience to the typed value once (0 to 99,999). Nothing is held or reverted."
 game = "GFEP01"
 kind = "set"
 max = 99999
