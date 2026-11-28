@@ -2,29 +2,48 @@
 # The funds and event-points fields are in the game's global struct at 0x8033A708 (the debug text "Funds :%7dG" /
 # "EvtPts:%7dP" of the game reads +0x18 / +0x1C).
 
-[[cheat]]
-name = "Max funds"
-description = "Funds stay at 9,999,999 gold (the game's cap)."
-game = "GFEP01"
-continuous = true
-[[cheat.write]]
-address = 0x8033A720
-size = 4
-value = 9999999
+# Funds and bonus EXP are one-shot (kind add / set): the Cheats page has an input and an Apply button, the value is
+# written once and never reverted. The caps are the game's: 9,999,999 gold, 99,999 bonus EXP.
 
 [[cheat]]
-name = "Max bonus EXP"
-description = "Bonus experience (event points) stays at 99,999."
+name = "Add funds"
+description = "Adds the typed gold once (cap 9,999,999)."
 game = "GFEP01"
-continuous = true
+kind = "add"
+max = 9999999
+[[cheat.write]]
+address = 0x8033A720
+
+[[cheat]]
+name = "Set funds"
+description = "Sets the gold once (0 to 9,999,999)."
+game = "GFEP01"
+kind = "set"
+max = 9999999
+[[cheat.write]]
+address = 0x8033A720
+
+[[cheat]]
+name = "Add bonus EXP"
+description = "UNCONFIRMED: the address is not shown by any screen reachable so far. Adds bonus EXP once (cap 99,999)."
+game = "GFEP01"
+kind = "add"
+max = 99999
 [[cheat.write]]
 address = 0x8033A724
-size = 4
-value = 99999
+
+[[cheat]]
+name = "Set bonus EXP"
+description = "UNCONFIRMED: the address is not shown by any screen reachable so far. Sets bonus EXP once (0 to 99,999)."
+game = "GFEP01"
+kind = "set"
+max = 99999
+[[cheat.write]]
+address = 0x8033A724
 
 [[cheat]]
 name = "Ike HP 99 (prologue)"
-description = "Ike's current HP is held at 99. The address is where the prologue map keeps Ike; it only applies while Ike's record is there."
+description = "Holds Ike's current HP at 99 while on (prologue map only); off puts back the value it had."
 game = "GFEP01"
 continuous = true
 [[cheat.write]]
@@ -35,3 +54,104 @@ value = 99
 address = 0x802BBB50
 size = 4
 value = 0x80900E10
+
+# The character the status sheet shows (ADR 0033, ticket #66): the game keeps the address of the unit object it last
+# displayed at 0x8033B12C (status sheet, map hover window), and copies of the person (PID_*) and job (JID_*) record
+# pointers at 0x8033B034 / 0x8033B038. The unit object keeps them at +0x188 (person) and +0x18C (job). The sheet
+# shows min(person bonus + job base + unit gains, job cap); the cheat writes only the person bonus ("Base", a
+# record of that one character), never the job record (shared by every unit of the class) and never the unit's gains.
+#   person +0x1D..0x24  HP Str Mag Skl Spd Lck Def Res (character's own)
+#   job    +0x44..0x4B  the same, class base          job +0x4C..0x53 caps (0: none stored)
+#   unit   +0x1AB..0x1B2 the same, gains (level-ups)  unit +0x19A level, +0x19B EXP, +0x1A8 current HP
+
+[character]
+game = "GFEP01"
+unit = 0x8033B12C
+person_at = 0x188
+job_at = 0x18C
+person_check = 0x8033B034
+job_check = 0x8033B038
+
+[[character.row]]
+label = "Lv"
+base = { rec = "unit", off = 0x19A }
+min = 1
+max_total = 20
+note = "the stats are not recomputed"
+
+[[character.row]]
+label = "EXP"
+base = { rec = "unit", off = 0x19B }
+max_total = 99
+
+[[character.row]]
+label = "HP"
+base = { rec = "person", off = 0x1D }
+class = { rec = "job", off = 0x44 }
+other = { rec = "unit", off = 0x1AB }
+cap = { rec = "job", off = 0x4C }
+max_total = 99
+
+[[character.row]]
+label = "HP now"
+base = { rec = "unit", off = 0x1A8 }
+min = 1
+max_total = 99
+max_total_of = "HP"
+
+[[character.row]]
+label = "Str"
+base = { rec = "person", off = 0x1E }
+class = { rec = "job", off = 0x45 }
+other = { rec = "unit", off = 0x1AC }
+cap = { rec = "job", off = 0x4D }
+max_total = 99
+
+[[character.row]]
+label = "Mag"
+base = { rec = "person", off = 0x1F }
+class = { rec = "job", off = 0x46 }
+other = { rec = "unit", off = 0x1AD }
+cap = { rec = "job", off = 0x4E }
+max_total = 99
+
+[[character.row]]
+label = "Skill"
+base = { rec = "person", off = 0x20 }
+class = { rec = "job", off = 0x47 }
+other = { rec = "unit", off = 0x1AE }
+cap = { rec = "job", off = 0x4F }
+max_total = 99
+
+[[character.row]]
+label = "Sp"
+base = { rec = "person", off = 0x21 }
+class = { rec = "job", off = 0x48 }
+other = { rec = "unit", off = 0x1AF }
+cap = { rec = "job", off = 0x50 }
+max_total = 99
+
+[[character.row]]
+label = "Lck"
+base = { rec = "person", off = 0x22 }
+class = { rec = "job", off = 0x49 }
+other = { rec = "unit", off = 0x1B0 }
+cap = { rec = "job", off = 0x51 }
+max_total = 40
+note = "no cap is stored for luck: 40 is the limit this table sets"
+
+[[character.row]]
+label = "Def"
+base = { rec = "person", off = 0x23 }
+class = { rec = "job", off = 0x4A }
+other = { rec = "unit", off = 0x1B1 }
+cap = { rec = "job", off = 0x52 }
+max_total = 99
+
+[[character.row]]
+label = "Res"
+base = { rec = "person", off = 0x24 }
+class = { rec = "job", off = 0x4B }
+other = { rec = "unit", off = 0x1B2 }
+cap = { rec = "job", off = 0x53 }
+max_total = 99

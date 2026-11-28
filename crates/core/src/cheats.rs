@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,50 @@ impl Kind {
             Kind::Native => "native",
         }
     }
+}
+
+/// What a cheat does (ADR 0033).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Writes its value when turned on (once, or every frame when `continuous`); turning it off puts back the
+    /// bytes it replaced.
+    Hold,
+    /// "Apply" adds the typed amount to the current value, once, clamped to `min..=max`. Never reverted.
+    Add,
+    /// "Apply" writes the typed value, once, clamped to `min..=max`. Never reverted.
+    Set,
+}
+
+impl Action {
+    /// Add and Set are one-shot: there is no checkbox and nothing to revert.
+    pub fn once(self) -> bool {
+        self != Action::Hold
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Action::Hold => "hold",
+            Action::Add => "add once",
+            Action::Set => "set once",
+        }
+    }
+}
+
+/// The new value of an Add/Set: `current + amount` or `amount`, clamped to `min..=max`.
+pub fn amount_result(action: Action, current: u32, amount: i64, min: i64, max: i64) -> u32 {
+    let raw = match action {
+        Action::Add => current as i64 + amount,
+        _ => amount,
+    };
+    raw.clamp(min, max) as u32
+}
+
+/// What an Apply did: the value before and after, and whether the cap or the floor changed the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Applied {
+    pub before: u32,
+    pub after: u32,
+    pub clamped: bool,
 }
 
 /// How a [`Condition`] compares the value in RAM with its own.
@@ -109,9 +153,56 @@ pub struct Cheat {
     pub writes: Result<Vec<Write>, String>,
     /// Held every frame (Gecko and Action Replay codes always are) or written once when turned on.
     pub continuous: bool,
+    /// Hold for everything but the native cheats that ask for Add or Set.
+    pub action: Action,
+    /// Bounds of an Add/Set result (unused by Hold).
+    pub min: i64,
+    pub max: i64,
 }
 
 impl Cheat {
+    /// Add or Set the typed `amount` once on `ram` (main RAM from physical address 0): reads the current
+    /// big-endian value of the cheat's single write, computes the result clamped to `min..=max`, writes it.
+    /// Nothing is remembered: no later toggle restores anything. Refused when the cheat's condition does not
+    /// hold, or the cheat is a Hold one.
+    pub fn apply(&self, amount: i64, ram: &mut [u8]) -> Result<Applied, String> {
+        if !self.action.once() {
+            return Err("this cheat is held while on, not applied".into());
+        }
+        let w = match self.writes.as_ref().map(|w| w.as_slice()) {
+            Ok([w]) => w,
+            Ok(_) => return Err("the cheat needs exactly one write".into()),
+            Err(e) => return Err(e.clone()),
+        };
+        if w.when.is_some_and(|c| !c.holds(ram)) {
+            return Err("the game is not in the state this cheat needs (its condition does not hold)".into());
+        }
+        let p = (w.addr & 0x3FFF_FFFF) as usize;
+        let cell = ram.get_mut(p..p + w.bytes.len()).ok_or("address outside main RAM")?;
+        let before = cell.iter().fold(0u32, |v, b| v << 8 | *b as u32);
+        let after = amount_result(self.action, before, amount, self.min, self.max);
+        let raw = match self.action {
+            Action::Add => before as i64 + amount,
+            _ => amount,
+        };
+        let n = cell.len();
+        cell.copy_from_slice(&after.to_be_bytes()[4 - n..]);
+        Ok(Applied { before, after, clamped: raw != after as i64 })
+    }
+
+    /// The value an Add/Set cheat would change now (`None`: its condition does not hold, or it is a held cheat).
+    pub fn current(&self, ram: &[u8]) -> Option<u32> {
+        if !self.action.once() {
+            return None;
+        }
+        let w = self.writes.as_ref().ok()?.first()?;
+        if w.when.is_some_and(|c| !c.holds(ram)) {
+            return None;
+        }
+        let p = (w.addr & 0x3FFF_FFFF) as usize;
+        ram.get(p..p + w.bytes.len()).map(|b| b.iter().fold(0u32, |v, b| v << 8 | *b as u32))
+    }
+
     /// Identity used in the enabled lists (`gecko:Name`, `ar:Name`).
     pub fn key(&self) -> String {
         format!("{}:{}", self.kind.tag(), self.name)
@@ -124,6 +215,9 @@ pub struct Ini {
     /// Keys listed in `[Gecko_Enabled]` / `[ActionReplay_Enabled]`.
     pub enabled: Vec<String>,
 }
+
+/// Prefix of the request key of a character stat (never a cheat key: those start with the kind tag).
+const CHAR_KEY: &str = "char:";
 
 const RAM_MAX_WRITE: usize = 24 << 20;
 
@@ -302,6 +396,9 @@ pub fn parse_ini(text: &str) -> Ini {
                         lines: Vec::new(),
                         writes: Err(String::new()),
                         continuous: true,
+                        action: Action::Hold,
+                        min: 0,
+                        max: 0,
                     });
                 } else if let Some(n) = line.strip_prefix('*') {
                     if let Some(c) = &mut current {
@@ -328,18 +425,27 @@ pub struct CheatView {
     pub name: String,
     pub author: String,
     pub kind: Kind,
+    pub action: Action,
+    pub min: i64,
+    pub max: i64,
     pub notes: Vec<String>,
     pub enabled: bool,
     /// `Err(reason)`: the code cannot run and its checkbox is disabled.
     pub supported: Result<(), String>,
     /// Why the runtime could not apply an enabled code (overlap with a mod, ...).
     pub status: Option<String>,
+    /// What the last Apply of an Add/Set cheat did (`Err`: why it did not).
+    pub result: Option<Result<String, String>>,
+    /// The value an Add/Set cheat acts on, read by the guest thread a few times a second.
+    pub current: Option<u32>,
 }
 
 struct Entry {
     cheat: Cheat,
     enabled: bool,
     status: Option<String>,
+    result: Option<Result<String, String>>,
+    current: Option<u32>,
 }
 
 #[derive(Default)]
@@ -351,6 +457,12 @@ struct Inner {
     native: Vec<Cheat>,
     native_error: Option<String>,
     entries: Vec<Entry>,
+    /// Apply clicks waiting for the guest thread: (key, amount).
+    requests: Vec<(String, i64)>,
+    /// The character table of the game and what the displayed unit looks like (ADR 0033, `crate::character`).
+    character: Option<crate::character::CharDef>,
+    character_view: Option<Result<crate::character::CharView, String>>,
+    ticks: u32,
 }
 
 /// `<data>/cheats.toml`: the enabled codes per game ID.
@@ -366,6 +478,8 @@ pub struct CheatStore {
     data: PathBuf,
     inner: Mutex<Inner>,
     generation: AtomicU64,
+    /// Set when `Inner::requests` is not empty.
+    pending: AtomicBool,
 }
 
 fn overlaps_code(w: &Write, code: &[std::ops::Range<u32>]) -> bool {
@@ -393,6 +507,7 @@ impl CheatStore {
             data,
             inner: Mutex::default(),
             generation: AtomicU64::new(0),
+            pending: AtomicBool::new(false),
         }
     }
 
@@ -457,9 +572,11 @@ impl CheatStore {
         inner.entries = cheats
             .into_iter()
             .map(|cheat| Entry {
-                enabled: enabled.contains(&cheat.key()) && cheat.writes.is_ok(),
+                enabled: enabled.contains(&cheat.key()) && cheat.writes.is_ok() && !cheat.action.once(),
                 cheat,
                 status: None,
+                result: None,
+                current: None,
             })
             .collect();
     }
@@ -477,7 +594,10 @@ impl CheatStore {
             .remove(game)
             .unwrap_or_else(|| ini.enabled.clone());
         let (native, native_error) = crate::native::load(game, &self.data.join("cheats").join(format!("{game}.toml")));
+        let (character, _) = crate::native::load_character(game, &self.data.join("cheats").join(format!("{game}.toml")));
         let mut inner = self.lock();
+        inner.character = character;
+        inner.character_view = None;
         inner.game = Some(game.into());
         inner.code = code;
         inner.native = native;
@@ -500,10 +620,15 @@ impl CheatStore {
                 name: e.cheat.name.clone(),
                 author: e.cheat.author.clone(),
                 kind: e.cheat.kind,
+                action: e.cheat.action,
+                min: e.cheat.min,
+                max: e.cheat.max,
                 notes: e.cheat.notes.clone(),
                 enabled: e.enabled,
                 supported: e.cheat.writes.as_ref().map(|_| ()).map_err(|s| s.clone()),
                 status: e.status.clone(),
+                result: e.result.clone(),
+                current: e.current,
             })
             .collect()
     }
@@ -514,7 +639,7 @@ impl CheatStore {
         let Some(e) = inner.entries.iter_mut().find(|e| e.cheat.key() == key) else {
             return;
         };
-        if e.enabled == on || (on && e.cheat.writes.is_err()) {
+        if e.enabled == on || (on && (e.cheat.writes.is_err() || e.cheat.action.once())) {
             return;
         }
         e.enabled = on;
@@ -558,7 +683,7 @@ impl CheatStore {
         self.lock()
             .entries
             .iter()
-            .filter(|e| e.enabled)
+            .filter(|e| e.enabled && !e.cheat.action.once())
             .filter_map(|e| {
                 Some(Wanted {
                     key: e.cheat.key(),
@@ -568,6 +693,70 @@ impl CheatStore {
                 })
             })
             .collect()
+    }
+
+    /// The player clicked Apply on an Add/Set cheat with `amount`; the guest thread does it on its next frame
+    /// ([`CheatStore::take_requests`]). Does not move the generation: nothing is held.
+    pub fn request(&self, key: &str, amount: i64) {
+        let mut inner = self.lock();
+        if inner.entries.iter().any(|e| e.cheat.key() == key && e.cheat.action.once()) {
+            inner.requests.push((key.to_string(), amount));
+            self.pending.store(true, Ordering::Release);
+        }
+    }
+
+    /// The player clicked Apply on a row of the character table: write `typed` as that stat's base for the unit
+    /// the game displays, on the guest thread's next frame.
+    pub fn request_stat(&self, label: &str, typed: i64) {
+        let mut inner = self.lock();
+        if inner.character.is_some() {
+            inner.requests.push((format!("{CHAR_KEY}{label}"), typed));
+            self.pending.store(true, Ordering::Release);
+        }
+    }
+
+    /// The displayed character as the guest thread last read it (`None`: the game has no character table;
+    /// `Err`: no sheet is shown).
+    pub fn character(&self) -> Option<Result<crate::character::CharView, String>> {
+        let inner = self.lock();
+        inner.character.as_ref()?;
+        Some(inner.character_view.clone().unwrap_or_else(|| Err("Open a character sheet (Y on the map)".into())))
+    }
+
+    /// Once per frame on the guest thread: apply the waiting Add/Set and stat requests on `ram`, record what each
+    /// did, and a few times a second refresh what the page shows (current values, the displayed character).
+    pub fn run_requests(&self, ram: &mut [u8]) {
+        let pending = self.pending.swap(false, Ordering::AcqRel);
+        let mut inner = self.lock();
+        inner.ticks = inner.ticks.wrapping_add(1);
+        if !pending && !inner.ticks.is_multiple_of(6) {
+            return;
+        }
+        for (key, amount) in std::mem::take(&mut inner.requests) {
+            if let Some(label) = key.strip_prefix(CHAR_KEY) {
+                if let Some(def) = &inner.character {
+                    if let Err(e) = def.apply(ram, label, amount) {
+                        eprintln!("cheats: stat {label}: {e}");
+                    }
+                }
+                continue;
+            }
+            let Some(e) = inner.entries.iter_mut().find(|e| e.cheat.key() == key) else {
+                continue;
+            };
+            e.result = Some(e.cheat.apply(amount, ram).map(|a| {
+                let note = if a.clamped {
+                    format!(" (limited to {}..{})", e.cheat.min, e.cheat.max)
+                } else {
+                    String::new()
+                };
+                format!("{} -> {}{note}", a.before, a.after)
+            }));
+        }
+        for e in inner.entries.iter_mut().filter(|e| e.cheat.action.once()) {
+            e.current = e.cheat.current(ram);
+        }
+        inner.character_view = inner.character.as_ref().map(|d| d.view(ram));
     }
 
     /// The guest thread reports why a wanted code is not applied (`None`: it is). Does not move the generation.

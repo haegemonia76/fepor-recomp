@@ -36,11 +36,12 @@ impl CheatRunner {
         self.store = Some(store);
     }
 
-    /// Bring the engine in line with the store: revert the codes turned off, apply those turned on. A cheat is a
+    /// Apply the Add/Set clicks of the page (once, nothing kept), then bring the engine in line with the store: revert the codes turned off, apply those turned on. A cheat is a
     /// continuous set (a code holds its value, the game's own writes are overwritten every frame) unless a native
     /// cheat asks for one write.
     pub fn sync(&mut self, patches: &mut PatchEngine, ram: &mut [u8]) {
         let Some(store) = &self.store else { return };
+        store.run_requests(ram);
         let generation = store.generation();
         if generation == self.seen {
             return;
@@ -201,5 +202,79 @@ mod tests {
         // the choice is saved with the Gecko ones
         let saved = std::fs::read_to_string(dir.path().join("data/cheats.toml")).unwrap();
         assert!(saved.contains("native:Once") && saved.contains("native:Held if flag"), "{saved}");
+    }
+
+    #[test]
+    fn add_and_set_are_applied_once_and_never_reverted() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("cheats")).unwrap();
+        std::fs::write(
+            data.join("cheats/GFEP01.toml"),
+            "[[cheat]]\nname = \"Gold\"\nkind = \"add\"\nmax = 9999999\n[[cheat.write]]\naddress = 0x80003000\n\
+             [[cheat]]\nname = \"Level\"\nkind = \"set\"\nmax = 20\n[[cheat.write]]\naddress = 0x80003010\nsize = 1\n",
+        )
+        .unwrap();
+        let store = Arc::new(CheatStore::new(data));
+        store.set_game("GFEP01", vec![]);
+        let mut engine = PatchEngine::default();
+        engine.set_game("GFEP01").unwrap();
+        let mut runner = CheatRunner::default();
+        runner.attach(store.clone());
+        let mut ram = vec![0; RAM_SIZE];
+        ram[0x3000..0x3004].copy_from_slice(&5000u32.to_be_bytes());
+        // no checkbox: enabling does nothing, and they never become a held set
+        store.set_enabled("native:Gold", true);
+        assert!(store.wanted().is_empty());
+        store.request("native:Gold", 1000);
+        store.request("native:Level", 50);
+        runner.sync(&mut engine, &mut ram);
+        assert_eq!(ram[0x3000..0x3004], 6000u32.to_be_bytes());
+        assert_eq!(ram[0x3010], 20);
+        let r = |k: &str| store.list().into_iter().find(|c| c.key == k).unwrap().result.unwrap();
+        assert_eq!(r("native:Gold").unwrap(), "5000 -> 6000");
+        assert!(r("native:Level").unwrap().contains("limited"));
+        // the game earns gold; frames and toggles restore nothing
+        ram[0x3000..0x3004].copy_from_slice(&7777u32.to_be_bytes());
+        for f in 1..4 {
+            engine.frame(f, &mut ram);
+            runner.sync(&mut engine, &mut ram);
+        }
+        store.set_enabled("native:Gold", false);
+        store.set_enabled("native:Gold", true);
+        runner.sync(&mut engine, &mut ram);
+        assert_eq!(ram[0x3000..0x3004], 7777u32.to_be_bytes());
+    }
+
+    #[test]
+    fn add_and_set_are_never_reapplied_by_a_load_or_a_saved_enabled_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("cheats")).unwrap();
+        std::fs::write(
+            data.join("cheats/GFEP01.toml"),
+            "[[cheat]]\nname = \"Gold\"\nkind = \"add\"\n[[cheat.write]]\naddress = 0x80003000\n",
+        )
+        .unwrap();
+        // a hand-written (or old) enabled list naming the add cheat
+        std::fs::write(data.join("cheats.toml"), "[enabled]\nGFEP01 = [\"native:Gold\"]\n").unwrap();
+        let store = Arc::new(CheatStore::new(data));
+        store.set_game("GFEP01", vec![]);
+        assert!(store.wanted().is_empty());
+        assert!(!store.list()[0].enabled);
+        let mut engine = PatchEngine::default();
+        engine.set_game("GFEP01").unwrap();
+        let mut runner = CheatRunner::default();
+        runner.attach(store.clone());
+        let mut ram = vec![0; RAM_SIZE];
+        ram[0x3000..0x3004].copy_from_slice(&100u32.to_be_bytes());
+        runner.sync(&mut engine, &mut ram);
+        engine.reapply(&mut ram); // what a save-state load does
+        assert_eq!(ram[0x3000..0x3004], 100u32.to_be_bytes());
+        store.request("native:Gold", 5);
+        runner.sync(&mut engine, &mut ram);
+        engine.reapply(&mut ram);
+        engine.frame(1, &mut ram);
+        assert_eq!(ram[0x3000..0x3004], 105u32.to_be_bytes(), "added once, not again");
     }
 }

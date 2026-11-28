@@ -100,6 +100,10 @@ pub struct UiState {
     /// The INI chooser of the cheats page, and what came of the last import.
     cheat_picker: Option<Receiver<Option<PathBuf>>>,
     cheat_message: Option<Result<String, String>>,
+    /// The amount typed for each add/set cheat (by key).
+    cheat_amounts: std::collections::HashMap<String, String>,
+    /// When each Apply was clicked (by input key), for the short highlight of the new value.
+    cheat_flash: std::collections::HashMap<String, Instant>,
     pad: crate::pad::PadView,
     /// The gamepad input picked on the drawing of the pad.
     pad_selected: Option<&'static str>,
@@ -109,7 +113,7 @@ pub struct UiState {
 impl UiState {
     /// Scripted memory-page steps run whether or not the page (or the overlay) is shown.
     pub fn memory_tick(&mut self, shared: &Shared) {
-        self.memory.tick(&shared.memory);
+        self.memory.tick(shared);
     }
 
     pub fn memory_live(&self) -> bool {
@@ -128,6 +132,8 @@ impl UiState {
             pending_at: None,
             cheat_picker: None,
             cheat_message: None,
+            cheat_amounts: Default::default(),
+            cheat_flash: Default::default(),
             pad: crate::pad::PadView::default(),
             mods: crate::mods::ModsView::default(),
             pad_selected: None,
@@ -472,7 +478,12 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         ui.separator();
         let footer = 22.0;
         let h = (ui.available_height() - footer).max(40.0);
-        egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| match st.page {
+        let mut area = egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]);
+        // FEPOR_OVERLAY_SCROLL=<points>: start the page scrolled (headless frame dumps cannot scroll)
+        if let Some(y) = std::env::var("FEPOR_OVERLAY_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+            area = area.vertical_scroll_offset(y);
+        }
+        area.show(ui, |ui| match st.page {
             Page::Video => video(ui, shared),
             Page::Audio => audio(ui, shared),
             Page::Speed => speed(ui, shared),
@@ -1033,13 +1044,25 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     if native.is_empty() {
         ui.label(format!("No native cheats for {game}."));
     }
-    for c in native {
+    for c in native.iter().filter(|c| !c.action.once()) {
         cheat_row(ui, shared, c);
+    }
+    let once: Vec<_> = native.iter().filter(|c| c.action.once()).collect();
+    if !once.is_empty() {
+        egui::Grid::new("cheat_once").num_columns(5).spacing([8.0, 3.0]).show(ui, |ui| {
+            for c in once {
+                once_row(ui, st, shared, c);
+            }
+        });
+    }
+    if let Some(ch) = shared.cheats.character() {
+        ui.add_space(6.0);
+        character(ui, st, shared, ch);
     }
     ui.label(
         RichText::new(
-            "Shipped with the game's addresses; add your own in cheats/<game id>.toml of the data folder (same \
-             name replaces a shipped one).",
+            "Checked: held every frame, put back when unchecked. Apply: written once, never undone. Your own \
+             cheats: cheats/<game id>.toml in the data folder.",
         )
         .small()
         .weak(),
@@ -1090,36 +1113,145 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     ui.add_space(8.0);
     ui.label(
         RichText::new(
-            "Cheats hold their value every frame while on; turning one off puts the game's value back. Only plain \
-             writes to data run: conditionals, loops, pointers and code insertion are listed as not supported.",
+            "Gecko and Action Replay codes hold their value every frame while on; turning one off puts the game's \
+             value back. Only plain writes to data run: conditionals, loops, pointers and code insertion are listed as not supported.",
         )
         .small()
         .weak(),
     );
 }
 
+/// What the typed text means: an integer (digits, `,` and `_` allowed).
+fn typed(text: &str) -> Option<i64> {
+    text.trim().replace([',', '_'], "").parse::<i64>().ok()
+}
+
+/// How long the new value of an Apply stays highlighted.
+const FLASH: Duration = Duration::from_millis(1500);
+
+fn flashing(st: &UiState, ui: &egui::Ui, key: &str) -> bool {
+    let on = st.cheat_flash.get(key).is_some_and(|t| t.elapsed() < FLASH);
+    if on {
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
+    }
+    on
+}
+
+/// An add / set cheat, one grid row: name, current value, input, Apply, limit. Nothing is held or reverted.
+fn once_row(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, c: &fepor_core::cheats::CheatView) {
+    use fepor_core::cheats::Action;
+    let flash = flashing(st, ui, &c.key);
+    let text = st.cheat_amounts.entry(c.key.clone()).or_default();
+    let amount = typed(text);
+    let mut tip = c.notes.join(" ");
+    if let Err(why) = &c.supported {
+        tip = format!("not supported: {why}");
+    }
+    let tag = tip.contains("UNCONFIRMED").then_some(" (?)").unwrap_or("");
+    ui.label(format!("{}{tag}", c.name)).on_hover_text(tip);
+    match c.current {
+        Some(v) => ui.label(RichText::new(v.to_string()).color(if flash { crate::theme::GOLD } else { ui.visuals().text_color() })),
+        None => ui.label("-"),
+    };
+    let bad = !text.trim().is_empty() && amount.is_none();
+    // add_sized: a Grid cell would otherwise shrink the field to the width of its first frame
+    ui.add_sized(
+        [104.0, ui.spacing().interact_size.y],
+        egui::TextEdit::singleline(text)
+            .hint_text(if c.action == Action::Add { "amount" } else { "value" })
+            .text_color(if bad { Color32::LIGHT_RED } else { ui.visuals().text_color() }),
+    );
+    let go = ui.add_enabled(amount.is_some() && c.supported.is_ok(), egui::Button::new("Apply"));
+    if let (true, Some(a)) = (go.clicked(), amount) {
+        shared.cheats.request(&c.key, a);
+        st.cheat_flash.insert(c.key.clone(), Instant::now());
+    }
+    match &c.result {
+        Some(Err(e)) => ui.colored_label(Color32::LIGHT_RED, "refused").on_hover_text(e),
+        _ => ui.label(RichText::new(format!("max {}", c.max)).small().weak()),
+    };
+    ui.end_row();
+}
+
+/// The displayed character: a header and one table row per stat, `Base` being the only column that is written.
+fn character(
+    ui: &mut egui::Ui,
+    st: &mut UiState,
+    shared: &Shared,
+    ch: Result<fepor_core::character::CharView, String>,
+) {
+    let ch = match ch {
+        Ok(c) => c,
+        Err(e) => {
+            ui.label(RichText::new("Character").strong());
+            ui.label(RichText::new(e).weak());
+            return;
+        }
+    };
+    ui.label(RichText::new(format!("Character: {} ({})", ch.name, ch.class)).strong());
+    ui.label(
+        RichText::new("Type a new Base; Final is the sheet total (Base + Class + Other, up to the class cap).").small().weak(),
+    );
+    egui::Grid::new("cheat_character").num_columns(8).spacing([10.0, 3.0]).show(ui, |ui| {
+        for h in ["", "Base", "Class", "Other", "New base", "", "Min-max", "Final"] {
+            ui.label(RichText::new(h).small().weak());
+        }
+        ui.end_row();
+        for r in &ch.rows {
+            let key = format!("char:{}", r.label);
+            let flash = flashing(st, ui, &key);
+            let tip = if r.note.is_empty() { format!("{} (cap {})", r.label, r.cap) } else { r.note.clone() };
+            ui.label(&r.label).on_hover_text(tip);
+            ui.label(r.base.to_string());
+            let dash = |v: Option<i32>| v.map_or("-".to_string(), |v| v.to_string());
+            ui.label(dash(r.class));
+            ui.label(dash(r.other));
+            let color = if flash { crate::theme::GOLD } else { ui.visuals().text_color() };
+            // FEPOR_CHEAT_TYPED="Str=10;HP now=5": text already typed in these fields (headless renders)
+            let seed = std::env::var("FEPOR_CHEAT_TYPED").ok().and_then(|v| {
+                v.split(';').find_map(|p| p.split_once('=').filter(|(l, _)| *l == r.label).map(|(_, v)| v.to_string()))
+            });
+            let text = st.cheat_amounts.entry(key.clone()).or_insert_with(|| seed.unwrap_or_default());
+            let value = typed(text);
+            let ok = value.is_some_and(|v| (r.min as i64..=r.max as i64).contains(&v));
+            let new_total = value.filter(|_| ok).map(|v| (v as i32 + r.class.unwrap_or(0) + r.other.unwrap_or(0)).min(r.cap));
+            let bad = !text.trim().is_empty() && !ok;
+            ui.add_sized(
+                [60.0, ui.spacing().interact_size.y],
+                egui::TextEdit::singleline(text).text_color(if bad { Color32::LIGHT_RED } else { ui.visuals().text_color() }),
+            );
+            let go = ui.add_enabled(ok, egui::Button::new("Apply"));
+            if let (true, Some(v)) = (go.clicked(), value) {
+                shared.cheats.request_stat(&r.label, v);
+                st.cheat_flash.insert(key.clone(), Instant::now());
+            }
+            ui.label(RichText::new(format!("{}-{}", r.min, r.max)).small().weak());
+            let final_total = new_total.filter(|_| value != Some(r.base as i64)).unwrap_or(r.total);
+            let final_color = if bad { Color32::LIGHT_RED } else { color };
+            ui.label(RichText::new(final_total.to_string()).color(final_color).strong());
+            ui.end_row();
+        }
+    });
+}
+
 fn cheat_row(ui: &mut egui::Ui, shared: &Shared, c: &fepor_core::cheats::CheatView) {
     let mut on = c.enabled;
-    ui.horizontal_wrapped(|ui| {
-        let label = if c.author.is_empty() {
-            c.name.clone()
-        } else {
-            format!("{}  [{}]", c.name, c.author)
-        };
-        if ui.add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label)).changed() {
+    let label = if c.author.is_empty() { c.name.clone() } else { format!("{}  [{}]", c.name, c.author) };
+    let mut tip = c.notes.join(" ");
+    if let Err(why) = &c.supported {
+        tip = format!("not supported: {why}");
+    }
+    ui.horizontal(|ui| {
+        if ui.add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label)).on_hover_text(tip).changed() {
             shared.cheats.set_enabled(&c.key, on);
         }
-        ui.label(RichText::new(c.kind.label()).small().weak());
+        if let Some(s) = &c.status {
+            ui.colored_label(Color32::LIGHT_RED, "not applied").on_hover_text(s);
+        }
+        if c.supported.is_err() {
+            ui.label(RichText::new("not supported").small().weak());
+        }
     });
-    if let Err(why) = &c.supported {
-        ui.label(RichText::new(format!("    not supported: {why}")).small().weak());
-    }
-    if let Some(s) = &c.status {
-        ui.colored_label(Color32::LIGHT_RED, format!("    not applied: {s}"));
-    }
-    for n in &c.notes {
-        ui.label(RichText::new(format!("    {n}")).small().weak());
-    }
 }
 
 fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) {

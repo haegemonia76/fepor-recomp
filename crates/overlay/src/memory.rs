@@ -114,8 +114,9 @@ impl MemoryView {
 
     /// One scripted step, in the words of the buttons: `new u32 unknown`, `new u16 equal 5`, `changed`,
     /// `unchanged`, `inc`, `dec`, `equal N`, `watch ADDR [width]`, `view ADDR`, `poke ADDR width VALUE [hold]`,
-    /// `select ADDR width [value]` (target of the export).
-    fn run_step(&mut self, link: &Link, line: &str) -> Result<(), String> {
+    /// `select ADDR width [value]` (target of the export), `apply AMOUNT KEY` (the Apply button of an add/set cheat).
+    fn run_step(&mut self, shared: &Shared, line: &str) -> Result<(), String> {
+        let link = &*shared.memory;
         let words: Vec<&str> = line.split_whitespace().collect();
         let num = |s: &str| memwatch::parse_number(s).ok_or(format!("{s}: not a number"));
         let width = |s: &str| Width::parse(s).ok_or(format!("{s}: not a width"));
@@ -134,6 +135,16 @@ impl MemoryView {
             ["watch", a] => self.watch(link, num(a)?, Width::U32),
             ["watch", a, w] => self.watch(link, num(a)?, width(w)?),
             ["view", a] => self.view_addr = format!("{:#010x}", num(a)?),
+            // `apply AMOUNT native:Cheat name`: the Apply button of an add/set cheat (ADR 0033), for headless runs
+            ["apply", n, key @ ..] if !key.is_empty() => {
+                let amount = n.replace(['_', ','], "").parse::<i64>().map_err(|_| format!("{n}: not a number"))?;
+                shared.cheats.request(&key.join(" "), amount);
+            }
+            // `stat LABEL VALUE`: Apply of a row of the character table (the displayed character's base)
+            ["stat", label @ .., v] if !label.is_empty() => {
+                let value = v.parse::<i64>().map_err(|_| format!("{v}: not a number"))?;
+                shared.cheats.request_stat(&label.join(" "), value);
+            }
             ["clear"] => link.send(Request::ClearScan),
             ["release", a] => link.send(Request::Release(num(a)?)),
             [cmd @ ("poke" | "write" | "hold"), a, w, v, rest @ ..] => {
@@ -161,7 +172,8 @@ impl MemoryView {
 
     /// Once per painted image, drawn page or not: poll the step file, run one scripted step when due, and
     /// rewrite the state file when the page's state changed.
-    pub fn tick(&mut self, link: &Link) {
+    pub fn tick(&mut self, shared: &Shared) {
+        let link = &*shared.memory;
         if let Some(l) = &mut self.live {
             l.polls += 1;
             if l.polls % LIVE_POLL_FRAMES == 1 {
@@ -186,7 +198,7 @@ impl MemoryView {
         if !self.script.is_empty() {
             if self.script_wait == 0 {
                 let step = self.script.pop().unwrap_or_default();
-                if let Err(e) = self.run_step(link, &step) {
+                if let Err(e) = self.run_step(shared, &step) {
                     eprintln!("memory script: {e}");
                 }
                 self.script_wait = if self.live.is_some() {
