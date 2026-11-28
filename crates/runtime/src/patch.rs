@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use fepor_core::cheats::Condition;
 use fepor_core::version;
 
 use crate::machine::RAM_SIZE;
@@ -19,6 +20,8 @@ pub struct SetId(u32);
 pub struct Patch {
     pub addr: u32,
     pub bytes: Vec<u8>,
+    /// Written only while it holds (checked at every write, on the RAM of that moment).
+    pub when: Option<Condition>,
 }
 
 impl Patch {
@@ -26,6 +29,20 @@ impl Patch {
         Patch {
             addr,
             bytes: bytes.into(),
+            when: None,
+        }
+    }
+
+    /// The same patch, written only while `when` holds.
+    pub fn when(mut self, when: Option<Condition>) -> Patch {
+        self.when = when;
+        self
+    }
+
+    /// Write the bytes unless the condition says no.
+    fn apply(&self, ram: &mut [u8]) {
+        if self.when.is_none_or(|c| c.holds(ram)) {
+            ram[self.range()].copy_from_slice(&self.bytes);
         }
     }
 
@@ -96,8 +113,42 @@ pub struct PatchEngine {
     /// Video retraces seen at the last hook run (several retraces between two runs make one frame).
     last_retrace: u64,
     pub trace: bool,
+    /// `FEPOR_DUMP_RAM=<dir>[:<every>[:<from>[:<to>]]]`: main RAM written to `<dir>/ram_<frame>.bin` every `<every>`
+    /// hook frames (default 120) from frame `<from>` to `<to>` (default: always), for offline searches
+    /// (tools/README.md).
+    dump: Option<RamDump>,
     /// The memory watcher's guest-thread side, served from `frame` (ADR 0048).
     watcher: Option<crate::watch::Watcher>,
+}
+
+/// What `FEPOR_DUMP_RAM` asks for.
+struct RamDump {
+    dir: std::path::PathBuf,
+    every: u64,
+    from: u64,
+    to: u64,
+}
+
+fn parse_dump(v: &str) -> RamDump {
+    // the numbers are taken from the right: a directory name may contain ':'
+    let mut parts: Vec<u64> = Vec::new();
+    let mut dir = v;
+    while parts.len() < 3 {
+        match dir.rsplit_once(':') {
+            Some((d, n)) if n.parse::<u64>().is_ok() => {
+                parts.push(n.parse().unwrap());
+                dir = d;
+            }
+            _ => break,
+        }
+    }
+    parts.reverse();
+    RamDump {
+        dir: dir.into(),
+        every: parts.first().copied().unwrap_or(120).max(1),
+        from: parts.get(1).copied().unwrap_or(0),
+        to: parts.get(2).copied().unwrap_or(u64::MAX),
+    }
 }
 
 /// The sets and their state as text, kept up to date by the engine for bug reports (the engine itself
@@ -118,6 +169,7 @@ impl PatchEngine {
         PatchEngine {
             trace: std::env::var("FEPOR_TRACE")
                 .is_ok_and(|v| v.split(',').any(|x| x == "patch" || x == "all")),
+            dump: std::env::var("FEPOR_DUMP_RAM").ok().map(|v| parse_dump(&v)),
             ..Default::default()
         }
     }
@@ -238,7 +290,7 @@ impl PatchEngine {
         let mut saved = Vec::with_capacity(e.set.patches.len());
         for p in &e.set.patches {
             saved.push(ram[p.range()].to_vec());
-            ram[p.range()].copy_from_slice(&p.bytes);
+            p.apply(ram);
         }
         if self.trace {
             eprintln!(
@@ -274,7 +326,7 @@ impl PatchEngine {
     pub fn reapply(&self, ram: &mut [u8]) {
         for e in self.sets.values().filter(|e| e.saved.is_some()) {
             for p in &e.set.patches {
-                ram[p.range()].copy_from_slice(&p.bytes);
+                p.apply(ram);
             }
         }
     }
@@ -292,7 +344,7 @@ impl PatchEngine {
             active += 1;
             if e.set.continuous {
                 for p in &e.set.patches {
-                    ram[p.range()].copy_from_slice(&p.bytes);
+                    p.apply(ram);
                 }
             }
         }
@@ -301,6 +353,15 @@ impl PatchEngine {
                 "patch: frame hook #{} (retrace {retraces}), {active} enabled sets",
                 self.frames
             );
+        }
+        if let Some(d) = &self.dump {
+            if self.frames.is_multiple_of(d.every) && (d.from..=d.to).contains(&self.frames) {
+                let _ = std::fs::create_dir_all(&d.dir);
+                let file = d.dir.join(format!("ram_{:06}.bin", self.frames));
+                if let Err(e) = std::fs::write(&file, &ram[..RAM_SIZE]) {
+                    eprintln!("patch: cannot write {}: {e}", file.display());
+                }
+            }
         }
         if let Some(mut w) = self.watcher.take() {
             w.service(self, ram);
@@ -466,5 +527,26 @@ mod tests {
         r[0x303] = 0;
         e.frame(6, &mut r);
         assert_eq!(r[0x303], 0, "disabled set no longer written");
+    }
+
+    #[test]
+    fn reapply_after_a_load_evaluates_the_guard_on_the_loaded_ram() {
+        use fepor_core::cheats::{Cmp, Condition};
+        let mut e = engine();
+        let mut r = ram();
+        let when = Condition { addr: 0x8000_2000, size: 1, cmp: Cmp::Ne, value: 0 };
+        let id = e
+            .register(set("cheat:guarded", vec![Patch::new(0x8000_1000, [9u8]).when(Some(when))], true))
+            .unwrap();
+        r[0x2000] = 1;
+        e.enable(id, &mut r).unwrap();
+        assert_eq!(r[0x1000], 9);
+        // a loaded state where the guard is false: nothing is written
+        r.fill(0);
+        e.reapply(&mut r);
+        assert_eq!(r[0x1000], 0);
+        r[0x2000] = 1;
+        e.reapply(&mut r);
+        assert_eq!(r[0x1000], 9);
     }
 }

@@ -1024,6 +1024,29 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         ui.label("Cheats are available once the game has started.");
         return;
     };
+    let list = shared.cheats.list();
+    ui.label(RichText::new("Native cheats").strong());
+    if let Some(e) = shared.cheats.native_error() {
+        ui.colored_label(Color32::LIGHT_RED, format!("cannot read your cheats file: {e}"));
+    }
+    let native: Vec<_> = list.iter().filter(|c| c.kind == fepor_core::cheats::Kind::Native).collect();
+    if native.is_empty() {
+        ui.label(format!("No native cheats for {game}."));
+    }
+    for c in native {
+        cheat_row(ui, shared, c);
+    }
+    ui.label(
+        RichText::new(
+            "Shipped with the game's addresses; add your own in cheats/<game id>.toml of the data folder (same \
+             name replaces a shipped one).",
+        )
+        .small()
+        .weak(),
+    );
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(RichText::new("Gecko and Action Replay codes").strong());
     let choosing = st.cheat_picker.is_some();
     if ui
         .add_enabled(
@@ -1056,53 +1079,47 @@ fn cheats(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         }
         None => {}
     }
-    ui.add_space(8.0);
-    ui.separator();
-    let list = shared.cheats.list();
-    if list.is_empty() {
-        ui.label(format!(
-            "No codes for {game} yet. Import the game's INI (for example GFEP01.ini from Dolphin)."
-        ));
+    ui.add_space(4.0);
+    let dolphin: Vec<_> = list.iter().filter(|c| c.kind != fepor_core::cheats::Kind::Native).collect();
+    if dolphin.is_empty() {
+        ui.label(format!("No codes for {game} yet. Import the game's INI (for example GFEP01.ini from Dolphin)."));
     }
-    for c in list {
-        let mut on = c.enabled;
-        ui.horizontal_wrapped(|ui| {
-            let label = if c.author.is_empty() {
-                c.name.clone()
-            } else {
-                format!("{}  [{}]", c.name, c.author)
-            };
-            if ui
-                .add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label))
-                .changed()
-            {
-                shared.cheats.set_enabled(&c.key, on);
-            }
-            ui.label(RichText::new(c.kind.label()).small().weak());
-        });
-        if let Err(why) = &c.supported {
-            ui.label(
-                RichText::new(format!("    not supported: {why}"))
-                    .small()
-                    .weak(),
-            );
-        }
-        if let Some(s) = &c.status {
-            ui.colored_label(Color32::LIGHT_RED, format!("    not applied: {s}"));
-        }
-        for n in &c.notes {
-            ui.label(RichText::new(format!("    {n}")).small().weak());
-        }
+    for c in dolphin {
+        cheat_row(ui, shared, c);
     }
     ui.add_space(8.0);
     ui.label(
         RichText::new(
-            "Codes hold their value every frame while on; turning one off puts the game's value back. Only plain \
+            "Cheats hold their value every frame while on; turning one off puts the game's value back. Only plain \
              writes to data run: conditionals, loops, pointers and code insertion are listed as not supported.",
         )
         .small()
         .weak(),
     );
+}
+
+fn cheat_row(ui: &mut egui::Ui, shared: &Shared, c: &fepor_core::cheats::CheatView) {
+    let mut on = c.enabled;
+    ui.horizontal_wrapped(|ui| {
+        let label = if c.author.is_empty() {
+            c.name.clone()
+        } else {
+            format!("{}  [{}]", c.name, c.author)
+        };
+        if ui.add_enabled(c.supported.is_ok(), egui::Checkbox::new(&mut on, label)).changed() {
+            shared.cheats.set_enabled(&c.key, on);
+        }
+        ui.label(RichText::new(c.kind.label()).small().weak());
+    });
+    if let Err(why) = &c.supported {
+        ui.label(RichText::new(format!("    not supported: {why}")).small().weak());
+    }
+    if let Some(s) = &c.status {
+        ui.colored_label(Color32::LIGHT_RED, format!("    not applied: {s}"));
+    }
+    for n in &c.notes {
+        ui.label(RichText::new(format!("    {n}")).small().weak());
+    }
 }
 
 fn card_info(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, path: &Path) {

@@ -14,6 +14,7 @@ pub mod image;
 pub mod memcard;
 pub mod memwatch;
 pub mod mods;
+pub mod native;
 pub mod paths;
 pub mod playtime;
 pub mod settings;
