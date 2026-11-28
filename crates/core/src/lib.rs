@@ -5,6 +5,7 @@ pub mod anonymise;
 pub mod applog;
 pub mod bugreport;
 pub mod capture;
+pub mod character;
 pub mod cheats;
 pub mod config;
 pub mod disc;

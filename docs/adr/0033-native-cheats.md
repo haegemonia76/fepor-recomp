@@ -48,17 +48,31 @@ An `add`/`set` cheat refuses `value`, `continuous` and a second write; `hold` re
 | Add bonus EXP / Set bonus EXP | `0x8033A724` u32, cap 99,999 | Field `+0x1C` (`"EvtPts:%7dP"`). The adjacent funds word is confirmed to be the displayed one, and the Apply path is the same, but **no screen showing bonus EXP is reachable in the prologue map** (it is in the preparation / save screens), so that this word is the bonus EXP the player sees is **not confirmed**. The cap 99,999 is the public AR code's, also unconfirmed on screen. |
 | Ike HP 99 (prologue) | `0x802BBB6C` u8, guarded by `0x802BBB50 == 0x80900E10` | Found by diffing the unit objects (stride `0x280`, `+0x1A8`) of Ike (19) and Boyd (18) in RAM dumps. Writing 7 made the unit hover window read `HP 7/19`; with the shipped cheat it reads 99. |
 
-### Ike's stats (ticket #66, prologue map, headless)
-| Cheat (set) | Address | Verified |
-| --- | --- | --- |
-| Set Ike current HP | `0x802BBB6C` u8 | the map hover window and the status screen read `HP 7 / 25` after Apply 7 |
-| Set Ike base max HP / Str / Mag / Skl / Spd / Def / Res | `0x80900E54..5B` (HP, Str, Mag, Skl, Spd, **not 0x59**, Def, Res) u8 | Apply 24 / 10 / 9 / 12 / 11 / 8 / 4: the status screen (Y on the map) reads max HP 25, Str 12, Mag 9, Skill 15, Sp 14, Def 8, Res 4. |
+## Character stats (ticket #66)
 
-All guarded by `0x802BBB50 == 0x80900E10`. What was found:
-- Unit objects: array from `0x802BB9C4`, stride `0x280` (Ike, Boyd, ...; empty slots are zero), table of pointers to them at `0x802D4744`. Object `+0x18C` is a pointer to the unit's record (heap), `+0x1A8` the current HP.
-- The record (`0x80900E10`) holds, at `+0x44..+0x4B`, the **base** stats; the screen shows base + a class bonus (Ike: HP +1, Str +2, Mag 0, Skl +3, Spd +3, Def 0, Res 0) clamped to the class caps (bytes `+0x4C..` hold caps 40/20/15/20/20/../20/20: writing 33 to Str displayed 20). That is why the cheats are named *base*; the displayed value is base + bonus, not the typed value.
-- The sixth byte (`0x80900E59`, where Luck would be) is **not** Luck: writing it changed nothing. Luck (6), level, EXP, Mv and Wt were not found. Writing guessed bytes of the unit object (`+0x198..0x1CB`, all at once) changed the course of the game; writing `0x80900E50/51` and `+0x198` blanked the screen. Nothing of that is shipped.
-- **Which unit the status screen shows**: not found. The prologue map has one player unit; "Next Unit" (R) stays on Ike, so no run could tell a global pointer/index from Ike's slot. Hence the stat cheats are for **Ike only** (the unit whose record the guard names), not "the displayed unit". Finding the link needs a map with several player units (not reachable headless without the first chapters).
+**What the page shows**: a *Character* section for the unit the game displays, one row per stat: `Base | Class | Other | Total | New base`. `Total` is what the status sheet shows; `Base` is the only value the cheat writes. **One semantic**: the input edits the *Base*, the row previews `-> new total = min(typed + Class + Other, cap)`, the range of the input (`min-max`) is shown on the row and an out-of-range input is refused inline (Apply disabled, red); the engine clamps again on Apply. `Class` and `Other` are read live from memory at every refresh, never hardcoded.
+
+**Schema** (`[character]` in a cheat TOML, one table per game; the player's file replaces the shipped one): `unit` (global word holding the address of the displayed unit object), `person_at` / `job_at` (offsets in the unit object of the person and job record pointers), optional `person_check` / `job_check` (globals that hold the same two pointers; the unit is refused when they disagree), and `[[character.row]]` with `label`, `base` (`{rec = "unit"|"person"|"job", off = N}`, one signed byte), optional `class`, `other`, `cap` (same form; a cap byte of 0 means none stored), `min`, `max_total` (highest total when no cap is stored), `max_total_of` (another, earlier row: current HP never exceeds max HP) and `note`. Code: `fepor_core::character`.
+
+**How the displayed unit is found** (Ch. 1 save of the maintainer's card, four player units, headless; `UP` / `DOWN` on the status sheet are "Next Unit"/previous, `RIGHT`/`LEFT` the pages, `Y` on the map opens it): RAM dumps with Ike and with Titania on the sheet, then the words that are equal across two dumps of the same unit and different between the units: `0x8033B12C` = the unit object (`0x802BB9C4` Ike, `0x802BC144` Titania), `0x8033B034` / `0x8033B038` = its person / job record pointers (the same global struct as the info window copy at `0x8033B144`). It follows the unit the game last displayed (sheet or map hover window); there is no cheap "a sheet is open" flag, so the page says "Open a character sheet (Y on the map)" only while no valid unit is there (before any unit was shown, or the pointers disagree / the records are not `PID_*` / `JID_*`). The name is read from the person record's id string (`PID_IKE` -> Ike), the class from the job record's (`JID_RANGER`).
+
+**Layout** (identical in the prologue and Ch. 1; unit objects from `0x802BB9C4`, stride `0x280`):
+| Part | Where | Notes |
+| --- | --- | --- |
+| person record (`unit+0x188`, heap, one per character) | `+0x00` pointer to `PID_*`; `+0x1D..0x24` HP Str Mag Skl Spd Lck Def Res | the character's own bonus: **Base**, what the cheat writes |
+| job record (`unit+0x18C`, heap, **shared by every unit of the class**) | `+0x00` pointer to `JID_*`; `+0x3D` Wt, `+0x3E` Mv; `+0x44..0x4B` class base HP..Res; `+0x4C..0x53` caps (HP 40, Str 20, Mag 15, ...; **Lck 0 = none**) | **Class**; never written (a write would change all units of the class; this is what the first version of this ticket did by mistake: it wrote the job record and called it "base") |
+| unit object | `+0x19A` level, `+0x19B` EXP, `+0x1A8` current HP, `+0x1AB..0x1B2` HP..Res **gains** (level-ups, Ike Lv 3: HP +2, Spd +2, Lck +1, Def +1, Res +2) | **Other** |
+
+Sheet = `min(person + job + gains, cap)`: checked on the sheet for Ike (prologue: 19/5/1/6/7/6/5/0 = person 1/2/0/3/3/6/0/0 + job 18/3/1/3/4/0/5/0; Ch. 1 Lv 3: 21/5/1/6/9/7/6/2 with the gains above) and Titania (Lv 1 Paladin: 33/12/4/13/14/11/11/7 = person 10/5/2/9/7/11/3/4 + job 23/7/2/4/7/0/8/3, no gains). **Other** therefore is the unit's level-up gains; weapon, support, status or item bonuses do not enter these sheet values (not seen, not modelled).
+
+**Ranges**: Base `0..(cap - Class - Other)` (higher would only be cut by the cap; stats), cap = the job record's cap byte; luck stores no cap: `max_total = 40` (tested: Lck 39 on Ike shows 40). Lv 1-20 (the stats are **not** recomputed), EXP 0-99, current HP 1..max HP. Bytes are signed; nothing outside `-128..127` can be written.
+
+| Row | Verified (headless, Ch. 1 save, frame dumps `shots/68-*.png`) |
+| --- | --- |
+| Ike Str, Mag, Lck, HP now | Apply 10 / 8 / 39 / 5: the sheet reads Str 13 (10 + class 3 + other 0), Mag 9 (8 + 1 + 0), Lck 40 (39 + 0 + 1, at the cap, drawn fine), HP 5/21 |
+| Titania (Next Unit) Skill | Apply 20: the sheet reads Skill 24 (20 + class 4 + 0) for the other unit; Def 3 unchanged at 11 (3 + 8) |
+
+Not verified: Lv, EXP, Def, Res, Spd, HP rows on the sheet (same mechanism, same offsets, not each applied and photographed); whether the person record (heap) is rebuilt from game data on a chapter load or saved with the card; Mv/Wt (class record: shipped as nothing because the only byte found is shared by the class); Hit/Avo/Atk etc. are derived.
 
 ## Research notes (not shipped: not verified)
 - **Bonus EXP screen**: see the table above (the funds screen was reached with the maintainer's first save, copy of the card, `FEPOR_MEMCARD_A`).

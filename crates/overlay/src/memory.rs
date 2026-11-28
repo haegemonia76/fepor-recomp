@@ -140,6 +140,11 @@ impl MemoryView {
                 let amount = n.replace(['_', ','], "").parse::<i64>().map_err(|_| format!("{n}: not a number"))?;
                 shared.cheats.request(&key.join(" "), amount);
             }
+            // `stat LABEL VALUE`: Apply of a row of the character table (the displayed character's base)
+            ["stat", label @ .., v] if !label.is_empty() => {
+                let value = v.parse::<i64>().map_err(|_| format!("{v}: not a number"))?;
+                shared.cheats.request_stat(&label.join(" "), value);
+            }
             ["clear"] => link.send(Request::ClearScan),
             ["release", a] => link.send(Request::Release(num(a)?)),
             [cmd @ ("poke" | "write" | "hold"), a, w, v, rest @ ..] => {

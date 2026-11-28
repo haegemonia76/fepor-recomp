@@ -190,6 +190,19 @@ impl Cheat {
         Ok(Applied { before, after, clamped: raw != after as i64 })
     }
 
+    /// The value an Add/Set cheat would change now (`None`: its condition does not hold, or it is a held cheat).
+    pub fn current(&self, ram: &[u8]) -> Option<u32> {
+        if !self.action.once() {
+            return None;
+        }
+        let w = self.writes.as_ref().ok()?.first()?;
+        if w.when.is_some_and(|c| !c.holds(ram)) {
+            return None;
+        }
+        let p = (w.addr & 0x3FFF_FFFF) as usize;
+        ram.get(p..p + w.bytes.len()).map(|b| b.iter().fold(0u32, |v, b| v << 8 | *b as u32))
+    }
+
     /// Identity used in the enabled lists (`gecko:Name`, `ar:Name`).
     pub fn key(&self) -> String {
         format!("{}:{}", self.kind.tag(), self.name)
@@ -202,6 +215,9 @@ pub struct Ini {
     /// Keys listed in `[Gecko_Enabled]` / `[ActionReplay_Enabled]`.
     pub enabled: Vec<String>,
 }
+
+/// Prefix of the request key of a character stat (never a cheat key: those start with the kind tag).
+const CHAR_KEY: &str = "char:";
 
 const RAM_MAX_WRITE: usize = 24 << 20;
 
@@ -420,6 +436,8 @@ pub struct CheatView {
     pub status: Option<String>,
     /// What the last Apply of an Add/Set cheat did (`Err`: why it did not).
     pub result: Option<Result<String, String>>,
+    /// The value an Add/Set cheat acts on, read by the guest thread a few times a second.
+    pub current: Option<u32>,
 }
 
 struct Entry {
@@ -427,6 +445,7 @@ struct Entry {
     enabled: bool,
     status: Option<String>,
     result: Option<Result<String, String>>,
+    current: Option<u32>,
 }
 
 #[derive(Default)]
@@ -440,6 +459,10 @@ struct Inner {
     entries: Vec<Entry>,
     /// Apply clicks waiting for the guest thread: (key, amount).
     requests: Vec<(String, i64)>,
+    /// The character table of the game and what the displayed unit looks like (ADR 0033, `crate::character`).
+    character: Option<crate::character::CharDef>,
+    character_view: Option<Result<crate::character::CharView, String>>,
+    ticks: u32,
 }
 
 /// `<data>/cheats.toml`: the enabled codes per game ID.
@@ -553,6 +576,7 @@ impl CheatStore {
                 cheat,
                 status: None,
                 result: None,
+                current: None,
             })
             .collect();
     }
@@ -570,7 +594,10 @@ impl CheatStore {
             .remove(game)
             .unwrap_or_else(|| ini.enabled.clone());
         let (native, native_error) = crate::native::load(game, &self.data.join("cheats").join(format!("{game}.toml")));
+        let (character, _) = crate::native::load_character(game, &self.data.join("cheats").join(format!("{game}.toml")));
         let mut inner = self.lock();
+        inner.character = character;
+        inner.character_view = None;
         inner.game = Some(game.into());
         inner.code = code;
         inner.native = native;
@@ -601,6 +628,7 @@ impl CheatStore {
                 supported: e.cheat.writes.as_ref().map(|_| ()).map_err(|s| s.clone()),
                 status: e.status.clone(),
                 result: e.result.clone(),
+                current: e.current,
             })
             .collect()
     }
@@ -677,13 +705,42 @@ impl CheatStore {
         }
     }
 
-    /// Apply the waiting Add/Set requests on `ram` (guest thread, once per frame) and record what each did.
+    /// The player clicked Apply on a row of the character table: write `typed` as that stat's base for the unit
+    /// the game displays, on the guest thread's next frame.
+    pub fn request_stat(&self, label: &str, typed: i64) {
+        let mut inner = self.lock();
+        if inner.character.is_some() {
+            inner.requests.push((format!("{CHAR_KEY}{label}"), typed));
+            self.pending.store(true, Ordering::Release);
+        }
+    }
+
+    /// The displayed character as the guest thread last read it (`None`: the game has no character table;
+    /// `Err`: no sheet is shown).
+    pub fn character(&self) -> Option<Result<crate::character::CharView, String>> {
+        let inner = self.lock();
+        inner.character.as_ref()?;
+        Some(inner.character_view.clone().unwrap_or_else(|| Err("Open a character sheet (Y on the map)".into())))
+    }
+
+    /// Once per frame on the guest thread: apply the waiting Add/Set and stat requests on `ram`, record what each
+    /// did, and a few times a second refresh what the page shows (current values, the displayed character).
     pub fn run_requests(&self, ram: &mut [u8]) {
-        if !self.pending.swap(false, Ordering::AcqRel) {
+        let pending = self.pending.swap(false, Ordering::AcqRel);
+        let mut inner = self.lock();
+        inner.ticks = inner.ticks.wrapping_add(1);
+        if !pending && !inner.ticks.is_multiple_of(6) {
             return;
         }
-        let mut inner = self.lock();
         for (key, amount) in std::mem::take(&mut inner.requests) {
+            if let Some(label) = key.strip_prefix(CHAR_KEY) {
+                if let Some(def) = &inner.character {
+                    if let Err(e) = def.apply(ram, label, amount) {
+                        eprintln!("cheats: stat {label}: {e}");
+                    }
+                }
+                continue;
+            }
             let Some(e) = inner.entries.iter_mut().find(|e| e.cheat.key() == key) else {
                 continue;
             };
@@ -696,6 +753,10 @@ impl CheatStore {
                 format!("{} -> {}{note}", a.before, a.after)
             }));
         }
+        for e in inner.entries.iter_mut().filter(|e| e.cheat.action.once()) {
+            e.current = e.cheat.current(ram);
+        }
+        inner.character_view = inner.character.as_ref().map(|d| d.view(ram));
     }
 
     /// The guest thread reports why a wanted code is not applied (`None`: it is). Does not move the generation.

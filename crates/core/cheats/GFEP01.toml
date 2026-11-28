@@ -7,7 +7,7 @@
 
 [[cheat]]
 name = "Add funds"
-description = "Adds the typed amount of gold once (cap 9,999,999). Nothing is held or reverted."
+description = "Adds the typed gold once (cap 9,999,999)."
 game = "GFEP01"
 kind = "add"
 max = 9999999
@@ -16,7 +16,7 @@ address = 0x8033A720
 
 [[cheat]]
 name = "Set funds"
-description = "Sets the gold to the typed value once (0 to 9,999,999). Nothing is held or reverted."
+description = "Sets the gold once (0 to 9,999,999)."
 game = "GFEP01"
 kind = "set"
 max = 9999999
@@ -25,7 +25,7 @@ address = 0x8033A720
 
 [[cheat]]
 name = "Add bonus EXP"
-description = "UNCONFIRMED address (no screen in the prologue shows bonus EXP). Adds the typed amount of bonus experience once (cap 99,999). Nothing is held or reverted."
+description = "UNCONFIRMED: the address is not shown by any screen reachable so far. Adds bonus EXP once (cap 99,999)."
 game = "GFEP01"
 kind = "add"
 max = 99999
@@ -34,7 +34,7 @@ address = 0x8033A724
 
 [[cheat]]
 name = "Set bonus EXP"
-description = "UNCONFIRMED address (no screen in the prologue shows bonus EXP). Sets the bonus experience to the typed value once (0 to 99,999). Nothing is held or reverted."
+description = "UNCONFIRMED: the address is not shown by any screen reachable so far. Sets bonus EXP once (0 to 99,999)."
 game = "GFEP01"
 kind = "set"
 max = 99999
@@ -43,7 +43,7 @@ address = 0x8033A724
 
 [[cheat]]
 name = "Ike HP 99 (prologue)"
-description = "Held kind: Ike's current HP is held at 99 every frame while on; turning it off puts back the value it had when turned on. The address is where the prologue map keeps Ike; it only applies while Ike's record is there."
+description = "Holds Ike's current HP at 99 while on (prologue map only); off puts back the value it had."
 game = "GFEP01"
 continuous = true
 [[cheat.write]]
@@ -55,111 +55,103 @@ address = 0x802BBB50
 size = 4
 value = 0x80900E10
 
-# Ike's stats in the prologue map (ADR 0033, ticket #66). The unit object of Ike is at 0x802BB9C4 and keeps a pointer
-# to his record at +0x18C (0x802BBB50); the record is a heap object, so every write is guarded by that pointer.
-# The record's bytes +0x44..+0x4B are the BASE stats HP, Str, Mag, Skl, Spd, (not Lck), Def, Res: the status
-# screen shows base + the class bonus (Ike: HP +1, Str +2, Skl +3, Spd +3), clamped to the class caps.
+# The character the status sheet shows (ADR 0033, ticket #66): the game keeps the address of the unit object it last
+# displayed at 0x8033B12C (status sheet, map hover window), and copies of the person (PID_*) and job (JID_*) record
+# pointers at 0x8033B034 / 0x8033B038. The unit object keeps them at +0x188 (person) and +0x18C (job). The sheet
+# shows min(person bonus + job base + unit gains, job cap); the cheat writes only the person bonus ("Base", a
+# record of that one character), never the job record (shared by every unit of the class) and never the unit's gains.
+#   person +0x1D..0x24  HP Str Mag Skl Spd Lck Def Res (character's own)
+#   job    +0x44..0x4B  the same, class base          job +0x4C..0x53 caps (0: none stored)
+#   unit   +0x1AB..0x1B2 the same, gains (level-ups)  unit +0x19A level, +0x19B EXP, +0x1A8 current HP
 
-[[cheat]]
-name = "Set Ike current HP (prologue)"
-description = "Sets Ike's current HP once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
+[character]
 game = "GFEP01"
-kind = "set"
-max = 255
-[[cheat.write]]
-address = 0x802bbb6c
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+unit = 0x8033B12C
+person_at = 0x188
+job_at = 0x18C
+person_check = 0x8033B034
+job_check = 0x8033B038
 
-[[cheat]]
-name = "Set Ike base max HP (prologue)"
-description = "Sets Ike's base HP once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
-game = "GFEP01"
-kind = "set"
-max = 99
-[[cheat.write]]
-address = 0x80900e54
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+[[character.row]]
+label = "Lv"
+base = { rec = "unit", off = 0x19A }
+min = 1
+max_total = 20
+note = "the stats are not recomputed"
 
-[[cheat]]
-name = "Set Ike base Str (prologue)"
-description = "Sets Ike's base strength once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
-game = "GFEP01"
-kind = "set"
-max = 99
-[[cheat.write]]
-address = 0x80900e55
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+[[character.row]]
+label = "EXP"
+base = { rec = "unit", off = 0x19B }
+max_total = 99
 
-[[cheat]]
-name = "Set Ike base Mag (prologue)"
-description = "Sets Ike's base magic once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
-game = "GFEP01"
-kind = "set"
-max = 99
-[[cheat.write]]
-address = 0x80900e56
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+[[character.row]]
+label = "HP"
+base = { rec = "person", off = 0x1D }
+class = { rec = "job", off = 0x44 }
+other = { rec = "unit", off = 0x1AB }
+cap = { rec = "job", off = 0x4C }
+max_total = 99
 
-[[cheat]]
-name = "Set Ike base Skl (prologue)"
-description = "Sets Ike's base skill once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
-game = "GFEP01"
-kind = "set"
-max = 99
-[[cheat.write]]
-address = 0x80900e57
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+[[character.row]]
+label = "HP now"
+base = { rec = "unit", off = 0x1A8 }
+min = 1
+max_total = 99
+max_total_of = "HP"
 
-[[cheat]]
-name = "Set Ike base Spd (prologue)"
-description = "Sets Ike's base speed once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
-game = "GFEP01"
-kind = "set"
-max = 99
-[[cheat.write]]
-address = 0x80900e58
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+[[character.row]]
+label = "Str"
+base = { rec = "person", off = 0x1E }
+class = { rec = "job", off = 0x45 }
+other = { rec = "unit", off = 0x1AC }
+cap = { rec = "job", off = 0x4D }
+max_total = 99
 
-[[cheat]]
-name = "Set Ike base Def (prologue)"
-description = "Sets Ike's base defense once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
-game = "GFEP01"
-kind = "set"
-max = 99
-[[cheat.write]]
-address = 0x80900e5a
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+[[character.row]]
+label = "Mag"
+base = { rec = "person", off = 0x1F }
+class = { rec = "job", off = 0x46 }
+other = { rec = "unit", off = 0x1AD }
+cap = { rec = "job", off = 0x4E }
+max_total = 99
 
-[[cheat]]
-name = "Set Ike base Res (prologue)"
-description = "Sets Ike's base resistance once. Only while Ike's record is where the prologue map keeps it. The status screen adds the class bonus and limits the result to the class cap."
-game = "GFEP01"
-kind = "set"
-max = 99
-[[cheat.write]]
-address = 0x80900e5b
-size = 1
-[cheat.write.when]
-address = 0x802BBB50
-value = 0x80900E10
+[[character.row]]
+label = "Skill"
+base = { rec = "person", off = 0x20 }
+class = { rec = "job", off = 0x47 }
+other = { rec = "unit", off = 0x1AE }
+cap = { rec = "job", off = 0x4F }
+max_total = 99
+
+[[character.row]]
+label = "Sp"
+base = { rec = "person", off = 0x21 }
+class = { rec = "job", off = 0x48 }
+other = { rec = "unit", off = 0x1AF }
+cap = { rec = "job", off = 0x50 }
+max_total = 99
+
+[[character.row]]
+label = "Lck"
+base = { rec = "person", off = 0x22 }
+class = { rec = "job", off = 0x49 }
+other = { rec = "unit", off = 0x1B0 }
+cap = { rec = "job", off = 0x51 }
+max_total = 40
+note = "no cap is stored for luck: 40 is the limit this table sets"
+
+[[character.row]]
+label = "Def"
+base = { rec = "person", off = 0x23 }
+class = { rec = "job", off = 0x4A }
+other = { rec = "unit", off = 0x1B1 }
+cap = { rec = "job", off = 0x52 }
+max_total = 99
+
+[[character.row]]
+label = "Res"
+base = { rec = "person", off = 0x24 }
+class = { rec = "job", off = 0x4B }
+other = { rec = "unit", off = 0x1B2 }
+cap = { rec = "job", off = 0x53 }
+max_total = 99

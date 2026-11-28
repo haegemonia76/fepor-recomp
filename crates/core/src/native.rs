@@ -35,6 +35,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::character::CharDef;
 use crate::cheats::{Action, Cheat, Cmp, Condition, Kind, Write};
 
 /// Main RAM size of the GameCube.
@@ -47,6 +48,8 @@ const SHIPPED: &[(&str, &str)] = &[("GFEP01", include_str!("../cheats/GFEP01.tom
 struct File {
     #[serde(default)]
     cheat: Vec<toml::Value>,
+    /// The character table of the game (`crate::character`).
+    character: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +243,40 @@ pub fn parse(text: &str, game: &str) -> Result<Vec<Cheat>, String> {
         out.push(cheat);
     }
     Ok(out)
+}
+
+/// The `[character]` table of a TOML text for `game` (`None`: there is none, or it names another game).
+fn parse_character(text: &str, game: &str) -> Result<Option<CharDef>, String> {
+    let file: File = toml::from_str(text).map_err(|e| e.to_string())?;
+    let Some(v) = file.character else { return Ok(None) };
+    let raw: crate::character::RawChar = v.try_into().map_err(|e: toml::de::Error| format!("[character]: {}", e.message()))?;
+    if raw.game.as_deref().is_some_and(|g| g != game) {
+        return Ok(None);
+    }
+    crate::character::compile(raw).map(Some).map_err(|e| format!("[character]: {e}"))
+}
+
+/// The character table of `game`: the shipped one, replaced by the player's file's when it has one. The second
+/// value says why a table could not be read.
+pub fn load_character(game: &str, user: &Path) -> (Option<CharDef>, Option<String>) {
+    let mut def = None;
+    let mut error = None;
+    for (id, text) in SHIPPED {
+        if *id == game {
+            match parse_character(text, game) {
+                Ok(d) => def = d,
+                Err(e) => error = Some(format!("the shipped character table is broken: {e}")),
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(user) {
+        match parse_character(&text, game) {
+            Ok(Some(d)) => def = Some(d),
+            Ok(None) => {}
+            Err(e) => error = Some(format!("{}: {e}", user.display())),
+        }
+    }
+    (def, error)
 }
 
 /// Put `more` after `base`, a cheat of the same name replacing the one it names.
@@ -506,6 +543,21 @@ address = 0x80001000
         assert_eq!(l.apply(99, &mut ram).unwrap().after, 20);
         assert_eq!(l.apply(0, &mut ram).unwrap().after, 1);
         assert_eq!(ram[0x1011], 0, "only one byte written");
+    }
+
+    #[test]
+    fn the_shipped_character_table_is_valid() {
+        for (game, text) in SHIPPED {
+            parse_character(text, game).unwrap_or_else(|e| panic!("{game}: {e}"));
+        }
+        let (d, e) = load_character("GFEP01", Path::new("/nonexistent"));
+        assert!(e.is_none());
+        let d = d.expect("GFEP01 ships a character table");
+        for l in ["Str", "Mag", "Skill", "Sp", "Lck", "Def", "Res", "HP", "HP now", "Lv", "EXP"] {
+            assert!(d.rows.iter().any(|r| r.label == l), "{l}");
+        }
+        assert!(parse_character("[character]\nunit = 1\n", "GFEP01").is_err());
+        assert_eq!(parse_character("", "GFEP01"), Ok(None));
     }
 
     #[test]
