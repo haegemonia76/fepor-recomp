@@ -1490,12 +1490,16 @@ dependencies = [
  "fepor-overlay",
  "fepor-runtime",
  "fepor-video",
+ "tempfile",
  "winit",
 ]
 
 [[package]]
 name = "fepor-gx"
 version = "0.1.1"
+dependencies = [
+ "fepor-core",
+]
 
 [[package]]
 name = "fepor-input"
@@ -1579,6 +1583,7 @@ dependencies = [
  "cc",
  "fepor-core",
  "fepor-gx",
+ "flate2",
  "tempfile",
  "thiserror 2.0.21",
 ]

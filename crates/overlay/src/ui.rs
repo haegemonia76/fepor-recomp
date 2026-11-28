@@ -15,6 +15,8 @@ use crate::shared::Shared;
 pub enum Page {
     Video,
     Audio,
+    Speed,
+    Capture,
     Language,
     Controls,
     Card,
@@ -22,20 +24,24 @@ pub enum Page {
     /// The memory watcher: shown only with the developer option (ADR 0048).
     Memory,
     Cheats,
+    States,
     Help,
     Quit,
 }
 
 impl Page {
-    pub const ALL: [Page; 10] = [
+    pub const ALL: [Page; 13] = [
         Page::Video,
         Page::Audio,
+        Page::Speed,
+        Page::Capture,
         Page::Language,
         Page::Controls,
         Page::Card,
         Page::Mods,
         Page::Memory,
         Page::Cheats,
+        Page::States,
         Page::Help,
         Page::Quit,
     ];
@@ -52,11 +58,14 @@ impl Page {
         match self {
             Page::Video => "Video",
             Page::Audio => "Audio",
+            Page::Speed => "Speed",
+            Page::Capture => "Capture",
             Page::Controls => "Controls",
             Page::Card => "Memory card",
             Page::Mods => "Mods",
             Page::Memory => "Memory",
             Page::Cheats => "Cheats",
+            Page::States => "Save states",
             Page::Language => "Language",
             Page::Help => "Help",
             Page::Quit => "Quit",
@@ -130,10 +139,11 @@ impl UiState {
 }
 
 /// Quit page: one button, no confirmation.
-fn quit(ui: &mut egui::Ui) {
+fn quit(ui: &mut egui::Ui, shared: &Shared) {
     ui.label("Leave the game and close the window.");
     if ui.button("Quit the game").clicked() {
-        // memory card writes already went to the file; nothing else needs flushing
+        // memory card writes already went to the file; a recording in progress is completed
+        shared.capture.finish();
         std::process::exit(0);
     }
 }
@@ -168,14 +178,100 @@ pub fn show(
     if stats != StatsMode::Off {
         stats_hud(root, &shared.stats(), stats == StatsMode::Full);
     }
+    toast(root);
+    capture_hud(root, &shared.capture);
     if open {
         settings_panel(root, st, shared);
     }
+    if let Some(text) = shared.notice() {
+        egui::Area::new(egui::Id::unique("pad notice"))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 10.0))
+            .interactable(false)
+            .show(root.ctx(), |ui| {
+                egui::Frame::new()
+                    .fill(crate::theme::BAR.gamma_multiply(0.92))
+                    .stroke(egui::Stroke::new(1.0, crate::theme::GOLD))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(text).color(Color32::WHITE));
+                    });
+            });
+    }
+}
+
+/// Whether the recording indicator or a capture message is on screen.
+pub fn capture_hud_shown(capture: &fepor_core::capture::Capture) -> bool {
+    capture.is_recording() || capture.toast().is_some()
+}
+
+/// The recording indicator and the last capture message, in the top-right corner.
+fn capture_hud(root: &mut egui::Ui, capture: &fepor_core::capture::Capture) {
+    let mut lines = Vec::new();
+    if let Some(s) = capture.recording_secs() {
+        lines.push((BAD, format!("REC {}:{:02}", s / 60, s % 60)));
+    }
+    if let Some(t) = capture.toast() {
+        lines.push((Color32::WHITE, t));
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let screen = root.max_rect();
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(screen.left() + 6.0, screen.bottom() - 60.0),
+        egui::vec2((screen.width() - 12.0).max(100.0), 54.0),
+    );
+    let ui = &mut root.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::bottom_up(egui::Align::Min)),
+    );
+    for (color, text) in lines.into_iter().rev() {
+        egui::Frame::new()
+            .fill(crate::theme::BAR.gamma_multiply(0.85))
+            .stroke(egui::Stroke::new(1.0, crate::theme::GOLD_DARK))
+            .corner_radius(4.0)
+            .inner_margin(4.0)
+            .show(ui, |ui| {
+                ui.label(RichText::new(text).small().color(color));
+            });
+    }
+}
+
+/// The save state line ("Saved slot 2"), at the bottom left for a few seconds.
+fn toast(root: &mut egui::Ui) {
+    let Some(text) = fepor_core::states::message() else {
+        return;
+    };
+    let r = root.max_rect();
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(r.left() + 8.0, r.bottom() - 40.0),
+        egui::vec2(520.0, 32.0),
+    );
+    let ui = &mut root.new_child(egui::UiBuilder::new().max_rect(rect));
+    egui::Frame::new()
+        .fill(crate::theme::BAR.gamma_multiply(0.9))
+        .stroke(egui::Stroke::new(1.0, crate::theme::GOLD_DARK))
+        .corner_radius(4.0)
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).color(Color32::WHITE));
+        });
 }
 
 const GOOD: Color32 = Color32::from_rgb(110, 220, 120);
 const WARN: Color32 = Color32::from_rgb(240, 200, 70);
 const BAD: Color32 = Color32::from_rgb(240, 90, 80);
+
+/// "x4", "x0.5", "uncapped".
+fn speed_text(factor: f32) -> String {
+    if fepor_core::speed::is_uncapped() {
+        format!("uncapped (x{factor:.1})")
+    } else {
+        format!("x{factor}")
+    }
+}
 
 fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
     use egui::RichText as T;
@@ -199,7 +295,16 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                     } else {
                         s.guest_fps
                     };
-                    line(ui, Color32::WHITE, format!("{fps:.0} fps"));
+                    let speed = fepor_core::speed::factor();
+                    if speed == 1.0 {
+                        line(ui, Color32::WHITE, format!("{fps:.0} fps"));
+                    } else {
+                        line(
+                            ui,
+                            Color32::WHITE,
+                            format!("{fps:.0} fps  {}", speed_text(speed)),
+                        );
+                    }
                     return;
                 }
                 line(
@@ -210,6 +315,10 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                         s.guest_fps, s.shown_fps, s.display_hz
                     ),
                 );
+                let speed = fepor_core::speed::factor();
+                if speed != 1.0 {
+                    line(ui, GOOD, format!("Speed {}", speed_text(speed)));
+                }
                 if let Some((avg, p99, worst)) = s.frame_summary() {
                     let color = if worst > avg * 2.0 { WARN } else { GOOD };
                     line(
@@ -306,6 +415,13 @@ fn stats_hud(root: &mut egui::Ui, s: &crate::stats::StatsSnapshot, full: bool) {
                     },
                     gpu,
                 );
+                if let Some(ms) = s.scaling_gpu_ms {
+                    line(
+                        ui,
+                        Color32::WHITE,
+                        format!("Scaling pass {ms:.2} ms on the GPU (FSR, filters)"),
+                    );
+                }
                 line(
                     ui,
                     Color32::GRAY,
@@ -362,14 +478,17 @@ fn settings_panel(root: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| match st.page {
             Page::Video => video(ui, shared),
             Page::Audio => audio(ui, shared),
+            Page::Speed => speed(ui, shared),
+            Page::Capture => capture(ui, shared),
             Page::Language => language(ui, shared),
             Page::Controls => controls(ui, st, shared),
             Page::Card => card(ui, st, shared),
             Page::Mods => crate::mods::page(ui, &mut st.mods, shared),
             Page::Memory => crate::memory::memory(ui, &mut st.memory, shared),
             Page::Cheats => cheats(ui, st, shared),
+            Page::States => states(ui, shared),
             Page::Help => help(ui, shared),
-            Page::Quit => quit(ui),
+            Page::Quit => quit(ui, shared),
         });
         ui.separator();
         ui.label(
@@ -409,15 +528,27 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     }
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Internal resolution"));
-    ui.add(
+    ui.add_enabled(
+        !s.video.fsr.is_on(),
         egui::Slider::new(&mut s.video.resolution, 1..=4)
             .custom_formatter(|v, _| format!("x{v:.0}  ({}x{})", 640 * v as u32, 528 * v as u32)),
     );
+    if s.video.fsr.is_on() {
+        ui.label(
+            RichText::new("Set by the FSR preset below, from the window's size.")
+                .small()
+                .weak(),
+        );
+    }
     ui.add_space(8.0);
     ui.label(crate::theme::caption("Picture shape"));
     for a in Aspect::ALL {
         ui.radio_value(&mut s.video.aspect, a, a.label());
     }
+    ui.add_space(8.0);
+    fsr(ui, &mut s.video.fsr);
+    ui.add_space(8.0);
+    filters(ui, &mut s.video.filters);
     ui.add_space(8.0);
     ui.checkbox(&mut s.video.fullscreen, "Fullscreen");
     ui.checkbox(
@@ -442,6 +573,53 @@ fn video(ui: &mut egui::Ui, shared: &Shared) {
     );
     if s != before {
         shared.settings.update(|x| *x = s);
+    }
+}
+
+/// AMD FSR 1 upscaling: while on, it picks the internal resolution from the window's size.
+fn fsr(ui: &mut egui::Ui, f: &mut fepor_core::settings::Fsr) {
+    use fepor_core::settings::FsrQuality;
+    ui.label(crate::theme::caption("Upscaling (AMD FSR 1)"));
+    for q in FsrQuality::ALL {
+        ui.radio_value(&mut f.quality, q, q.label());
+    }
+    if f.is_on() {
+        ui.label(
+            RichText::new("Renders smaller, upscales to the window.")
+                .small()
+                .weak(),
+        );
+        ui.label(RichText::new("Sharpness").small());
+        ui.add(
+            egui::Slider::new(&mut f.sharpness, 0.0..=1.0)
+                .custom_formatter(|x, _| format!("{x:.2}")),
+        );
+    }
+}
+
+/// The render filters: they change the picture only, never the overlay.
+fn filters(ui: &mut egui::Ui, f: &mut fepor_core::settings::Filters) {
+    use fepor_core::settings::{Filters, Mask};
+    ui.label(crate::theme::caption("Picture filters"));
+    let slider =
+        |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>| {
+            ui.label(RichText::new(label).small());
+            ui.add(egui::Slider::new(v, range).custom_formatter(|x, _| format!("{x:.2}")));
+        };
+    slider(ui, "Scanlines", &mut f.scanlines, 0.0..=1.0);
+    slider(ui, "Gamma", &mut f.gamma, 0.5..=2.0);
+    slider(ui, "Saturation", &mut f.saturation, 0.0..=2.0);
+    slider(ui, "Contrast", &mut f.contrast, 0.5..=1.5);
+    slider(ui, "Brightness", &mut f.brightness, -0.5..=0.5);
+    ui.label(RichText::new("Screen mask").small());
+    for m in Mask::ALL {
+        ui.radio_value(&mut f.mask, m, m.label());
+    }
+    if f.mask != Mask::Off {
+        slider(ui, "Mask strength", &mut f.mask_strength, 0.0..=1.0);
+    }
+    if ui.button("Reset filters").clicked() {
+        *f = Filters::default();
     }
 }
 
@@ -479,6 +657,121 @@ fn audio(ui: &mut egui::Ui, shared: &Shared) {
     }
 }
 
+/// Fast-forward and slow motion (ADR 0036): the speeds of the two held keys and the sound while they are used.
+fn speed(ui: &mut egui::Ui, shared: &Shared) {
+    use fepor_core::settings::SpeedAudio;
+    use fepor_core::speed::Speed;
+    let before = shared.settings.get();
+    let (mut fast, mut slow, mut sound) = (
+        before.game.fast_forward,
+        before.game.slow_motion,
+        before.audio.speed,
+    );
+    ui.label(crate::theme::caption(
+        "Fast-forward (hold Tab, or press the right stick)",
+    ));
+    egui::ComboBox::from_id_salt("fast_forward")
+        .width(240.0)
+        .selected_text(fast.label())
+        .show_ui(ui, |ui| {
+            for s in Speed::FAST {
+                ui.selectable_value(&mut fast, s, s.label());
+            }
+        });
+    ui.add_space(8.0);
+    ui.label(crate::theme::caption(
+        "Slow motion (hold `, or press the left stick)",
+    ));
+    egui::ComboBox::from_id_salt("slow_motion")
+        .width(240.0)
+        .selected_text(slow.label())
+        .show_ui(ui, |ui| {
+            for s in Speed::SLOW {
+                ui.selectable_value(&mut slow, s, s.label());
+            }
+        });
+    ui.add_space(8.0);
+    ui.label(crate::theme::caption("Sound at other speeds"));
+    egui::ComboBox::from_id_salt("speed_audio")
+        .width(240.0)
+        .selected_text(sound.label())
+        .show_ui(ui, |ui| {
+            for s in SpeedAudio::ALL {
+                ui.selectable_value(&mut sound, s, s.label());
+            }
+        });
+    if (fast, slow, sound)
+        != (
+            before.game.fast_forward,
+            before.game.slow_motion,
+            before.audio.speed,
+        )
+    {
+        shared.settings.update(|x| {
+            x.game.fast_forward = fast;
+            x.game.slow_motion = slow;
+            x.audio.speed = sound;
+        });
+    }
+    ui.add_space(6.0);
+    ui.add(
+        egui::Label::new(
+            "The whole game runs at the chosen speed. Uncapped runs as fast as this computer keeps up with and is always silent.",
+        )
+        .wrap(),
+    );
+}
+
+/// Screenshots and video recording; the same actions as F12 and F10.
+fn capture(ui: &mut egui::Ui, shared: &Shared) {
+    let c = &shared.capture;
+    ui.horizontal(|ui| {
+        if ui.button("Take a screenshot (F12)").clicked() {
+            c.request_screenshot();
+        }
+        let label = if c.is_recording() {
+            "Stop recording (F10)"
+        } else {
+            "Record a video (F10)"
+        };
+        if ui.button(label).clicked() {
+            c.toggle_recording();
+        }
+    });
+    ui.add_space(8.0);
+    let mut overlay = shared.settings.get().capture.overlay;
+    if ui
+        .checkbox(
+            &mut overlay,
+            "Include the overlay (menu, statistics, messages)",
+        )
+        .changed()
+    {
+        shared.settings.update(|x| x.capture.overlay = overlay);
+    }
+    ui.add_space(8.0);
+    ui.label("Pictures are taken at the internal resolution (Video page), without the window's borders and bars.");
+    ui.label(format!(
+        "Screenshots: {}",
+        shared.data_dir.join("screenshots").display()
+    ));
+    ui.label(format!(
+        "Videos: {}",
+        shared.data_dir.join("videos").display()
+    ));
+    ui.label(
+        RichText::new(
+            "Videos need ffmpeg: on the PATH, next to the game, or named by FEPOR_FFMPEG.",
+        )
+        .small()
+        .weak(),
+    );
+    if let Some(t) = c.toast() {
+        ui.add_space(6.0);
+        ui.label(t);
+    }
+}
+
 /// The language of the game's text. The game reads it once, when it starts.
 fn language(ui: &mut egui::Ui, shared: &Shared) {
     use fepor_core::settings::Language;
@@ -508,6 +801,59 @@ fn language(ui: &mut egui::Ui, shared: &Shared) {
     ui.add(egui::Label::new("This disc has one set of voices and movie soundtracks: no other audio language to choose.").wrap());
 }
 
+/// The gamepads plugged in: which one drives the game, and which one the sections below edit.
+fn pads_section(ui: &mut egui::Ui, st: &mut UiState, c: &mut fepor_input::Controls) {
+    ui.label(crate::theme::caption("Gamepads"));
+    let pads = c.pads().to_vec();
+    if pads.is_empty() {
+        ui.label(
+            RichText::new(
+                "No gamepad plugged in. Plug one in at any time: it gets the profile of its model \
+                 and plays the game at once. The keyboard works too.",
+            )
+            .small()
+            .color(crate::theme::DIM),
+        );
+        ui.add_space(8.0);
+        return;
+    }
+    let edited = c.edited_pad().map(|p| p.id);
+    let active = c.active_pad().map(|p| p.id);
+    egui::Grid::new("pads")
+        .striped(true)
+        .num_columns(3)
+        .show(ui, |ui| {
+            for pad in &pads {
+                if ui
+                    .radio(edited == Some(pad.id), pad.display_name())
+                    .clicked()
+                {
+                    c.select_pad(pad.id);
+                    st.pad_selected = None;
+                }
+                ui.label(if active == Some(pad.id) {
+                    "plays the game"
+                } else {
+                    ""
+                });
+                if let Some((text, hover)) = c.profile_label(pad.id) {
+                    ui.label(RichText::new(text).small().color(crate::theme::DIM))
+                        .on_hover_text(hover);
+                }
+                ui.end_row();
+            }
+        });
+    ui.label(
+        RichText::new(
+            "Every controller model has its own profile (buttons and button names below), picked \
+             automatically when it is plugged in. The pad plugged in or pressed last plays the game.",
+        )
+        .small()
+        .color(crate::theme::DIM),
+    );
+    ui.add_space(8.0);
+}
+
 fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     let Ok(mut c) = shared.controls.lock() else {
         return;
@@ -532,6 +878,9 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         ui.separator();
     }
     let cfg = c.config().clone();
+    let glyphs = c.glyphs();
+    let gamepad = c.gamepad_bindings().clone();
+    pads_section(ui, st, &mut c);
     ui.horizontal_wrapped(|ui| {
         ui.label(crate::theme::caption("Controller"));
         for (g, name) in [
@@ -540,7 +889,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
             (GlyphSet::Nintendo, "Nintendo"),
             (GlyphSet::PlayStation, "PlayStation"),
         ] {
-            if ui.radio(cfg.glyphs == g, name).clicked() {
+            if ui.radio(glyphs == g, name).clicked() {
                 c.set_glyphs(g);
                 st.pad_selected = None;
             }
@@ -554,9 +903,9 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         Some(source) => {
             ui.label(crate::theme::caption(format!(
                 "{} does:",
-                cfg.glyphs.source_label(source)
+                glyphs.source_label(source)
             )));
-            let current = cfg.bindings.gamepad.get(source).copied();
+            let current = gamepad.get(source).copied();
             ui.horizontal_wrapped(|ui| {
                 for a in Action::ALL {
                     if ui.selectable_label(current == Some(a), a.label()).clicked() {
@@ -572,7 +921,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         }
         None => {
             ui.label(
-                RichText::new(if cfg.glyphs == GlyphSet::GameCube {
+                RichText::new(if glyphs == GlyphSet::GameCube {
                     "Click a GameCube button, then press the input of your gamepad that should do it."
                 } else {
                     "Click a button on the controller, then choose the GameCube button it stands for."
@@ -600,7 +949,7 @@ fn controls(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         .show(ui, |ui| {
             for a in Action::ALL {
                 ui.label(a.label());
-                let names: Vec<&str> = cfg.sources_of(true, a);
+                let names: Vec<&str> = cfg.sources_of(true, None, a);
                 ui.label(if names.is_empty() {
                     "-".to_string()
                 } else {
@@ -882,7 +1231,10 @@ fn backups(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
     let mut keep = shared.settings.get().game.card_backups;
     ui.horizontal(|ui| {
         ui.label(crate::theme::caption("Backups kept (0 = off)"));
-        if ui.add(egui::DragValue::new(&mut keep).range(0..=50)).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut keep).range(0..=50))
+            .changed()
+        {
             shared.settings.update(|x| x.game.card_backups = keep);
         }
     });
@@ -902,7 +1254,11 @@ fn backups(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared) {
         });
     }
     if let Some(b) = queued {
-        let name = b.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = b
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         st.card_message = match memcard::queue_restore(&dir, &name) {
             Ok(()) => format!(
                 "The card of {} replaces the current one the next time the game starts (which is backed up first).",
@@ -1048,6 +1404,89 @@ fn export(card: &std::path::Path, dir: &std::path::Path) -> String {
     }
 }
 
+/// How long ago a slot was written, for the list.
+fn ago(t: std::time::SystemTime) -> String {
+    let s = t.elapsed().map_or(0, |d| d.as_secs());
+    match s {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{} h ago", s / 3600),
+        _ => format!("{} days ago", s / 86_400),
+    }
+}
+
+/// Save states (ADR 0035): eight slots, the quick save and load keys, the rewind buffer.
+fn states(ui: &mut egui::Ui, shared: &Shared) {
+    use fepor_core::states;
+    if states::slot_path(0).is_none() {
+        ui.label("Save states are not available (the game has not started).");
+        return;
+    }
+    ui.label("F5 saves and F7 loads the chosen slot, F6 chooses the next one. Hold F8 to rewind.");
+    ui.label(
+        RichText::new(
+            "A state holds the whole machine, the memory card included: loading one puts the card back as it was when the state was saved. The card as it is now is backed up first (see the Memory card page). Cheats and mods you have switched on are applied again after a load.",
+        )
+        .small()
+        .weak(),
+    );
+    ui.add_space(6.0);
+    let current = states::slot();
+    let infos = states::list();
+    for (i, info) in infos.iter().enumerate() {
+        let n = i as u8;
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(current == n, format!("Slot {}", n + 1))
+                .clicked()
+            {
+                states::set_slot(n);
+            }
+            if ui.button("Save").clicked() {
+                states::set_slot(n);
+                states::post(states::Command::Save(n));
+            }
+            if ui
+                .add_enabled(info.is_some(), egui::Button::new("Load"))
+                .clicked()
+            {
+                states::set_slot(n);
+                states::post(states::Command::Load(n));
+            }
+            match info {
+                Some(i) => ui.label(format!(
+                    "{}   {:.1} MB",
+                    ago(i.modified),
+                    i.bytes as f64 / 1e6
+                )),
+                None => ui.label(RichText::new("empty").weak()),
+            };
+        });
+    }
+    ui.add_space(10.0);
+    ui.separator();
+    let before = shared.settings.get().states;
+    let mut s = before.clone();
+    ui.checkbox(&mut s.rewind, "Keep a rewind buffer (a state every second)");
+    ui.add_enabled_ui(s.rewind, |ui| {
+        ui.add(
+            egui::Slider::new(&mut s.rewind_seconds, 10..=600)
+                .suffix(" s")
+                .text("History"),
+        );
+    });
+    if s.rewind {
+        ui.label(format!(
+            "Held now: {} s of play (at most {} MiB).",
+            states::rewind_seconds(),
+            states::REWIND_MEMORY_MIB
+        ));
+    }
+    if s != before {
+        shared.settings.update(|x| x.states = s);
+    }
+}
+
 fn help(ui: &mut egui::Ui, shared: &Shared) {
     ui.label("F1 (keyboard) or Guide / Back (gamepad): open and close this menu.");
     ui.label("While it is open the game sees no input.");
@@ -1056,6 +1495,20 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         "Navigation: arrows and Enter, D-pad / left stick and A, or the mouse. B or Esc closes.",
     );
     ui.label("PgUp / PgDn or LB / RB: previous / next page.");
+    ui.label(
+        "Hold Tab (right stick pressed): fast-forward. Hold ` (left stick pressed): slow motion.",
+    );
+    ui.label("F12: screenshot. F10: start / stop recording a video (Capture page).");
+    ui.add_space(6.0);
+    ui.label(format!(
+        "Playtime: {}",
+        fepor_core::playtime::format(shared.playtime_secs())
+    ));
+    ui.label(
+        RichText::new("Counted while the game runs with this menu closed.")
+            .small()
+            .weak(),
+    );
     ui.add_space(6.0);
     ui.label(format!("Data folder: {}", shared.data_dir.display()));
     ui.label(format!(
@@ -1066,6 +1519,22 @@ fn help(ui: &mut egui::Ui, shared: &Shared) {
         "Bindings: {}",
         shared.data_dir.join("input.toml").display()
     ));
+    ui.add_space(6.0);
+    let before = shared.settings.get().presence;
+    let mut on = before.enabled;
+    ui.checkbox(&mut on, "Discord rich presence");
+    if on != before.enabled {
+        shared.settings.update(|x| x.presence.enabled = on);
+    }
+    ui.label(
+        RichText::new(if before.client_id.is_empty() {
+            "Off by default; nothing is sent. It also needs presence.client_id in settings.toml."
+        } else {
+            "Shows that you are playing and for how long, to a running Discord client. Nothing else is sent."
+        })
+        .small()
+        .weak(),
+    );
     ui.add_space(6.0);
     let mut developer = shared.settings.get().developer;
     if ui

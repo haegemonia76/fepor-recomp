@@ -21,12 +21,18 @@ Static recompilation of *Fire Emblem: Path of Radiance* (GameCube, EU build `GFE
 - **HLE**: high-level emulation. Guest SDK functions (OS, DVD, PAD, CARD, AX, VI) replaced by native C++.
 - **LLE**: low-level emulation. Used only for the GX FIFO: guest code writes to the write-gather pipe and the runtime parses the CP/XF/BP command stream.
 - **GX backend**: renderer built on SDL_GPU consuming the parsed FIFO. Renders into a resizable virtual EFB.
-- **Virtual pad**: GameCube controller abstraction fed by the input layer (remapping, glyph sets Xbox/Nintendo/PlayStation).
-- **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler.
+- **Virtual pad**: GameCube controller abstraction fed by the input layer (remapping, glyph sets Xbox/Nintendo/PlayStation). Gamepads are hot-pluggable; each model has a **profile** (bindings and glyph set keyed by SDL GUID in `input.toml`), and the pad plugged in or pressed last feeds port 1 together with the keyboard (single-player game, port 1 only; ADR 0038).
+- **Render filters**: post-process of the presented image only (scanlines, gamma, saturation/contrast/brightness, screen mask); `[video.filters]` in `settings.toml`, Video page of the overlay, never applied to the EFB or the overlay (ADR 0039).
+- **FSR**: AMD FidelityFX Super Resolution 1 (EASU upscale, RCAS sharpening) in the presentation pass, before the render filters and never on the overlay; `[video.fsr]` in `settings.toml`, Video page of the overlay; while on it chooses the internal resolution from a quality preset (ADR 0042).
+- **Fiber**: host stack backing one guest `OSThread`; switched by the cooperative deterministic scheduler. A fiber is not saved: a **save state** rebuilds it from the guest's own stack (ADR 0035).
+- **Save state**: the whole machine (RAM, ARAM, hardware, GX and the video backend's EFB, threads as `Context`s, memory cards) as one byte string, taken and loaded at a poll point; kept in slots under `<data>/states/<game id>-v<version>`, and as a **rewind buffer** (a state every second, older ones as compressed differences).
+- **Resume variant**: a second compilation of a guest function that enters at a call return address or a loop head instead of at its start (`Jit::resume_entry`): how a loaded thread's host frames are rebuilt.
 - **Start / Origin**: a function start found by analysis and why (`Entry`, `Config`, `Call`, `TailCall`, `DataPointer`, `AddressLoad`, `Gap`). Untrusted origins are rejected when preceding code runs straight into them (mid-function labels).
 - **Data folder**: the single directory (`--data`, `RECOMPLAUNCHER_DATA`) where generated code, the build, saves, config, cache and logs live (ADR 0010).
+- **Playtime**: seconds the guest ran with the overlay closed, per game id, in `<data>/playtime.toml` (ADR 0045). **Presence**: opt-in Discord rich presence over local IPC (ADR 0045).
 - **Prepare**: the setup step (`fepor-recomp prepare`) that builds the game from the player's copy; **profile**: `packaging/recomplauncher.json`, the RecompLauncher integration file.
 - **Config**: shared TOML file read by CLI and GUI (disc path, output dir, function/jump-table overrides, runtime options).
+- **Guest clock**: real time scaled by the game speed (`crates/runtime/src/clock.rs`, ADR 0036). The time base, the retrace, the audio DMA and the sample counter all read it, so fast-forward and slow motion change the speed of the whole machine, not just the pacing of the frames.
 - **Trace**: opt-in (`FEPOR_TRACE`) log of guest calls, hardware register writes and GX commands, comparable with Dolphin.
 - **Message file**: `Mess/*.m` on the disc, the game's text (names, dialogue, menus) per chapter and language. `text-extract` / `text-build` convert it to an editable form and to a mod file (ADR 0040).
 - **Version table**: per-region address tables; only GFEP01 at first.

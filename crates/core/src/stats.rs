@@ -8,3 +8,5 @@ pub static RETRACES: AtomicU64 = AtomicU64::new(0);
 pub static AX_FRAMES: AtomicU64 = AtomicU64::new(0);
 /// Audio buffers (5 ms each) handed to the audio output.
 pub static AI_BUFFERS: AtomicU64 = AtomicU64::new(0);
+/// Game frames (efb copies to the external framebuffer) the renderer has finished.
+pub static GAME_FRAMES: AtomicU64 = AtomicU64::new(0);

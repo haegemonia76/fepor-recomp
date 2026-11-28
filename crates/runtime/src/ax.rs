@@ -1028,6 +1028,52 @@ impl Ax {
     }
 }
 
+impl Ax {
+    pub fn save(&self, w: &mut fepor_core::snap::W) {
+        w.u8(match self.state {
+            MailState::WaitingForCmdListSize => 0,
+            MailState::WaitingForCmdListAddress => 1,
+            MailState::WaitingForNextTask => 2,
+        });
+        w.u64(self.cmd_size as u64);
+        for &v in &self.cmdlist {
+            w.u16(v);
+        }
+        for b in &self.bufs {
+            for &v in b {
+                w.i32(v);
+            }
+        }
+        w.u16(self.compressor_pos);
+        w.u32(self.upload_mails);
+        w.u64(self.frames);
+        w.u64(self.unknown_cmds);
+        w.bool(self.reset_requested);
+    }
+
+    pub fn load(&mut self, r: &mut fepor_core::snap::R) {
+        self.state = match r.u8() {
+            1 => MailState::WaitingForCmdListAddress,
+            2 => MailState::WaitingForNextTask,
+            _ => MailState::WaitingForCmdListSize,
+        };
+        self.cmd_size = r.u64() as usize;
+        for v in self.cmdlist.iter_mut() {
+            *v = r.u16();
+        }
+        for b in self.bufs.iter_mut() {
+            for v in b.iter_mut() {
+                *v = r.i32();
+            }
+        }
+        self.compressor_pos = r.u16();
+        self.upload_mails = r.u32();
+        self.frames = r.u64();
+        self.unknown_cmds = r.u64();
+        self.reset_requested = r.bool();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -528,4 +528,25 @@ mod tests {
         e.frame(6, &mut r);
         assert_eq!(r[0x303], 0, "disabled set no longer written");
     }
+
+    #[test]
+    fn reapply_after_a_load_evaluates_the_guard_on_the_loaded_ram() {
+        use fepor_core::cheats::{Cmp, Condition};
+        let mut e = engine();
+        let mut r = ram();
+        let when = Condition { addr: 0x8000_2000, size: 1, cmp: Cmp::Ne, value: 0 };
+        let id = e
+            .register(set("cheat:guarded", vec![Patch::new(0x8000_1000, [9u8]).when(Some(when))], true))
+            .unwrap();
+        r[0x2000] = 1;
+        e.enable(id, &mut r).unwrap();
+        assert_eq!(r[0x1000], 9);
+        // a loaded state where the guard is false: nothing is written
+        r.fill(0);
+        e.reapply(&mut r);
+        assert_eq!(r[0x1000], 0);
+        r[0x2000] = 1;
+        e.reapply(&mut r);
+        assert_eq!(r[0x1000], 9);
+    }
 }

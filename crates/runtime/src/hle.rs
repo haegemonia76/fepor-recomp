@@ -193,8 +193,8 @@ pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
         return;
     }
 
-    if let Some(other) = sched::parked_at(target) {
-        sched::switch_to(me, other, token);
+    let alive = if let Some(other) = sched::parked_at(target) {
+        sched::switch_to(me, other, token)
     } else {
         // A context nobody has run from yet: a new thread starting at its saved PC.
         let ram = machine().ram_ptr();
@@ -210,13 +210,22 @@ pub extern "C" fn fepor_hle_OSLoadContext(c: *mut Context) {
                     "new thread entry {entry:#010x} (context {target:#010x}) has no generated function"
                 ))
             };
-            run(f, cp);
+            if run(f, cp) && sched::unwinding() {
+                return;
+            }
             // thread functions return into the SDK's exit stub (OSExitThread)
             let ret = cp.lr;
             if let Some(f) = guest_function(ret) {
                 run(f, cp);
             }
-        });
+        })
+    };
+    if !alive {
+        // A state load replaced the machine: abandon the host frames of this thread (the generated code
+        // returns when it sees the status, like for a thread resumed from an interrupt).
+        sched::set_unwinding();
+        c.spr[HLE_STATUS] = 1;
+        return;
     }
 
     // Resumed by someone else's OSLoadContext.
@@ -241,10 +250,66 @@ pub fn run(f: crate::abi::HostFn, c: &mut Context) -> bool {
     if crate::abi::jit_active() {
         // SAFETY: f is a compiled guest function.
         unsafe { f(c) };
-        return std::mem::take(&mut c.spr[crate::abi::SPR_UNWIND]) != 0;
+        let unwound = std::mem::take(&mut c.spr[crate::abi::SPR_UNWIND]) != 0;
+        if crate::sched::unwinding() {
+            // this host is abandoning every frame (a state load): keep the callers returning
+            c.spr[crate::abi::SPR_UNWIND] = 1;
+            return true;
+        }
+        return unwound;
     }
     // SAFETY: f is a generated function; the shim only catches fepor::Unwind.
     unsafe { fepor_call_unwindable(f, c) == 1 }
+}
+
+/// Continue a thread rebuilt from a save state (ADR 0035). The running thread continues at the loop head
+/// it was at (`POLL_PC`); a parked one does what `OSLoadContext` does when it wakes, then continues where
+/// the interrupted code or the save point is. The host frames the thread had are gone: the function that
+/// holds the continuation runs in its resume variant, and when it returns, `LR` (which the guest's own
+/// epilogue restored) names the call site of the caller, which resumes in turn, down to the thread's entry.
+pub fn resume_thread(c: &mut Context, id: usize, running: bool) {
+    let pc = if running {
+        c.spr[crate::abi::SPR_POLL_PC]
+    } else {
+        let Some((ctx, kind)) = sched::woken_as(id) else {
+            die_str("a thread rebuilt from a save state has no context to resume from")
+        };
+        restore(c, ctx);
+        load_cpu_sprs(c);
+        match kind {
+            ParkKind::AtSave => rd32(ctx + OFF_SRR0),
+            ParkKind::AfterIrq => {
+                let Some(frame) = sched::irq_frame(id) else {
+                    die_str("a thread parked in an interrupt has no interrupted state")
+                };
+                c.f = frame.f;
+                c.fpscr = frame.fpscr;
+                sched::set_irq_ctx(id, None);
+                sched::leave_irq(id);
+                frame.pc
+            }
+        }
+    };
+    resume_chain(c, pc);
+}
+
+fn resume_chain(c: &mut Context, mut pc: u32) {
+    loop {
+        let Some(f) = crate::abi::resume_function(pc) else {
+            die_str(&format!("no function to resume at {pc:#010x}"))
+        };
+        c.spr[crate::abi::SPR_RESUME_PC] = pc;
+        if run(f, c) {
+            return;
+        }
+        let ret = c.lr;
+        if let Some(f) = guest_function(ret) {
+            // the thread function returned into the SDK's exit stub (as in OSLoadContext)
+            run(f, c);
+            return;
+        }
+        pc = ret;
+    }
 }
 
 /// The runtime-implemented SDK functions by name, for the native code backend to call.

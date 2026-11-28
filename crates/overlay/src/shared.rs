@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,8 @@ struct Queue {
     pointer: Option<egui::Pos2>,
     /// Gamepad inputs currently held as navigation keys, with the time of their next repeat.
     held: HashMap<&'static str, (egui::Key, Instant)>,
+    /// The keyboard's modifier keys (Shift+Tab walks the widgets backwards, Shift-click and so on).
+    mods: egui::Modifiers,
 }
 
 pub struct Shared {
@@ -43,9 +45,13 @@ pub struct Shared {
     display_millihz: AtomicU32,
     ui_ppp_x100: AtomicU32,
     guest_fps_x100: AtomicU32,
+    playtime_secs: AtomicU64,
     /// Names of the playback devices, kept up to date by the audio thread.
     pub audio_devices: Arc<Mutex<Vec<String>>>,
+    /// Screenshots and video recording (F12, F10, the Capture page).
+    pub capture: Arc<fepor_core::capture::Capture>,
     stats: Mutex<StatsSnapshot>,
+    speed_keys: crate::speed::SpeedKeys,
     report_request: AtomicBool,
     report_message: Mutex<String>,
     report_hook: Mutex<Option<ReportHook>>,
@@ -96,14 +102,17 @@ impl Shared {
             settings,
             controls,
             cheats: Arc::new(fepor_core::cheats::CheatStore::new(data_dir.clone())),
+            capture: Arc::new(fepor_core::capture::Capture::new(data_dir.clone())),
             data_dir,
             memory: Arc::default(),
             card_path: Mutex::new(None),
             display_millihz: AtomicU32::new(0),
             guest_fps_x100: AtomicU32::new(0),
+            playtime_secs: AtomicU64::new(0),
             ui_ppp_x100: AtomicU32::new(0),
             audio_devices: Arc::default(),
             stats: Mutex::default(),
+            speed_keys: Default::default(),
             report_request: AtomicBool::new(false),
             report_message: Mutex::default(),
             report_hook: Mutex::default(),
@@ -125,6 +134,7 @@ impl Shared {
             q.held.clear();
         }
         self.tab_step.store(0, Ordering::Release);
+        self.speed_keys.release(&self.settings);
         if let Ok(mut c) = self.controls.lock() {
             if !open {
                 c.cancel_remap();
@@ -152,10 +162,22 @@ impl Shared {
         self.guest_fps_x100.load(Ordering::Relaxed) as f32 / 100.0
     }
 
+    /// Seconds played (this data folder, this game), published by the playtime counter in the game.
+    pub fn set_playtime_secs(&self, secs: u64) {
+        self.playtime_secs.store(secs, Ordering::Relaxed);
+    }
+
+    pub fn playtime_secs(&self) -> u64 {
+        self.playtime_secs.load(Ordering::Relaxed)
+    }
+
     /// The Help page asks for a bug report; the renderer makes it at its next frame, so that the picture
     /// on screen is in it.
     pub fn request_report(&self) {
-        *self.report_message.lock().unwrap_or_else(|e| e.into_inner()) = "Making the bug report...".into();
+        *self
+            .report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = "Making the bug report...".into();
         self.report_request.store(true, Ordering::Release);
     }
 
@@ -166,11 +188,17 @@ impl Shared {
 
     /// Where the report went or why it failed, for the Help page.
     pub fn set_report_message(&self, message: String) {
-        *self.report_message.lock().unwrap_or_else(|e| e.into_inner()) = message;
+        *self
+            .report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = message;
     }
 
     pub fn report_message(&self) -> String {
-        self.report_message.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.report_message
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The game process tells what the report should say about its state (threads, patches, ...).
@@ -237,11 +265,12 @@ impl Shared {
 
     /// The button-name family and the gamepad input `action` is bound to (the first by name).
     fn bound(&self, action: Action) -> Option<(fepor_input::GlyphSet, String)> {
-        let c = self.controls.lock().ok()?;
-        let cfg = c.config();
-        let mut sources = cfg.sources_of(false, action);
-        sources.sort_unstable();
-        Some((cfg.glyphs, sources.first()?.to_string()))
+        self.controls.lock().ok()?.icon_source(action)
+    }
+
+    /// The latest gamepad hot-plug notice, while it is fresh.
+    pub fn notice(&self) -> Option<String> {
+        self.controls.lock().ok()?.notice().map(String::from)
     }
 
     pub fn toggle(&self) {
@@ -264,12 +293,14 @@ impl Shared {
     }
 
     fn key(&self, key: egui::Key, pressed: bool, repeat: bool) {
-        self.push(egui::Event::Key {
+        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let modifiers = q.mods;
+        q.events.push(egui::Event::Key {
             key,
             physical_key: Some(key),
             pressed,
             repeat,
-            modifiers: Default::default(),
+            modifiers,
         });
     }
 
@@ -302,6 +333,40 @@ impl Shared {
                     if pressed && !repeat {
                         self.settings
                             .update(|s| s.video.stats = s.video.stats.next());
+                    }
+                    return true;
+                }
+                // Tab (fast-forward) and ` (slow motion) are held; a release always counts, a press only
+                // while the menu is closed
+                if matches!(code, KeyCode::Tab | KeyCode::Backquote) && (!pressed || !open) {
+                    if !*repeat {
+                        self.speed_keys
+                            .hold(&self.settings, *code == KeyCode::Tab, pressed);
+                    }
+                    return !open;
+                }
+                // save states: F5 save, F7 load, F6 next slot, F8 held rewinds (ADR 0035)
+                if matches!(code, KeyCode::F5 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8) {
+                    use fepor_core::states;
+                    match code {
+                        KeyCode::F8 => states::set_rewind_held(pressed),
+                        _ if !pressed || *repeat => {}
+                        KeyCode::F5 => states::post(states::Command::Save(states::slot())),
+                        KeyCode::F7 => states::post(states::Command::Load(states::slot())),
+                        _ => {
+                            states::set_slot(states::slot() + 1);
+                            states::set_message(format!("State slot {}", states::slot() + 1));
+                        }
+                    }
+                    return true;
+                }
+                if *code == KeyCode::F12 || *code == KeyCode::F10 {
+                    if pressed && !repeat {
+                        if *code == KeyCode::F12 {
+                            self.capture.request_screenshot();
+                        } else {
+                            self.capture.toggle_recording();
+                        }
                     }
                     return true;
                 }
@@ -352,6 +417,10 @@ impl Shared {
                 }
                 true
             }
+            WindowEvent::Focused(false) => {
+                self.speed_keys.release(&self.settings);
+                false
+            }
             WindowEvent::CursorMoved { position, .. } if open => {
                 let p = egui::pos2((position.x / scale) as f32, (position.y / scale) as f32);
                 let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -370,15 +439,24 @@ impl Shared {
                     MouseButton::Left => egui::PointerButton::Primary,
                     MouseButton::Right => egui::PointerButton::Secondary,
                     MouseButton::Middle => egui::PointerButton::Middle,
+                    // the side buttons of a mouse page through the tabs
+                    MouseButton::Back | MouseButton::Forward => {
+                        if *state == ElementState::Pressed {
+                            let step = if *button == MouseButton::Back { -1 } else { 1 };
+                            self.tab_step.fetch_add(step, Ordering::AcqRel);
+                        }
+                        return true;
+                    }
                     _ => return true,
                 };
                 let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let modifiers = q.mods;
                 if let Some(pos) = q.pointer {
                     q.events.push(egui::Event::PointerButton {
                         pos,
                         button: b,
                         pressed: *state == ElementState::Pressed,
-                        modifiers: Default::default(),
+                        modifiers,
                     });
                 }
                 true
@@ -402,6 +480,17 @@ impl Shared {
                 });
                 true
             }
+            WindowEvent::ModifiersChanged(m) => {
+                let m = m.state();
+                self.queue.lock().unwrap_or_else(|e| e.into_inner()).mods = egui::Modifiers {
+                    alt: m.alt_key(),
+                    ctrl: m.control_key(),
+                    shift: m.shift_key(),
+                    mac_cmd: false,
+                    command: m.control_key(),
+                };
+                false
+            }
             _ => false,
         }
     }
@@ -417,6 +506,13 @@ impl Shared {
             if pressed {
                 self.toggle();
             }
+            return true;
+        }
+        // right stick pressed: fast-forward, left stick pressed: slow motion (held; GameCube pads have no
+        // stick buttons, so the default bindings leave them free)
+        if matches!(source, "rightstick" | "leftstick") && (!pressed || !self.is_open()) {
+            self.speed_keys
+                .hold(&self.settings, source == "rightstick", pressed);
             return true;
         }
         if !self.is_open() {
@@ -536,6 +632,23 @@ mod tests {
         );
         assert!(!s.gamepad_input("guide", 1.0));
         assert!(s.is_open());
+    }
+
+    #[test]
+    fn keyboard_events_carry_the_modifier_keys() {
+        let (s, _dir) = shared();
+        s.set_open(true);
+        s.queue.lock().unwrap().mods.shift = true;
+        s.key(egui::Key::Tab, true, false);
+        let events = s.take_events();
+        assert!(matches!(
+            events[..],
+            [egui::Event::Key {
+                key: egui::Key::Tab,
+                modifiers: egui::Modifiers { shift: true, .. },
+                ..
+            }]
+        ));
     }
 
     #[test]
