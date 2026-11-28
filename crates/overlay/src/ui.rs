@@ -1154,9 +1154,10 @@ fn once_row(ui: &mut egui::Ui, st: &mut UiState, shared: &Shared, c: &fepor_core
         None => ui.label("-"),
     };
     let bad = !text.trim().is_empty() && amount.is_none();
-    ui.add(
+    // add_sized: a Grid cell would otherwise shrink the field to the width of its first frame
+    ui.add_sized(
+        [104.0, ui.spacing().interact_size.y],
         egui::TextEdit::singleline(text)
-            .desired_width(80.0)
             .hint_text(if c.action == Action::Add { "amount" } else { "value" })
             .text_color(if bad { Color32::LIGHT_RED } else { ui.visuals().text_color() }),
     );
@@ -1215,11 +1216,10 @@ fn character(
             let ok = value.is_some_and(|v| (r.min as i64..=r.max as i64).contains(&v));
             let new_total = value.filter(|_| ok).map(|v| (v as i32 + r.class.unwrap_or(0) + r.other.unwrap_or(0)).min(r.cap));
             let bad = !text.trim().is_empty() && !ok;
-            ui.add(egui::TextEdit::singleline(text).desired_width(44.0).text_color(if bad {
-                Color32::LIGHT_RED
-            } else {
-                ui.visuals().text_color()
-            }));
+            ui.add_sized(
+                [60.0, ui.spacing().interact_size.y],
+                egui::TextEdit::singleline(text).text_color(if bad { Color32::LIGHT_RED } else { ui.visuals().text_color() }),
+            );
             let go = ui.add_enabled(ok, egui::Button::new("Apply"));
             if let (true, Some(v)) = (go.clicked(), value) {
                 shared.cheats.request_stat(&r.label, v);
